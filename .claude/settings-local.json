@@ -1,0 +1,107 @@
+{
+  "enabledMcpjsonServers" : [
+    "cuttlefish"
+  ],
+  "hooks" : {
+    "Notification" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "PostToolUse" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ],
+        "matcher" : "Edit|Write|Bash"
+      }
+    ],
+    "SessionEnd" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "SessionStart" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "Stop" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "SubagentStart" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "SubagentStop" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate" : [
+      {
+        "hooks" : [
+          {
+            "command" : "cuttlefish hook",
+            "timeout" : 30,
+            "type" : "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove" : [
+      {
+        "hooks" : [
+          {
+            "timeout" : 1,
+            "type" : "http",
+            "url" : "http:\/\/localhost:19532\/hooks"
+          }
+        ]
+      }
+    ]
+  }
+}
