@@ -140,16 +140,14 @@ impl Database {
     pub fn get_all_chunks(&self) -> Result<Vec<Chunk>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT c.issue_id, c.chunk_index, c.chunk_text, c.embedding, i.identifier
+                "SELECT c.issue_id, c.embedding, i.identifier
                  FROM chunks c JOIN issues i ON c.issue_id = i.id",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(Chunk {
                     issue_id: row.get(0)?,
-                    chunk_index: row.get(1)?,
-                    chunk_text: row.get(2)?,
-                    embedding: row.get(3)?,
-                    identifier: row.get(4)?,
+                    embedding: row.get(1)?,
+                    identifier: row.get(2)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -159,17 +157,15 @@ impl Database {
     pub fn get_chunks_for_team(&self, team_key: &str) -> Result<Vec<Chunk>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT c.issue_id, c.chunk_index, c.chunk_text, c.embedding, i.identifier
+                "SELECT c.issue_id, c.embedding, i.identifier
                  FROM chunks c JOIN issues i ON c.issue_id = i.id
                  WHERE i.team_key = ?1",
             )?;
             let rows = stmt.query_map(rusqlite::params![team_key], |row| {
                 Ok(Chunk {
                     issue_id: row.get(0)?,
-                    chunk_index: row.get(1)?,
-                    chunk_text: row.get(2)?,
-                    embedding: row.get(3)?,
-                    identifier: row.get(4)?,
+                    embedding: row.get(1)?,
+                    identifier: row.get(2)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -402,8 +398,6 @@ impl Issue {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub issue_id: String,
-    pub chunk_index: usize,
-    pub chunk_text: String,
     pub embedding: Vec<u8>,
     pub identifier: String,
 }
