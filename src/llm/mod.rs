@@ -7,6 +7,7 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODEL: &str = "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+#[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
     api_key: String,
@@ -26,12 +27,6 @@ impl Message {
         }
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".into(),
-            content: content.into(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
