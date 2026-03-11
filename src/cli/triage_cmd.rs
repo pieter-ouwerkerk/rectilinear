@@ -179,10 +179,10 @@ impl<'a> App<'a> {
         self.status = match &self.phase {
             Phase::Loading => "Loading questions...".into(),
             Phase::Answering if self.show_desc => {
-                "↑↓=scroll description | d=close | Tab=fields | Ctrl+Enter=submit".into()
+                "↑↓=scroll description | d=close | Tab=fields | Ctrl+S=submit".into()
             }
             Phase::Answering => {
-                "Tab=next | Ctrl+Enter=submit | d=description | Esc=skip | Ctrl+C=quit".into()
+                "Tab=next | Ctrl+S=submit | d=description | Esc=skip | Ctrl+C=quit".into()
             }
             Phase::Submitting => "Generating proposal...".into(),
             Phase::Reviewing(_) => "a=accept | s=skip | q=quit".into(),
@@ -426,6 +426,11 @@ async fn handle_key(
                     } else {
                         app.focused_field - 1
                     };
+                }
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.phase = Phase::Submitting;
+                    app.update_status();
+                    spawn_proposal(app, llm, tx);
                 }
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.phase = Phase::Submitting;
