@@ -54,7 +54,7 @@ pub async fn handle_search(
         return Ok(());
     }
 
-    for (_i, result) in results.iter().enumerate() {
+    for result in &results {
         let priority = match result.priority {
             1 => "!!!".red().to_string(),
             2 => "!! ".yellow().to_string(),

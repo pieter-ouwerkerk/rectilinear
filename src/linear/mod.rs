@@ -108,6 +108,7 @@ struct TeamConnection {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct TeamNode {
     pub id: String,
     pub key: String,

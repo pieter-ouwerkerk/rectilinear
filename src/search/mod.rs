@@ -254,7 +254,7 @@ fn build_fts_query(input: &str) -> String {
     // Split into words, wrap each in quotes to handle special chars
     let words: Vec<_> = input
         .split_whitespace()
-        .map(|w| {
+        .filter_map(|w| {
             // Remove FTS5 special characters
             let clean: String = w
                 .chars()
@@ -266,7 +266,6 @@ fn build_fts_query(input: &str) -> String {
                 Some(format!("\"{}\"", clean))
             }
         })
-        .flatten()
         .collect();
 
     if words.is_empty() {
