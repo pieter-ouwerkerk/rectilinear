@@ -23,10 +23,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage configuration
+    /// Manage configuration (interactive if no subcommand given)
     Config {
         #[command(subcommand)]
-        action: ConfigAction,
+        action: Option<ConfigAction>,
     },
     /// Sync issues from Linear
     Sync {
@@ -195,9 +195,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Config { action } => match action {
-            ConfigAction::Set { key, value } => cli::config_cmd::handle_set(&key, &value)?,
-            ConfigAction::Get { key } => cli::config_cmd::handle_get(&key)?,
-            ConfigAction::Show => cli::config_cmd::handle_show()?,
+            Some(ConfigAction::Set { key, value }) => cli::config_cmd::handle_set(&key, &value)?,
+            Some(ConfigAction::Get { key }) => cli::config_cmd::handle_get(&key)?,
+            Some(ConfigAction::Show) => cli::config_cmd::handle_show()?,
+            None => cli::config_cmd::handle_interactive()?,
         },
         Commands::Serve => {
             let db = db::Database::open(&config::Config::db_path()?)?;
