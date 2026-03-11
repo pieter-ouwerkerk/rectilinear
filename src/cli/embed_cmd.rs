@@ -1,6 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
 
 use crate::config::Config;
 use crate::db::Database;
@@ -95,13 +96,16 @@ pub async fn handle_embed(
     }
 
     for (issue_num, issue) in issues.iter().enumerate() {
-        if debug && issue_num % 50 == 0 {
-            eprintln!(
-                "  chunking issue {}/{} (RSS: {}MB)",
+        if debug && issue_num % 10 == 0 {
+            eprint!(
+                "  chunking issue {}/{}, batch: {}/{} texts (RSS: {}MB)\n",
                 issue_num + 1,
                 issues.len(),
+                batch.len(),
+                max_texts_per_batch,
                 rss_mb().unwrap_or(0)
             );
+            std::io::stderr().flush().ok();
         }
         let chunks = embedding::chunk_text(
             &issue.title,
