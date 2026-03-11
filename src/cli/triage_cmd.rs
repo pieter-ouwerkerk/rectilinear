@@ -19,7 +19,9 @@ use crate::search::{self, SearchMode};
 const QUESTIONS_PROMPT: &str = r#"You are a seasoned engineering project manager helping triage Linear issues. Analyze the issue and produce 2-4 focused clarifying questions to determine the right priority.
 
 Respond with ONLY a JSON object in this format:
-{"questions": [{"id": "<short_snake_case_id>", "label": "<Short Label>", "question": "<The question>"}]}
+{"questions": [{"id": "<short_snake_case_id>", "label": "<Short Label>", "question": "<The question>", "suggested_answer": "<your best guess>"}]}
+
+For each question, provide a suggested_answer based on what you can infer from the issue context. The user can edit, replace, or accept these suggestions. If you're uncertain, phrase it as a guess (e.g., "Likely affects all users of..." or "Probably low frequency based on...").
 
 You may use Markdown in the question text: **bold** for emphasis, *italics* for examples, `backticks` for code/identifiers.
 
@@ -62,6 +64,8 @@ struct Question {
     id: String,
     label: String,
     question: String,
+    #[serde(default)]
+    suggested_answer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,8 +159,13 @@ impl<'a> App<'a> {
     fn set_questions(&mut self, questions: Vec<Question>) {
         self.answers = questions
             .iter()
-            .map(|_q| {
-                let ta = TextArea::default();
+            .map(|q| {
+                let mut ta = if let Some(ref suggestion) = q.suggested_answer {
+                    TextArea::new(suggestion.lines().map(String::from).collect())
+                } else {
+                    TextArea::default()
+                };
+                ta.set_style(Style::default().fg(Color::White));
                 ta
             })
             .collect();
@@ -1096,6 +1105,7 @@ fn default_questions() -> Vec<Question> {
             id: id.to_string(),
             label: label.to_string(),
             question: question.to_string(),
+            suggested_answer: None,
         })
         .collect()
 }
