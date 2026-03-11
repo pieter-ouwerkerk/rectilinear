@@ -168,6 +168,14 @@ enum ConfigAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::var("RECTILINEAR_DEBUG").is_ok() {
+        eprintln!(
+            "rectilinear {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("GIT_HASH")
+        );
+    }
+
     let cli = Cli::parse();
 
     // Initialize logging for non-serve commands
