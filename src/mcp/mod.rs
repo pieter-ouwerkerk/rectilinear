@@ -102,6 +102,30 @@ struct IssueContextArgs {
     similar_count: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct GetTriageQueueArgs {
+    /// Team key (e.g., "CUT")
+    team: String,
+    /// Max issues to return (default 10)
+    limit: Option<usize>,
+    /// Issue identifiers to skip (already triaged this session)
+    exclude: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct MarkTriagedArgs {
+    /// Issue identifier (e.g., "CUT-42")
+    id: String,
+    /// New priority (1=Urgent, 2=High, 3=Medium, 4=Low)
+    priority: i32,
+    /// Improved title (optional)
+    title: Option<String>,
+    /// Improved description (optional)
+    description: Option<String>,
+    /// Triage comment explaining the decision (optional)
+    comment: Option<String>,
+}
+
 #[tool(tool_box)]
 impl RectilinearMcp {
     pub fn new(db: Database, config: Config) -> Self {
@@ -397,6 +421,157 @@ impl RectilinearMcp {
 
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
+
+    #[tool(
+        name = "get_triage_queue",
+        description = "Get a batch of unprioritized issues for triage. Returns enriched issues with similar issues for context. Use exclude to skip already-processed issues."
+    )]
+    async fn get_triage_queue(
+        &self,
+        #[tool(aggr)] args: GetTriageQueueArgs,
+    ) -> Result<String, String> {
+        let all_issues = self
+            .db
+            .get_unprioritized_issues(Some(&args.team))
+            .map_err(|e| e.to_string())?;
+
+        let exclude_set: std::collections::HashSet<&str> = args
+            .exclude
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+
+        let filtered: Vec<_> = all_issues
+            .into_iter()
+            .filter(|i| !exclude_set.contains(i.identifier.as_str()))
+            .collect();
+
+        let limit = args.limit.unwrap_or(10);
+        let batch: Vec<_> = filtered.iter().take(limit).collect();
+
+        let total_remaining = self
+            .db
+            .count_unprioritized_issues(Some(&args.team))
+            .map_err(|e| e.to_string())?
+            .saturating_sub(exclude_set.len());
+
+        let embedder = Embedder::new(&self.config).ok();
+
+        let mut enriched = Vec::new();
+        for issue in &batch {
+            let description = issue
+                .description
+                .as_deref()
+                .map(|d| if d.len() > 2000 { &d[..2000] } else { d });
+
+            let similar = if let Some(ref embedder) = embedder {
+                let search_text = format!(
+                    "{}\n\n{}",
+                    issue.title,
+                    description.unwrap_or("")
+                );
+                search::find_duplicates(
+                    &self.db,
+                    &search_text,
+                    Some(&args.team),
+                    0.3,
+                    4,
+                    embedder,
+                    self.config.search.rrf_k,
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.issue_id != issue.id)
+                .take(3)
+                .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            enriched.push(serde_json::json!({
+                "identifier": issue.identifier,
+                "title": issue.title,
+                "description": description,
+                "state_name": issue.state_name,
+                "assignee_name": issue.assignee_name,
+                "project_name": issue.project_name,
+                "labels": issue.labels(),
+                "created_at": issue.created_at,
+                "similar_issues": similar,
+            }));
+        }
+
+        let result = serde_json::json!({
+            "queue": enriched,
+            "total_remaining": total_remaining,
+            "team": args.team,
+        });
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "mark_triaged",
+        description = "Mark an issue as triaged by setting priority and optionally updating title, description, and adding a triage comment. Combines update + comment into one call."
+    )]
+    async fn mark_triaged(
+        &self,
+        #[tool(aggr)] args: MarkTriagedArgs,
+    ) -> Result<String, String> {
+        if args.priority < 1 || args.priority > 4 {
+            return Err("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)".into());
+        }
+
+        let issue = self
+            .db
+            .get_issue(&args.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+
+        client
+            .update_issue(
+                &issue.id,
+                args.title.as_deref(),
+                args.description.as_deref(),
+                Some(args.priority),
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(ref comment_text) = args.comment {
+            client
+                .add_comment(&issue.id, comment_text)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        let updated = client
+            .fetch_single_issue(&issue.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+
+        let priority_label = match args.priority {
+            1 => "Urgent",
+            2 => "High",
+            3 => "Medium",
+            4 => "Low",
+            _ => "Unknown",
+        };
+
+        Ok(serde_json::json!({
+            "identifier": issue.identifier,
+            "priority": args.priority,
+            "priority_label": priority_label,
+            "title": args.title.as_deref().unwrap_or(&issue.title),
+            "status": "triaged",
+        })
+        .to_string())
+    }
 }
 
 #[tool(tool_box)]
@@ -415,9 +590,21 @@ impl ServerHandler for RectilinearMcp {
                 version: env!("CARGO_PKG_VERSION").into(),
             },
             instructions: Some(
-                "Rectilinear provides Linear issue search, duplicate detection, and issue management. \
-                 Use search_issues for keyword/semantic search, find_duplicates before creating new issues, \
-                 and issue_context to understand related work."
+                "Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
+                 ## Triage Workflow\n\
+                 When the user asks to triage issues:\n\
+                 1. Call get_triage_queue with the team key\n\
+                 2. For each issue, present a brief summary and ask 2-4 clarifying questions focused on impact, frequency, severity, and business context. Suggest best-guess answers.\n\
+                 3. Based on answers, propose: priority (1-4), improved title, improved description\n\
+                 4. After user confirms, call mark_triaged\n\
+                 5. Move to next issue. When batch exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
+                 ## Priority Framework\n\
+                 1=Urgent (production down, data loss, security)\n\
+                 2=High (major feature broken, significant user impact, no workaround)\n\
+                 3=Medium (degraded experience, workarounds exist)\n\
+                 4=Low (minor polish, nice-to-have)\n\n\
+                 ## Duplicate Handling\n\
+                 If similar_issues show >0.8 similarity, flag as potential duplicate. Ask user whether to merge, close as dup, or keep separate."
                     .into(),
             ),
         }
