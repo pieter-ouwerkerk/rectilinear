@@ -350,6 +350,8 @@ fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<
                     render(selected_idx, &typed, using_tab);
                 }
                 KeyCode::Enter => {
+                    // Disable raw mode before printing so \n includes \r
+                    terminal::disable_raw_mode()?;
                     println!();
                     if using_tab {
                         if selected_idx == current_idx {
@@ -362,7 +364,6 @@ fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<
                     } else if options.contains(&typed.as_str()) {
                         break Some(typed);
                     } else {
-                        terminal::disable_raw_mode()?;
                         eprintln!(
                             "  {} Invalid choice '{}', keeping '{}'",
                             "Warning:".yellow(),
@@ -389,6 +390,7 @@ fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<
                     render(selected_idx, &typed, using_tab);
                 }
                 KeyCode::Esc => {
+                    terminal::disable_raw_mode()?;
                     println!();
                     break None;
                 }
@@ -397,6 +399,7 @@ fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<
         }
     };
 
-    terminal::disable_raw_mode()?;
+    // Ensure raw mode is off (no-op if already disabled above)
+    let _ = terminal::disable_raw_mode();
     Ok(result)
 }
