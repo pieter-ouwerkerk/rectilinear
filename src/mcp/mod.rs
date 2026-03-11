@@ -10,6 +10,54 @@ use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 use crate::search::{self, SearchMode};
 
+/// Extract code-relevant search hints from issue title, description, and labels.
+/// Returns terms that Claude should search for in the codebase.
+fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    let combined = format!("{} {}", title, description);
+
+    // Extract file paths (e.g. src/foo.rs, Components/Bar.swift)
+    for word in combined.split_whitespace() {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
+        if (word.contains('/') && word.contains('.')) || word.ends_with(".rs") || word.ends_with(".ts") || word.ends_with(".swift") {
+            hints.push(word.to_string());
+        }
+    }
+
+    // Extract backtick-quoted identifiers (e.g. `WorktreeManager`, `cleanup()`)
+    for cap in combined.split('`').collect::<Vec<_>>().chunks(2) {
+        if cap.len() == 2 && !cap[1].is_empty() && cap[1].len() < 80 {
+            hints.push(cap[1].trim().to_string());
+        }
+    }
+
+    // Extract PascalCase and snake_case identifiers from title
+    for word in title.split_whitespace() {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        // PascalCase: at least 2 uppercase letters with lowercase between
+        let upper_count = word.chars().filter(|c| c.is_uppercase()).count();
+        if upper_count >= 2 && word.len() >= 4 && word.chars().next().map_or(false, |c| c.is_uppercase()) {
+            hints.push(word.to_string());
+        }
+        // snake_case
+        if word.contains('_') && word.chars().all(|c| c.is_alphanumeric() || c == '_') && word.len() >= 4 {
+            hints.push(word.to_string());
+        }
+    }
+
+    // Add labels as search terms
+    for label in labels {
+        if !label.is_empty() {
+            hints.push(label.clone());
+        }
+    }
+
+    // Deduplicate
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
 #[derive(Clone)]
 pub struct RectilinearMcp {
     db: Database,
@@ -504,6 +552,13 @@ impl RectilinearMcp {
                 Vec::new()
             };
 
+            // Extract search hints from title and description for code exploration
+            let code_search_hints = extract_code_hints(
+                &issue.title,
+                description.unwrap_or(""),
+                &issue.labels(),
+            );
+
             enriched.push(serde_json::json!({
                 "identifier": issue.identifier,
                 "title": issue.title,
@@ -514,6 +569,7 @@ impl RectilinearMcp {
                 "labels": issue.labels(),
                 "created_at": issue.created_at,
                 "similar_issues": similar,
+                "code_search_hints": code_search_hints,
             }));
         }
 
@@ -699,17 +755,15 @@ impl ServerHandler for RectilinearMcp {
                  ## Triage Workflow\n\
                  When the user asks to triage issues:\n\
                  1. Call get_triage_queue with the team key\n\
-                 2. For each issue, present a brief summary and ask 2-4 clarifying questions focused on impact, frequency, severity, and business context. Suggest best-guess answers.\n\
-                 3. Based on answers, propose: priority (1-4), improved title, improved description\n\
-                 4. After user confirms, call mark_triaged\n\
-                 5. Move to next issue. When batch exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
-                 ## Code-Informed Triage\n\
-                 You have access to the user's codebase and other MCP tools (e.g. Cuttlefish). Use them during triage:\n\
-                 - When an issue references specific code, files, or features, explore the codebase to understand current state\n\
-                 - Use code context to ask better follow-up questions (e.g. \"I see this component was refactored in commit X — is this issue still relevant?\")\n\
-                 - When improving issue descriptions, include relevant code references (file paths, function names, architectural context)\n\
-                 - If an issue is vague, search the codebase to identify what it likely refers to and suggest a more specific description\n\
-                 - Use Cuttlefish MCP tools (get_symbols, get_hover_info, find_references) to understand code structure when relevant\n\n\
+                 2. BEFORE asking the user questions about each issue, use the code_search_hints field to explore the codebase. \
+                 Search for the mentioned files, symbols, and keywords using Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references, get_hover_info). \
+                 Spend 2-4 tool calls per issue understanding the current code state.\n\
+                 3. Present a brief summary of the issue AND what you found in the code. Then ask 2-4 clarifying questions that incorporate your code findings \
+                 (e.g. \"I found WorktreeManager.cleanup() at src/worktree.rs:142 — it already handles orphaned worktrees. Is this issue about a gap in that logic, or something else entirely?\"). \
+                 Suggest best-guess answers.\n\
+                 4. Based on answers, propose: priority (1-4), improved title, improved description (include relevant file paths and code references in the description)\n\
+                 5. After user confirms, call mark_triaged\n\
+                 6. Move to next issue. When batch exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
                  ## Priority Framework\n\
                  1=Urgent (production down, data loss, security)\n\
                  2=High (major feature broken, significant user impact, no workaround)\n\
