@@ -288,38 +288,115 @@ fn prompt_secret(label: &str, current: Option<&str>) -> Result<Option<String>> {
     }
 }
 
-/// Prompt for a choice from a fixed set of options.
+/// Prompt for a choice from a fixed set of options. Tab cycles through options.
 fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<String>> {
-    let options_str = options
-        .iter()
-        .map(|o| {
-            if *o == current {
-                format!("[{}]", o).bold().to_string()
-            } else {
-                o.to_string()
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use crossterm::terminal;
+
+    let current_idx = options.iter().position(|o| *o == current).unwrap_or(0);
+    let mut selected_idx = current_idx;
+    let mut typed = String::new();
+    let mut using_tab = false;
+
+    let render = |selected: usize, typed: &str, using_tab: bool| {
+        let options_str = options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                if using_tab && i == selected {
+                    format!("[{}]", o).bold().to_string()
+                } else if !using_tab && i == current_idx {
+                    format!("[{}]", o).bold().to_string()
+                } else {
+                    o.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let input_display = if using_tab {
+            options[selected].to_string()
+        } else {
+            typed.to_string()
+        };
+
+        print!("\r\x1b[K{}: {} > {}", label, options_str, input_display);
+        io::stdout().flush().ok();
+    };
+
+    terminal::enable_raw_mode()?;
+    render(selected_idx, &typed, using_tab);
+
+    let result = loop {
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    if !using_tab {
+                        using_tab = true;
+                        typed.clear();
+                    }
+                    if key.code == KeyCode::BackTab {
+                        selected_idx = if selected_idx == 0 {
+                            options.len() - 1
+                        } else {
+                            selected_idx - 1
+                        };
+                    } else {
+                        selected_idx = (selected_idx + 1) % options.len();
+                    }
+                    render(selected_idx, &typed, using_tab);
+                }
+                KeyCode::Enter => {
+                    println!();
+                    if using_tab {
+                        if selected_idx == current_idx {
+                            break None;
+                        } else {
+                            break Some(options[selected_idx].to_string());
+                        }
+                    } else if typed.is_empty() {
+                        break None;
+                    } else if options.contains(&typed.as_str()) {
+                        break Some(typed);
+                    } else {
+                        terminal::disable_raw_mode()?;
+                        eprintln!(
+                            "  {} Invalid choice '{}', keeping '{}'",
+                            "Warning:".yellow(),
+                            typed,
+                            current
+                        );
+                        break None;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if using_tab {
+                        using_tab = false;
+                        selected_idx = current_idx;
+                    }
+                    typed.push(c);
+                    render(selected_idx, &typed, using_tab);
+                }
+                KeyCode::Backspace => {
+                    if using_tab {
+                        using_tab = false;
+                        selected_idx = current_idx;
+                    }
+                    typed.pop();
+                    render(selected_idx, &typed, using_tab);
+                }
+                KeyCode::Esc => {
+                    println!();
+                    break None;
+                }
+                _ => {}
+            }
+        }
+    };
 
-    print!("{}: {} > ", label, options_str);
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-
-    if trimmed.is_empty() {
-        Ok(None)
-    } else if options.contains(&trimmed) {
-        Ok(Some(trimmed.to_string()))
-    } else {
-        eprintln!(
-            "  {} Invalid choice '{}', keeping '{}'",
-            "Warning:".yellow(),
-            trimmed,
-            current
-        );
-        Ok(None)
-    }
+    terminal::disable_raw_mode()?;
+    Ok(result)
 }
