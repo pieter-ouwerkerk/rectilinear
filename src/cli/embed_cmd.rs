@@ -71,6 +71,8 @@ pub async fn handle_embed(
     let max_texts_per_batch = 50;
     let max_tokens_per_batch: usize = 20_000;
 
+    let debug = std::env::var("RECTILINEAR_DEBUG").is_ok();
+
     let mut total_chunks = 0usize;
     let mut embedded_count = 0usize;
     let mut api_calls = 0usize;
@@ -106,17 +108,19 @@ pub async fn handle_embed(
                 // Embed the batch
                 let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
                 api_calls += 1;
-                pb.suspend(|| {
-                    let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
-                    eprintln!(
-                        "  [batch {}] {} texts, ~{}k tokens, {} pending issues{}",
-                        api_calls,
-                        texts.len(),
-                        batch_tokens / 1000,
-                        pending.len(),
-                        rss,
-                    );
-                });
+                if debug {
+                    pb.suspend(|| {
+                        let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
+                        eprintln!(
+                            "  [batch {}] {} texts, ~{}k tokens, {} pending issues{}",
+                            api_calls,
+                            texts.len(),
+                            batch_tokens / 1000,
+                            pending.len(),
+                            rss,
+                        );
+                    });
+                }
                 let embeddings = embedder.embed_batch(&texts).await?;
 
                 for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
@@ -156,16 +160,18 @@ pub async fn handle_embed(
     if !batch.is_empty() {
         let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
         api_calls += 1;
-        pb.suspend(|| {
-            let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
-            eprintln!(
-                "  [batch {} final] {} texts, ~{}k tokens{}",
-                api_calls,
-                texts.len(),
-                batch_tokens / 1000,
-                rss,
-            );
-        });
+        if debug {
+            pb.suspend(|| {
+                let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
+                eprintln!(
+                    "  [batch {} final] {} texts, ~{}k tokens{}",
+                    api_calls,
+                    texts.len(),
+                    batch_tokens / 1000,
+                    rss,
+                );
+            });
+        }
         let embeddings = embedder.embed_batch(&texts).await?;
 
         for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
