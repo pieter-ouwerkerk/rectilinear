@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use serde::Deserialize;
 use std::io;
 use std::sync::Arc;
@@ -23,7 +23,7 @@ Respond with ONLY a JSON object in this format:
 
 You may use Markdown in the question text: **bold** for emphasis, *italics* for examples, `backticks` for code/identifiers.
 
-Focus on: impact (users affected, blocking?), frequency (how often?), severity (crash vs cosmetic), business context.
+Keep questions concise (one sentence each). Focus on: impact (users affected, blocking?), frequency (how often?), severity (crash vs cosmetic), business context.
 
 Priority levels:
 1 = Urgent (production down, data loss, security)
@@ -81,10 +81,19 @@ enum Phase {
 
 enum AppEvent {
     Key(KeyEvent),
+    Resize,
     QuestionsReady(Vec<Question>),
-    SimilarReady(String),
+    SimilarReady(Vec<SimilarIssue>),
     ProposalReady(Result<TriageProposal>),
     ApplyDone(Result<()>),
+}
+
+#[derive(Clone)]
+struct SimilarIssue {
+    identifier: String,
+    title: String,
+    priority: &'static str,
+    similarity: f32,
 }
 
 struct App<'a> {
@@ -95,11 +104,14 @@ struct App<'a> {
     questions: Vec<Question>,
     answers: Vec<TextArea<'a>>,
     focused_field: usize,
-    similar_context: String,
+    similar_issues: Vec<SimilarIssue>,
+    similar_loading: bool,
+    desc_scroll: u16,
     applied: usize,
     skipped: usize,
     status: String,
     should_quit: bool,
+    show_desc: bool,
 }
 
 impl<'a> App<'a> {
@@ -113,11 +125,14 @@ impl<'a> App<'a> {
             questions: Vec::new(),
             answers: Vec::new(),
             focused_field: 0,
-            similar_context: String::new(),
+            similar_issues: Vec::new(),
+            similar_loading: true,
+            desc_scroll: 0,
             applied: 0,
             skipped: 0,
             status: "Loading questions...".into(),
             should_quit: false,
+            show_desc: false,
         }
     }
 
@@ -129,19 +144,41 @@ impl<'a> App<'a> {
         self.max_issues.saturating_sub(self.current_index + 1)
     }
 
+    fn issue_url(&self) -> String {
+        // Linear URL format: https://linear.app/issue/<identifier>
+        format!(
+            "https://linear.app/issue/{}",
+            self.current_issue().identifier
+        )
+    }
+
     fn set_questions(&mut self, questions: Vec<Question>) {
         self.answers = questions
             .iter()
-            .map(|q| {
-                let mut ta = TextArea::default();
-                ta.set_placeholder_text(&q.question);
+            .map(|_q| {
+                let ta = TextArea::default();
                 ta
             })
             .collect();
         self.questions = questions;
         self.focused_field = 0;
         self.phase = Phase::Answering;
-        self.status = "Tab=next field | Ctrl+Enter=submit | Esc=skip | Ctrl+C=quit".into();
+        self.update_status();
+    }
+
+    fn update_status(&mut self) {
+        self.status = match &self.phase {
+            Phase::Loading => "Loading questions...".into(),
+            Phase::Answering if self.show_desc => {
+                "↑↓=scroll description | d=close | Tab=fields | Ctrl+Enter=submit".into()
+            }
+            Phase::Answering => {
+                "Tab=next | Ctrl+Enter=submit | d=description | Esc=skip | Ctrl+C=quit".into()
+            }
+            Phase::Submitting => "Generating proposal...".into(),
+            Phase::Reviewing(_) => "a=accept | s=skip | q=quit".into(),
+            Phase::Applying => "Applying to Linear...".into(),
+        };
     }
 
     fn advance(&mut self) {
@@ -152,9 +189,12 @@ impl<'a> App<'a> {
             self.phase = Phase::Loading;
             self.questions.clear();
             self.answers.clear();
-            self.similar_context.clear();
+            self.similar_issues.clear();
+            self.similar_loading = true;
             self.focused_field = 0;
-            self.status = "Loading questions...".into();
+            self.desc_scroll = 0;
+            self.show_desc = false;
+            self.update_status();
         }
     }
 
@@ -164,7 +204,15 @@ impl<'a> App<'a> {
             .zip(self.answers.iter())
             .map(|(q, a)| {
                 let answer = a.lines().join("\n");
-                format!("{}: {}", q.label, if answer.is_empty() { "(skipped)" } else { &answer })
+                format!(
+                    "{}: {}",
+                    q.label,
+                    if answer.is_empty() {
+                        "(skipped)"
+                    } else {
+                        &answer
+                    }
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -223,15 +271,21 @@ pub async fn handle_triage(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-    // Spawn keyboard reader
-    let tx_key = tx.clone();
+    // Spawn event reader (keys + resize)
+    let tx_evt = tx.clone();
     tokio::spawn(async move {
         loop {
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    if tx_key.send(AppEvent::Key(key)).is_err() {
-                        break;
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        if tx_evt.send(AppEvent::Key(key)).is_err() {
+                            break;
+                        }
                     }
+                    Ok(Event::Resize(_, _)) => {
+                        tx_evt.send(AppEvent::Resize).ok();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -256,16 +310,20 @@ pub async fn handle_triage(
                     )
                     .await;
                 }
+                AppEvent::Resize => {
+                    // Just redraw on next loop iteration
+                }
                 AppEvent::QuestionsReady(questions) => {
                     app.set_questions(questions);
                 }
-                AppEvent::SimilarReady(ctx) => {
-                    app.similar_context = ctx;
+                AppEvent::SimilarReady(issues) => {
+                    app.similar_issues = issues;
+                    app.similar_loading = false;
                 }
                 AppEvent::ProposalReady(result) => match result {
                     Ok(proposal) => {
-                        app.status = "a=accept | s=skip | q=quit".into();
                         app.phase = Phase::Reviewing(proposal);
+                        app.update_status();
                     }
                     Err(e) => {
                         app.status = format!("Proposal failed: {}. Esc=skip", e);
@@ -330,40 +388,66 @@ async fn handle_key(
         Phase::Loading | Phase::Submitting | Phase::Applying => {
             // Ignore keys during async operations (except Ctrl+C above)
         }
-        Phase::Answering => match key.code {
-            KeyCode::Tab => {
-                app.focused_field = (app.focused_field + 1) % app.answers.len();
+        Phase::Answering => {
+            // Description scroll mode
+            if app.show_desc {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.desc_scroll = app.desc_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.desc_scroll = app.desc_scroll.saturating_add(1);
+                    }
+                    KeyCode::Char('d') | KeyCode::Esc => {
+                        app.show_desc = false;
+                        app.update_status();
+                    }
+                    _ => {}
+                }
+                return;
             }
-            KeyCode::BackTab => {
-                app.focused_field = if app.focused_field == 0 {
-                    app.answers.len() - 1
-                } else {
-                    app.focused_field - 1
-                };
-            }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.phase = Phase::Submitting;
-                app.status = "Generating proposal...".into();
-                spawn_proposal(app, llm, tx);
-            }
-            KeyCode::Esc => {
-                app.skipped += 1;
-                app.advance();
-                if !app.should_quit {
-                    spawn_questions(app, llm, tx);
-                    if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+
+            match key.code {
+                KeyCode::Tab => {
+                    app.focused_field = (app.focused_field + 1) % app.answers.len();
+                }
+                KeyCode::BackTab => {
+                    app.focused_field = if app.focused_field == 0 {
+                        app.answers.len() - 1
+                    } else {
+                        app.focused_field - 1
+                    };
+                }
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.phase = Phase::Submitting;
+                    app.update_status();
+                    spawn_proposal(app, llm, tx);
+                }
+                KeyCode::Char('d') if key.modifiers.is_empty() && app.answers[app.focused_field].lines().join("").is_empty() => {
+                    // Only toggle description if focused textarea is empty (so 'd' can be typed normally)
+                    app.show_desc = true;
+                    app.desc_scroll = 0;
+                    app.update_status();
+                }
+                KeyCode::Esc => {
+                    app.skipped += 1;
+                    app.advance();
+                    if !app.should_quit {
+                        spawn_questions(app, llm, tx);
+                        if !no_context {
+                            spawn_similar(app, db, embedder, config, tx);
+                        }
                     }
                 }
+                _ => {
+                    app.answers[app.focused_field].input(key);
+                }
             }
-            _ => {
-                app.answers[app.focused_field].input(key);
-            }
-        },
+        }
         Phase::Reviewing(_) => match key.code {
             KeyCode::Char('a') | KeyCode::Enter => {
                 app.phase = Phase::Applying;
-                app.status = "Applying to Linear...".into();
+                app.update_status();
                 spawn_apply(app, linear, db, tx);
             }
             KeyCode::Char('s') | KeyCode::Esc => {
@@ -389,7 +473,9 @@ async fn handle_key(
 fn spawn_questions(app: &App<'_>, llm: &LlmClient, tx: &mpsc::UnboundedSender<AppEvent>) {
     let issue_context = build_issue_context(app.current_issue());
     let system = format!("{}\n\nCurrent issue:\n{}", QUESTIONS_PROMPT, issue_context);
-    let messages = vec![Message::user("Analyze this issue and generate clarifying questions.")];
+    let messages = vec![Message::user(
+        "Analyze this issue and generate clarifying questions.",
+    )];
 
     let llm = llm.clone();
     let tx = tx.clone();
@@ -420,6 +506,7 @@ fn spawn_similar(
     tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
     let Some(embedder) = embedder.clone() else {
+        tx.send(AppEvent::SimilarReady(Vec::new())).ok();
         return;
     };
     let issue_id = app.current_issue().id.clone();
@@ -447,39 +534,38 @@ fn spawn_similar(
         )
         .await;
 
-        let ctx = match results {
-            Ok(results) => {
-                let mut s = String::new();
-                for r in results.iter().filter(|r| r.issue_id != issue_id).take(3) {
-                    let plabel = match r.priority {
-                        1 => "Urgent",
-                        2 => "High",
-                        3 => "Medium",
-                        4 => "Low",
-                        _ => "No priority",
-                    };
-                    s.push_str(&format!("  {} ({}): {}\n", r.identifier, plabel, r.title));
-                }
-                s
-            }
-            Err(_) => String::new(),
+        let similar: Vec<SimilarIssue> = match results {
+            Ok(results) => results
+                .into_iter()
+                .filter(|r| r.issue_id != issue_id)
+                .take(3)
+                .map(|r| SimilarIssue {
+                    identifier: r.identifier,
+                    title: r.title,
+                    priority: priority_label(r.priority),
+                    similarity: r.similarity.unwrap_or(0.0),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         };
 
-        tx.send(AppEvent::SimilarReady(ctx)).ok();
+        tx.send(AppEvent::SimilarReady(similar)).ok();
     });
 }
 
-fn spawn_proposal(
-    app: &App<'_>,
-    llm: &LlmClient,
-    tx: &mpsc::UnboundedSender<AppEvent>,
-) {
+fn spawn_proposal(app: &App<'_>, llm: &LlmClient, tx: &mpsc::UnboundedSender<AppEvent>) {
     let issue_context = build_issue_context(app.current_issue());
     let qa_text = app.collect_qa_text();
-    let similar = if app.similar_context.is_empty() {
+    let similar = if app.similar_issues.is_empty() {
         String::new()
     } else {
-        format!("\nSimilar issues:\n{}", app.similar_context)
+        let ctx: String = app
+            .similar_issues
+            .iter()
+            .map(|s| format!("  {} ({}): {}", s.identifier, s.priority, s.title))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\nSimilar issues:\n{}", ctx)
     };
 
     let system = format!(
@@ -567,44 +653,58 @@ fn spawn_apply(
 // --- Rendering ---
 
 fn ui(f: &mut Frame, app: &mut App) {
+    // When showing description overlay, render that instead of normal layout
+    if app.show_desc {
+        render_description_overlay(f, app);
+        return;
+    }
+
+    // Calculate similar issues bar height
+    let similar_height = if app.similar_issues.is_empty() && !app.similar_loading {
+        0
+    } else {
+        (app.similar_issues.len() as u16 + 2).max(3) // border + at least 1 line
+    };
+
     let outer = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Min(8),
-        Constraint::Length(1),
+        Constraint::Length(5),    // header
+        Constraint::Min(8),       // questions/main
+        Constraint::Length(similar_height), // similar issues bar
+        Constraint::Length(1),    // status bar
     ])
     .split(f.area());
 
     render_header(f, outer[0], app);
 
-    let body = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(outer[1]);
-
     match &app.phase {
         Phase::Loading => {
             let p = Paragraph::new("Loading questions from AI...")
                 .block(Block::default().borders(Borders::ALL).title(" Triage "));
-            f.render_widget(p, body[0]);
+            f.render_widget(p, outer[1]);
         }
         Phase::Submitting => {
             let p = Paragraph::new("Generating proposal...")
                 .block(Block::default().borders(Borders::ALL).title(" Triage "));
-            f.render_widget(p, body[0]);
+            f.render_widget(p, outer[1]);
         }
         Phase::Applying => {
             let p = Paragraph::new("Applying changes to Linear...")
                 .block(Block::default().borders(Borders::ALL).title(" Triage "));
-            f.render_widget(p, body[0]);
+            f.render_widget(p, outer[1]);
         }
         Phase::Answering => {
-            render_questions(f, body[0], app);
+            render_questions(f, outer[1], app);
         }
         Phase::Reviewing(proposal) => {
-            render_proposal(f, body[0], app, proposal);
+            render_proposal(f, outer[1], app, proposal);
         }
     }
 
-    render_similar(f, body[1], app);
-    render_status(f, outer[2], app);
+    if similar_height > 0 {
+        render_similar(f, outer[2], app);
+    }
+
+    render_status(f, outer[3], app);
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
@@ -617,13 +717,9 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         app.skipped
     );
 
-    let desc_preview: String = issue
-        .description
-        .as_deref()
-        .unwrap_or("(no description)")
-        .chars()
-        .take(120)
-        .collect();
+    let desc = issue.description.as_deref().unwrap_or("(no description)");
+    let desc_preview: String = desc.chars().take(200).collect();
+    let desc_truncated = desc.len() > 200;
 
     let text = vec![
         Line::from(vec![
@@ -646,13 +742,89 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("  "),
             Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
             Span::raw(&issue.created_at[..10]),
+            Span::raw("  "),
+            Span::styled(
+                app.issue_url(),
+                Style::default().fg(Color::Blue).underlined(),
+            ),
         ]),
-        Line::from(Span::styled(desc_preview, Style::default().fg(Color::DarkGray))),
+        Line::from(vec![
+            Span::styled(desc_preview, Style::default().fg(Color::DarkGray)),
+            if desc_truncated {
+                Span::styled(" [d=show more]", Style::default().fg(Color::Blue))
+            } else {
+                Span::raw("")
+            },
+        ]),
     ];
 
     let block = Block::default().borders(Borders::ALL).title(" Issue ");
     let p = Paragraph::new(text).block(block);
     f.render_widget(p, area);
+}
+
+fn render_description_overlay(f: &mut Frame, app: &mut App) {
+    let identifier = app.current_issue().identifier.clone();
+    let title = app.current_issue().title.clone();
+    let desc = app
+        .current_issue()
+        .description
+        .clone()
+        .unwrap_or_else(|| "(no description)".into());
+    let url = app.issue_url();
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", identifier),
+                Style::default().bold().fg(Color::Cyan),
+            ),
+            Span::raw(title),
+        ]),
+        Line::from(vec![Span::styled(
+            url,
+            Style::default().fg(Color::Blue).underlined(),
+        )]),
+        Line::from(""),
+    ];
+    for line in desc.lines() {
+        lines.push(Line::from(Span::raw(line.to_string())));
+    }
+
+    let total_lines = lines.len() as u16;
+    let visible = f.area().height.saturating_sub(3); // borders + title
+    app.desc_scroll = app.desc_scroll.min(total_lines.saturating_sub(visible));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Description (↑↓ scroll, d/Esc close) ");
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.desc_scroll, 0));
+    f.render_widget(p, f.area());
+
+    // Scrollbar
+    let mut scrollbar_state =
+        ScrollbarState::new(total_lines as usize).position(app.desc_scroll as usize);
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        f.area(),
+        &mut scrollbar_state,
+    );
+
+    // Status bar at bottom
+    let status_area = Rect {
+        x: f.area().x,
+        y: f.area().y + f.area().height.saturating_sub(1),
+        width: f.area().width,
+        height: 1,
+    };
+    let status = Paragraph::new(Span::styled(
+        " ↑↓=scroll | d/Esc=close",
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(status, status_area);
 }
 
 fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
@@ -664,11 +836,17 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Each question gets: 1 line label + 3 lines textarea = 4 lines, plus 1 line gap
+    // Each question: 2 lines for label (allows wrapping) + 3 lines textarea + 1 gap
     let constraints: Vec<Constraint> = app
         .questions
         .iter()
-        .flat_map(|_| [Constraint::Length(1), Constraint::Length(3), Constraint::Length(1)])
+        .flat_map(|_| {
+            [
+                Constraint::Length(2), // question label (wraps)
+                Constraint::Length(3), // text input
+                Constraint::Length(1), // gap
+            ]
+        })
         .collect();
 
     let chunks = Layout::vertical(constraints).split(inner);
@@ -691,10 +869,10 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
         )];
         spans.extend(parse_markdown_spans(&question.question, base_color));
 
-        let label = Paragraph::new(Line::from(spans));
+        let label = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
         f.render_widget(label, label_area);
 
-        let border_style = if i == app.focused_field {
+        let border_style = if focused {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -714,13 +892,7 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
 fn render_proposal(f: &mut Frame, area: Rect, app: &App, proposal: &TriageProposal) {
     let issue = app.current_issue();
 
-    let priority_label = match proposal.priority {
-        1 => "Urgent",
-        2 => "High",
-        3 => "Medium",
-        4 => "Low",
-        _ => "Unknown",
-    };
+    let plabel = priority_label(proposal.priority);
 
     let mut lines = vec![
         Line::from(vec![
@@ -728,7 +900,7 @@ fn render_proposal(f: &mut Frame, area: Rect, app: &App, proposal: &TriagePropos
             Span::styled("No priority", Style::default().fg(Color::DarkGray)),
             Span::raw(" → "),
             Span::styled(
-                format!("{} ({})", priority_label, proposal.priority),
+                format!("{} ({})", plabel, proposal.priority),
                 Style::default().bold().fg(Color::Green),
             ),
         ]),
@@ -736,34 +908,34 @@ fn render_proposal(f: &mut Frame, area: Rect, app: &App, proposal: &TriagePropos
     ];
 
     if proposal.title != issue.title {
-        lines.push(Line::from(vec![
-            Span::styled("Title: ", Style::default().fg(Color::DarkGray)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("  - {}", issue.title), Style::default().fg(Color::Red)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("  + {}", proposal.title),
-                Style::default().fg(Color::Green),
-            ),
-        ]));
+        lines.push(Line::from(Span::styled(
+            "Title:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  - {}", issue.title),
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  + {}", proposal.title),
+            Style::default().fg(Color::Green),
+        )));
         lines.push(Line::from(""));
     }
 
     let current_desc = issue.description.as_deref().unwrap_or("");
     if proposal.description != current_desc {
-        lines.push(Line::from(vec![
-            Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
-        ]));
-        // Show first few lines of new description
-        for line in proposal.description.lines().take(8) {
+        lines.push(Line::from(Span::styled(
+            "Description:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for line in proposal.description.lines().take(12) {
             lines.push(Line::from(Span::styled(
                 format!("  {}", line),
                 Style::default().fg(Color::Green),
             )));
         }
-        if proposal.description.lines().count() > 8 {
+        if proposal.description.lines().count() > 12 {
             lines.push(Line::from(Span::styled(
                 "  ...",
                 Style::default().fg(Color::DarkGray),
@@ -772,7 +944,9 @@ fn render_proposal(f: &mut Frame, area: Rect, app: &App, proposal: &TriagePropos
     }
 
     let block = Block::default().borders(Borders::ALL).title(" Proposal ");
-    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(p, area);
 }
 
@@ -781,16 +955,43 @@ fn render_similar(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .title(" Similar Issues ");
 
-    let text = if app.similar_context.is_empty() {
-        "Loading...".to_string()
-    } else {
-        app.similar_context.clone()
-    };
+    if app.similar_loading {
+        let p = Paragraph::new(Span::styled(
+            " Loading...",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .block(block);
+        f.render_widget(p, area);
+        return;
+    }
 
-    let p = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::DarkGray));
+    if app.similar_issues.is_empty() {
+        return;
+    }
+
+    let lines: Vec<Line> = app
+        .similar_issues
+        .iter()
+        .map(|s| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", s.identifier),
+                    Style::default().bold().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("({}) ", s.priority),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(&s.title),
+                Span::styled(
+                    format!("  {:.0}%", s.similarity * 100.0),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect();
+
+    let p = Paragraph::new(lines).block(block);
     f.render_widget(p, area);
 }
 
@@ -816,6 +1017,16 @@ fn build_issue_context(issue: &Issue) -> String {
     )
 }
 
+fn priority_label(priority: i32) -> &'static str {
+    match priority {
+        1 => "Urgent",
+        2 => "High",
+        3 => "Medium",
+        4 => "Low",
+        _ => "No priority",
+    }
+}
+
 /// Parse simple markdown inline formatting into ratatui Spans.
 /// Supports **bold**, *italic*, and `code`.
 fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
@@ -823,11 +1034,9 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Find the next markdown delimiter
         let next_bold = remaining.find("**");
         let next_code = remaining.find('`');
         let next_italic = remaining.find('*').filter(|&pos| {
-            // Only match single * that isn't part of **
             next_bold.map_or(true, |bp| pos != bp)
         });
 
@@ -842,7 +1051,6 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
 
         match next {
             None => {
-                // No more delimiters
                 spans.push(Span::styled(
                     remaining.to_string(),
                     Style::default().fg(base_color),
@@ -850,7 +1058,6 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
                 break;
             }
             Some((pos, delim)) => {
-                // Push text before delimiter
                 if pos > 0 {
                     spans.push(Span::styled(
                         remaining[..pos].to_string(),
@@ -858,7 +1065,6 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
                     ));
                 }
                 let after_open = &remaining[pos + delim.len()..];
-                // Find closing delimiter
                 if let Some(close_pos) = after_open.find(delim) {
                     let content = &after_open[..close_pos];
                     let style = match delim {
@@ -870,7 +1076,6 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
                     spans.push(Span::styled(content.to_string(), style));
                     remaining = &after_open[close_pos + delim.len()..];
                 } else {
-                    // No closing delimiter — treat as plain text
                     spans.push(Span::styled(
                         remaining[pos..pos + delim.len()].to_string(),
                         Style::default().fg(base_color),
@@ -894,4 +1099,3 @@ fn default_questions() -> Vec<Question> {
         })
         .collect()
 }
-
