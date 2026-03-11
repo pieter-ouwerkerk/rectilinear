@@ -28,6 +28,17 @@ pub fn handle_set(key: &str, value: &str) -> Result<()> {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid number"))?;
         }
+        "triage.mode" => {
+            config.triage.mode = match value {
+                "native" => crate::config::TriageMode::Native,
+                "claude-code" => crate::config::TriageMode::ClaudeCode,
+                "codex" => crate::config::TriageMode::Codex,
+                _ => anyhow::bail!(
+                    "Invalid triage mode: {}. Use 'native', 'claude-code', or 'codex'",
+                    value
+                ),
+            };
+        }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
 
@@ -65,6 +76,7 @@ pub fn handle_get(key: &str) -> Result<()> {
         }),
         "search.default-limit" => Some(config.search.default_limit.to_string()),
         "search.duplicate-threshold" => Some(config.search.duplicate_threshold.to_string()),
+        "triage.mode" => Some(config.triage.mode.to_string()),
         _ => anyhow::bail!("Unknown config key: {}", key),
     };
 
@@ -149,6 +161,10 @@ pub fn handle_show() -> Result<()> {
         "  duplicate-threshold: {}",
         config.search.duplicate_threshold
     );
+
+    println!();
+    println!("{}", "[triage]".bold());
+    println!("  mode: {}", config.triage.mode);
 
     Ok(())
 }
