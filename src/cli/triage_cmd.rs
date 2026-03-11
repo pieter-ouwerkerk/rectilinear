@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 
-use crate::config::Config;
+use crate::config::{Config, TriageMode};
 use crate::db::{Database, Issue};
 use crate::embedding::Embedder;
 use crate::linear::LinearClient;
@@ -81,6 +81,12 @@ enum Phase {
     Submitting,
     Reviewing(TriageProposal),
     Applying,
+    /// External tool mode: show generated prompt for Claude Code / Codex
+    PromptReview {
+        prompt: String,
+        scroll: u16,
+        copied: bool,
+    },
 }
 
 enum AppEvent {
@@ -116,10 +122,11 @@ struct App<'a> {
     status: String,
     should_quit: bool,
     show_desc: bool,
+    triage_mode: TriageMode,
 }
 
 impl<'a> App<'a> {
-    fn new(issues: Vec<Issue>, limit: Option<usize>) -> Self {
+    fn new(issues: Vec<Issue>, limit: Option<usize>, triage_mode: TriageMode) -> Self {
         let max_issues = limit.map(|l| l.min(issues.len())).unwrap_or(issues.len());
         Self {
             issues,
@@ -137,6 +144,7 @@ impl<'a> App<'a> {
             status: "Loading questions...".into(),
             should_quit: false,
             show_desc: false,
+            triage_mode,
         }
     }
 
@@ -187,6 +195,13 @@ impl<'a> App<'a> {
             Phase::Submitting => "Generating proposal...".into(),
             Phase::Reviewing(_) => "a=accept | s=skip | q=quit".into(),
             Phase::Applying => "Applying to Linear...".into(),
+            Phase::PromptReview { copied, .. } => {
+                if *copied {
+                    "Copied! ↑↓=scroll | c=copy again | Enter=confirm | Esc=skip | q=quit".into()
+                } else {
+                    "↑↓=scroll | c=copy to clipboard | Enter=confirm | Esc=skip | q=quit".into()
+                }
+            }
         };
     }
 
@@ -205,6 +220,27 @@ impl<'a> App<'a> {
             self.show_desc = false;
             self.update_status();
         }
+    }
+
+    fn build_external_prompt(&self) -> String {
+        let issue = self.current_issue();
+
+        let mut prompt = format!(
+            "Let's improve the detail in the Linear issue, {}:\n",
+            issue.identifier
+        );
+
+        for (q, a) in self.questions.iter().zip(self.answers.iter()) {
+            let answer = a.lines().join("\n");
+            let answer_text = if answer.is_empty() {
+                "(skipped)".to_string()
+            } else {
+                answer
+            };
+            prompt.push_str(&format!("\n# {}: {}\n\n{}\n", q.label, q.question, answer_text));
+        }
+
+        prompt
     }
 
     fn collect_qa_text(&self) -> String {
@@ -305,7 +341,7 @@ pub async fn handle_triage(
         }
     });
 
-    let mut app = App::new(issues, limit);
+    let mut app = App::new(issues, limit, config.triage.mode.clone());
 
     // Start first issue
     spawn_questions(&app, &llm, &tx);
@@ -433,14 +469,10 @@ async fn handle_key(
                     };
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.phase = Phase::Submitting;
-                    app.update_status();
-                    spawn_proposal(app, llm, tx);
+                    submit_answers(app, llm, tx);
                 }
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.phase = Phase::Submitting;
-                    app.update_status();
-                    spawn_proposal(app, llm, tx);
+                    submit_answers(app, llm, tx);
                 }
                 KeyCode::Char('d') if key.modifiers.is_empty() && app.answers[app.focused_field].lines().join("").is_empty() => {
                     // Only toggle description if focused textarea is empty (so 'd' can be typed normally)
@@ -484,7 +516,89 @@ async fn handle_key(
             }
             _ => {}
         },
+        Phase::PromptReview { .. } => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Phase::PromptReview { scroll, .. } = &mut app.phase {
+                    *scroll = scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Phase::PromptReview { scroll, .. } = &mut app.phase {
+                    *scroll = scroll.saturating_add(1);
+                }
+            }
+            KeyCode::Char('c') => {
+                if let Phase::PromptReview { prompt, copied, .. } = &mut app.phase {
+                    let success = copy_to_clipboard(prompt);
+                    *copied = success;
+                }
+                app.update_status();
+            }
+            KeyCode::Enter => {
+                // Confirm: mark as processed and advance
+                app.applied += 1;
+                app.advance();
+                if !app.should_quit {
+                    spawn_questions(app, llm, tx);
+                    if !no_context {
+                        spawn_similar(app, db, embedder, config, tx);
+                    }
+                }
+            }
+            KeyCode::Char('s') | KeyCode::Esc => {
+                app.skipped += 1;
+                app.advance();
+                if !app.should_quit {
+                    spawn_questions(app, llm, tx);
+                    if !no_context {
+                        spawn_similar(app, db, embedder, config, tx);
+                    }
+                }
+            }
+            KeyCode::Char('q') => {
+                app.should_quit = true;
+            }
+            _ => {}
+        },
     }
+}
+
+fn submit_answers(app: &mut App<'_>, llm: &LlmClient, tx: &mpsc::UnboundedSender<AppEvent>) {
+    match app.triage_mode {
+        TriageMode::Native => {
+            app.phase = Phase::Submitting;
+            app.update_status();
+            spawn_proposal(app, llm, tx);
+        }
+        TriageMode::ClaudeCode | TriageMode::Codex => {
+            let prompt = app.build_external_prompt();
+            let copied = copy_to_clipboard(&prompt);
+            app.phase = Phase::PromptReview {
+                prompt,
+                scroll: 0,
+                copied,
+            };
+            app.update_status();
+        }
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let mut child = match Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        if stdin.write_all(text.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 // --- Async task spawners ---
@@ -716,6 +830,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
         Phase::Reviewing(proposal) => {
             render_proposal(f, outer[1], app, proposal);
+        }
+        Phase::PromptReview { prompt, scroll, copied } => {
+            render_prompt_review(f, outer[1], prompt, *scroll, *copied, &app.triage_mode);
         }
     }
 
@@ -1000,6 +1117,60 @@ fn render_proposal(f: &mut Frame, area: Rect, app: &App, proposal: &TriagePropos
         .block(block)
         .wrap(Wrap { trim: false });
     f.render_widget(p, area);
+}
+
+fn render_prompt_review(
+    f: &mut Frame,
+    area: Rect,
+    prompt: &str,
+    scroll: u16,
+    copied: bool,
+    mode: &TriageMode,
+) {
+    let tool_name = match mode {
+        TriageMode::ClaudeCode => "Claude Code",
+        TriageMode::Codex => "Codex",
+        TriageMode::Native => unreachable!(),
+    };
+
+    let title = if copied {
+        format!(" {} Prompt (copied to clipboard) ", tool_name)
+    } else {
+        format!(" {} Prompt ", tool_name)
+    };
+
+    let lines: Vec<Line> = prompt
+        .lines()
+        .map(|line| {
+            if line.starts_with("# ") {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().bold().fg(Color::Cyan),
+                ))
+            } else {
+                Line::from(Span::raw(line.to_string()))
+            }
+        })
+        .collect();
+
+    let total_lines = lines.len() as u16;
+    let visible = area.height.saturating_sub(2); // borders
+    let clamped_scroll = scroll.min(total_lines.saturating_sub(visible));
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((clamped_scroll, 0));
+    f.render_widget(p, area);
+
+    let mut scrollbar_state =
+        ScrollbarState::new(total_lines as usize).position(clamped_scroll as usize);
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        area,
+        &mut scrollbar_state,
+    );
 }
 
 fn render_similar(f: &mut Frame, area: Rect, app: &App) {
