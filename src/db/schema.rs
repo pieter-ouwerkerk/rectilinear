@@ -34,6 +34,11 @@ const MIGRATION_2: &str = "
 DROP TRIGGER IF EXISTS issues_au;
 DROP TRIGGER IF EXISTS issues_ad;
 
+-- Rebuild FTS index from scratch (old triggers may have left it corrupt)
+DELETE FROM issues_fts;
+INSERT INTO issues_fts(rowid, title, description, labels_text)
+    SELECT rowid, title, COALESCE(description, ''), labels_json FROM issues;
+
 CREATE TRIGGER issues_au AFTER UPDATE ON issues BEGIN
     INSERT INTO issues_fts(issues_fts, rowid, title, description, labels_text)
     VALUES ('delete', old.rowid, old.title, COALESCE(old.description, ''), old.labels_json);
