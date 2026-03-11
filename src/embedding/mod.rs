@@ -157,11 +157,21 @@ pub fn chunk_text(title: &str, text: &str, max_tokens: usize, overlap: usize) ->
         return vec![format!("{}{}", prefix, text)];
     }
 
+    // Snap a byte offset to the nearest char boundary (rounding down)
+    let floor_char = |s: &str, pos: usize| {
+        let pos = pos.min(s.len());
+        let mut i = pos;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+
     let mut chunks = Vec::new();
     let mut start = 0;
 
     while start < text.len() {
-        let end = (start + max_chars).min(text.len());
+        let end = floor_char(text, start + max_chars);
 
         let chunk_slice = &text[start..end];
         let break_at = if end < text.len() {
@@ -182,11 +192,11 @@ pub fn chunk_text(title: &str, text: &str, max_tokens: usize, overlap: usize) ->
             break;
         }
 
-        start = if break_at > overlap_chars {
+        start = floor_char(text, if break_at > overlap_chars {
             break_at - overlap_chars
         } else {
             break_at
-        };
+        });
     }
 
     chunks

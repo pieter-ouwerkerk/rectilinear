@@ -21,8 +21,31 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
     }
 
+    if current_version < 2 {
+        conn.execute_batch(MIGRATION_2)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])?;
+    }
+
     Ok(())
 }
+
+// Fix contentless FTS5 triggers: use 'delete' command instead of DELETE FROM
+const MIGRATION_2: &str = "
+DROP TRIGGER IF EXISTS issues_au;
+DROP TRIGGER IF EXISTS issues_ad;
+
+CREATE TRIGGER issues_au AFTER UPDATE ON issues BEGIN
+    INSERT INTO issues_fts(issues_fts, rowid, title, description, labels_text)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.description, ''), old.labels_json);
+    INSERT INTO issues_fts(rowid, title, description, labels_text)
+    VALUES (new.rowid, new.title, COALESCE(new.description, ''), new.labels_json);
+END;
+
+CREATE TRIGGER issues_ad AFTER DELETE ON issues BEGIN
+    INSERT INTO issues_fts(issues_fts, rowid, title, description, labels_text)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.description, ''), old.labels_json);
+END;
+";
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS issues (
@@ -62,13 +85,15 @@ CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
-    DELETE FROM issues_fts WHERE rowid = old.rowid;
+    INSERT INTO issues_fts(issues_fts, rowid, title, description, labels_text)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.description, ''), old.labels_json);
     INSERT INTO issues_fts(rowid, title, description, labels_text)
     VALUES (new.rowid, new.title, COALESCE(new.description, ''), new.labels_json);
 END;
 
 CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
-    DELETE FROM issues_fts WHERE rowid = old.rowid;
+    INSERT INTO issues_fts(issues_fts, rowid, title, description, labels_text)
+    VALUES ('delete', old.rowid, old.title, COALESCE(old.description, ''), old.labels_json);
 END;
 
 CREATE TABLE IF NOT EXISTS chunks (

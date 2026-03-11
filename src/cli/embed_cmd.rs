@@ -26,14 +26,13 @@ pub async fn handle_embed(
     let dim_key = "embedding_dimensions";
     if let Some(stored_dim) = db.get_metadata(dim_key)? {
         let stored: usize = stored_dim.parse().unwrap_or(0);
-        if stored != embedder.dimensions()
-            && !force {
-                anyhow::bail!(
-                    "Embedding dimensions changed ({} -> {}). Run with --force to regenerate all embeddings.",
-                    stored,
-                    embedder.dimensions()
-                );
-            }
+        if stored != embedder.dimensions() && !force {
+            anyhow::bail!(
+                "Embedding dimensions changed ({} -> {}). Run with --force to regenerate all embeddings.",
+                stored,
+                embedder.dimensions()
+            );
+        }
     }
 
     let issues = db.get_issues_needing_embedding(team_key, force)?;
@@ -51,60 +50,40 @@ pub async fn handle_embed(
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
-    // Prepare all chunks
-    let mut all_texts: Vec<(usize, String, String)> = Vec::new(); // (issue_index, issue_id, chunk_text)
+    let embed_batch_size = 50;
+    let mut total_chunks = 0usize;
+    let mut embedded_count = 0usize;
 
-    for (i, issue) in issues.iter().enumerate() {
+    // Process issues one at a time: chunk, embed, flush to DB, then drop
+    for issue in &issues {
         let chunks = embedding::chunk_text(
             &issue.title,
             issue.description.as_deref().unwrap_or(""),
             512,
             64,
         );
-        for chunk in chunks {
-            all_texts.push((i, issue.id.clone(), chunk));
-        }
-    }
 
-    // Batch embed
-    let batch_size = 50;
-    let mut chunk_embeddings: Vec<(String, usize, String, Vec<f32>)> = Vec::new();
-    let mut chunk_counters: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-
-    for batch in all_texts.chunks(batch_size) {
-        let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
-        let embeddings = embedder.embed_batch(&texts).await?;
-
-        for ((_, issue_id, text), emb) in batch.iter().zip(embeddings) {
-            let idx = chunk_counters.entry(issue_id.clone()).or_insert(0);
-            chunk_embeddings.push((issue_id.clone(), *idx, text.clone(), emb));
-            *idx += 1;
+        // Embed this issue's chunks (sub-batch if needed)
+        let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
+        for text_batch in chunks.chunks(embed_batch_size) {
+            let texts: Vec<String> = text_batch.to_vec();
+            let embeddings = embedder.embed_batch(&texts).await?;
+            all_embeddings.extend(embeddings);
         }
 
-        pb.set_position(
-            chunk_embeddings
-                .iter()
-                .map(|(id, _, _, _)| id.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .len() as u64,
-        );
-    }
+        // Flush to DB immediately
+        let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
+            .into_iter()
+            .zip(all_embeddings)
+            .enumerate()
+            .map(|(i, (text, emb))| (i, text, embedding::embedding_to_bytes(&emb)))
+            .collect();
 
-    // Group by issue and store
-    let mut by_issue: std::collections::HashMap<String, Vec<(usize, String, Vec<u8>)>> =
-        std::collections::HashMap::new();
+        total_chunks += chunk_data.len();
+        db.upsert_chunks(&issue.id, &chunk_data)?;
 
-    for (issue_id, idx, text, emb) in chunk_embeddings {
-        let bytes = embedding::embedding_to_bytes(&emb);
-        by_issue
-            .entry(issue_id)
-            .or_default()
-            .push((idx, text, bytes));
-    }
-
-    for (issue_id, chunks) in &by_issue {
-        db.upsert_chunks(issue_id, chunks)?;
+        embedded_count += 1;
+        pb.set_position(embedded_count as u64);
     }
 
     // Store dimension info
@@ -113,8 +92,8 @@ pub async fn handle_embed(
     pb.finish_with_message(format!(
         "{} Embedded {} issues ({} chunks)",
         "Done!".green().bold(),
-        by_issue.len(),
-        all_texts.len()
+        embedded_count,
+        total_chunks
     ));
 
     let total_embedded = db.count_embedded_issues(team_key)?;

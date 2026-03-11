@@ -467,7 +467,17 @@ impl RectilinearMcp {
             let description = issue
                 .description
                 .as_deref()
-                .map(|d| if d.len() > 2000 { &d[..2000] } else { d });
+                .map(|d| {
+                    if d.len() > 2000 {
+                        let mut end = 2000;
+                        while end > 0 && !d.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &d[..end]
+                    } else {
+                        d
+                    }
+                });
 
             let similar = if let Some(ref embedder) = embedder {
                 let search_text = format!(
