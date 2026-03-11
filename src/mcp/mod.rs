@@ -472,7 +472,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "get_triage_queue",
-        description = "Get a batch of unprioritized issues for triage. Returns enriched issues with similar issues for context. Use exclude to skip already-processed issues."
+        description = "Get a batch of unprioritized issues for triage. Returns enriched issues with similar issues and code_search_hints. IMPORTANT: For each issue, BEFORE presenting it to the user, you MUST search the codebase using the code_search_hints (via Grep, Glob, Read, or Cuttlefish MCP tools like get_symbols/find_references). Spend 2-4 tool calls per issue exploring relevant code, then include your findings when asking the user questions."
     )]
     async fn get_triage_queue(
         &self,
@@ -574,6 +574,7 @@ impl RectilinearMcp {
         }
 
         let result = serde_json::json!({
+            "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary when asking clarifying questions.",
             "queue": enriched,
             "total_remaining": total_remaining,
             "team": args.team,
