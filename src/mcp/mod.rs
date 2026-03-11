@@ -703,6 +703,13 @@ impl ServerHandler for RectilinearMcp {
                  3. Based on answers, propose: priority (1-4), improved title, improved description\n\
                  4. After user confirms, call mark_triaged\n\
                  5. Move to next issue. When batch exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
+                 ## Code-Informed Triage\n\
+                 You have access to the user's codebase and other MCP tools (e.g. Cuttlefish). Use them during triage:\n\
+                 - When an issue references specific code, files, or features, explore the codebase to understand current state\n\
+                 - Use code context to ask better follow-up questions (e.g. \"I see this component was refactored in commit X — is this issue still relevant?\")\n\
+                 - When improving issue descriptions, include relevant code references (file paths, function names, architectural context)\n\
+                 - If an issue is vague, search the codebase to identify what it likely refers to and suggest a more specific description\n\
+                 - Use Cuttlefish MCP tools (get_symbols, get_hover_info, find_references) to understand code structure when relevant\n\n\
                  ## Priority Framework\n\
                  1=Urgent (production down, data loss, security)\n\
                  2=High (major feature broken, significant user impact, no workaround)\n\
