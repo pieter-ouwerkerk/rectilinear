@@ -192,11 +192,13 @@ pub fn chunk_text(title: &str, text: &str, max_tokens: usize, overlap: usize) ->
             break;
         }
 
-        start = floor_char(text, if break_at > overlap_chars {
+        let new_start = floor_char(text, if break_at > overlap_chars {
             break_at - overlap_chars
         } else {
             break_at
         });
+        // Ensure forward progress — overlap must never push start backwards
+        start = if new_start <= start { break_at } else { new_start };
     }
 
     chunks

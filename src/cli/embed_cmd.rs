@@ -96,11 +96,13 @@ pub async fn handle_embed(
     }
 
     for (issue_num, issue) in issues.iter().enumerate() {
-        if debug && issue_num % 10 == 0 {
+        if debug {
             eprint!(
-                "  chunking issue {}/{}, batch: {}/{} texts (RSS: {}MB)\n",
+                "  [issue {}/{}] {} ({} chars) batch: {}/{} texts (RSS: {}MB)\n",
                 issue_num + 1,
                 issues.len(),
+                &issue.identifier,
+                issue.description.as_deref().map_or(0, |d| d.len()),
                 batch.len(),
                 max_texts_per_batch,
                 rss_mb().unwrap_or(0)
@@ -113,6 +115,9 @@ pub async fn handle_embed(
             512,
             64,
         );
+        if debug {
+            eprintln!("    chunked into {} pieces", chunks.len());
+        }
         expected_counts.insert(issue.id.clone(), chunks.len());
 
         for (idx, text) in chunks.into_iter().enumerate() {
@@ -128,18 +133,25 @@ pub async fn handle_embed(
                 api_calls += 1;
                 if debug {
                     pb.suspend(|| {
-                        let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
                         eprintln!(
-                            "  [batch {}] {} texts, ~{}k tokens, {} pending issues{}",
+                            "  >> API call #{}: {} texts, ~{}k tokens, {} pending issues (RSS: {}MB)",
                             api_calls,
                             texts.len(),
                             batch_tokens / 1000,
                             pending.len(),
-                            rss,
+                            rss_mb().unwrap_or(0),
                         );
                     });
                 }
                 let embeddings = embedder.embed_batch(&texts).await?;
+                if debug {
+                    eprintln!(
+                        "  << API call #{} returned {} embeddings (RSS: {}MB)",
+                        api_calls,
+                        embeddings.len(),
+                        rss_mb().unwrap_or(0),
+                    );
+                }
 
                 for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
                     pending
@@ -159,6 +171,9 @@ pub async fn handle_embed(
                     })
                     .cloned()
                     .collect();
+                if debug && !done.is_empty() {
+                    eprintln!("  flushing {} completed issues to DB", done.len());
+                }
                 for id in done {
                     if let Some(chunks) = pending.remove(&id) {
                         total_chunks += chunks.len();
@@ -180,17 +195,24 @@ pub async fn handle_embed(
         api_calls += 1;
         if debug {
             pb.suspend(|| {
-                let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
                 eprintln!(
-                    "  [batch {} final] {} texts, ~{}k tokens{}",
+                    "  >> API call #{} (final): {} texts, ~{}k tokens (RSS: {}MB)",
                     api_calls,
                     texts.len(),
                     batch_tokens / 1000,
-                    rss,
+                    rss_mb().unwrap_or(0),
                 );
             });
         }
         let embeddings = embedder.embed_batch(&texts).await?;
+        if debug {
+            eprintln!(
+                "  << API call #{} returned {} embeddings (RSS: {}MB)",
+                api_calls,
+                embeddings.len(),
+                rss_mb().unwrap_or(0),
+            );
+        }
 
         for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
             pending
@@ -201,6 +223,9 @@ pub async fn handle_embed(
     }
 
     // Flush all remaining issues
+    if debug {
+        eprintln!("  flushing final {} pending issues to DB", pending.len());
+    }
     for (id, chunks) in pending.drain() {
         total_chunks += chunks.len();
         db.upsert_chunks(&id, &chunks)?;
