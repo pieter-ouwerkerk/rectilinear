@@ -430,6 +430,11 @@ impl RectilinearMcp {
         &self,
         #[tool(aggr)] args: GetTriageQueueArgs,
     ) -> Result<String, String> {
+        // Incremental sync to pick up changes made by other users
+        if let Ok(client) = LinearClient::new(&self.config) {
+            let _ = client.sync_team(&self.db, &args.team, false, false, None).await;
+        }
+
         let all_issues = self
             .db
             .get_unprioritized_issues(Some(&args.team))
