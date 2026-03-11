@@ -16,6 +16,7 @@ pub fn handle_set(key: &str, value: &str) -> Result<()> {
                 _ => anyhow::bail!("Invalid backend: {}. Use 'local' or 'api'", value),
             };
         }
+        "anthropic-api-key" => config.anthropic.api_key = Some(value.to_string()),
         "embedding.gemini-api-key" => config.embedding.gemini_api_key = Some(value.to_string()),
         "search.default-limit" => {
             config.search.default_limit = value
@@ -48,6 +49,13 @@ pub fn handle_get(key: &str) -> Result<()> {
         }),
         "default-team" => config.linear.default_team,
         "embedding.backend" => Some(format!("{:?}", config.embedding.backend).to_lowercase()),
+        "anthropic-api-key" => config.anthropic.api_key.map(|k| {
+            if k.len() > 8 {
+                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "****".to_string()
+            }
+        }),
         "embedding.gemini-api-key" => config.embedding.gemini_api_key.map(|k| {
             if k.len() > 8 {
                 format!("{}...{}", &k[..4], &k[k.len() - 4..])
@@ -96,6 +104,22 @@ pub fn handle_show() -> Result<()> {
             .default_team
             .as_deref()
             .unwrap_or(&"(not set)".dimmed().to_string())
+    );
+
+    println!();
+    println!("{}", "[anthropic]".bold());
+    println!(
+        "  api-key: {}",
+        config
+            .anthropic
+            .api_key
+            .as_ref()
+            .map(|k| if k.len() > 8 {
+                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "****".to_string()
+            })
+            .unwrap_or_else(|| "(not set)".dimmed().to_string())
     );
 
     println!();
