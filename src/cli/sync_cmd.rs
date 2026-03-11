@@ -65,6 +65,18 @@ pub async fn handle_sync(
         total
     );
 
+    if count == 0 && is_first {
+        eprintln!(
+            "\n{} No issues found for team \"{}\". Is the team key correct?",
+            "Warning:".yellow().bold(),
+            team_key
+        );
+        eprintln!(
+            "Run {} to see available team keys.",
+            "rectilinear teams".bold()
+        );
+    }
+
     if embed {
         println!();
         crate::cli::embed_cmd::handle_embed(db, config, Some(team_key), false).await?;
