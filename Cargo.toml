@@ -29,9 +29,9 @@ toml = "0.8"
 llama-cpp-2 = "0.1"
 
 # TUI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
-tui-textarea = "0.7"
+tui-textarea-2 = { version = "0.10", default-features = false, features = ["crossterm_0_28"] }
 
 # Misc
 anyhow = "1"
