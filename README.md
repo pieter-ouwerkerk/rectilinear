@@ -50,7 +50,7 @@ Linear remains the source of truth. The local database is a read-optimized cache
 | CLI | clap (derive) |
 | Database | rusqlite (bundled, FTS5) |
 | Vector storage | f32 blobs + cosine similarity in Rust |
-| Embeddings | Gemini API (768-dim) or local GGUF (planned) |
+| Embeddings | Gemini API (768-dim) or local GGUF (EmbeddingGemma, 256-dim) |
 | Linear API | reqwest + GraphQL |
 | MCP server | rmcp, stdio transport |
 | Config | TOML at `~/.config/rectilinear/config.toml` |
@@ -116,7 +116,7 @@ rectilinear sync --team ENG --include-archived
 
 ### Generate embeddings
 
-Embeddings power vector search and duplicate detection. Requires a Gemini API key (or will use the local GGUF backend once implemented).
+Embeddings power vector search and duplicate detection. Uses the Gemini API by default if `GEMINI_API_KEY` is set, otherwise falls back to a local GGUF model (EmbeddingGemma-300M, auto-downloaded on first use).
 
 ```sh
 # Embed issues that don't have embeddings yet
@@ -198,7 +198,7 @@ Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or pr
 }
 ```
 
-This exposes 8 tools to Claude Code:
+This exposes 10 tools to Claude Code:
 
 | Tool | Purpose |
 |---|---|
@@ -210,6 +210,26 @@ This exposes 8 tools to Claude Code:
 | `append_to_issue` | Add comment or extend description |
 | `sync_team` | Trigger sync for a team |
 | `issue_context` | Issue + its N most similar issues |
+| `get_triage_queue` | Batch of unprioritized issues enriched with similar issues |
+| `mark_triaged` | Set priority + update title/description + add comment in one call |
+
+### Triage workflow
+
+The MCP server includes built-in instructions that teach Claude Code how to triage issues conversationally. Setup:
+
+```sh
+# 1. Sync and embed your team's issues (needed once, then incremental)
+rectilinear sync --team CUT --embed
+
+# 2. Add rectilinear to your Claude Code MCP config (see above)
+
+# 3. In Claude Code, just say:
+#    "triage CUT issues"
+```
+
+Claude will call `get_triage_queue`, which syncs from Linear to get fresh data, then presents each issue with similar issues for context. For each issue it asks clarifying questions about impact and severity, proposes a priority and improved title/description, and after you confirm, calls `mark_triaged` to apply changes to Linear.
+
+`mark_triaged` re-fetches the issue from Linear before applying changes. If someone else already prioritized it, Claude skips it. If the content changed since the queue was fetched, Claude shows what changed and re-evaluates before proceeding. Embeddings are automatically updated when content changes.
 
 ## Data storage
 
@@ -217,7 +237,7 @@ This exposes 8 tools to Claude Code:
 |---|---|
 | `~/.config/rectilinear/config.toml` | API keys, defaults, preferences |
 | `~/.local/share/rectilinear/rectilinear.db` | SQLite database (issues, FTS index, embeddings) |
-| `~/.local/share/rectilinear/models/` | Local GGUF models (when implemented) |
+| `~/.local/share/rectilinear/models/` | Local GGUF models (auto-downloaded) |
 
 ## Search modes
 
