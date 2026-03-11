@@ -25,16 +25,6 @@ impl Database {
         Ok(db)
     }
 
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        db.migrate()?;
-        Ok(db)
-    }
-
     fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         schema::run_migrations(&conn)?;
@@ -47,14 +37,6 @@ impl Database {
     {
         let conn = self.conn.lock().unwrap();
         f(&conn)
-    }
-
-    pub fn with_conn_mut<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut Connection) -> Result<T>,
-    {
-        let mut conn = self.conn.lock().unwrap();
-        f(&mut conn)
     }
 
     // --- Issue CRUD ---
@@ -93,32 +75,6 @@ impl Database {
             } else {
                 Ok(None)
             }
-        })
-    }
-
-    pub fn get_issues_by_team(&self, team_key: &str) -> Result<Vec<Issue>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
-                 FROM issues WHERE team_key = ?1 ORDER BY updated_at DESC"
-            )?;
-            let rows = stmt.query_map(rusqlite::params![team_key], |row| {
-                Ok(Issue::from_row(row).unwrap())
-            })?;
-            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-        })
-    }
-
-    pub fn get_all_issues(&self) -> Result<Vec<Issue>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
-                 FROM issues ORDER BY updated_at DESC"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(Issue::from_row(row).unwrap())
-            })?;
-            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
 
@@ -274,24 +230,6 @@ impl Database {
     }
 
     // --- Comments ---
-
-    pub fn upsert_comment(&self, comment: &Comment) -> Result<()> {
-        self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO comments (id, issue_id, body, user_name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET body=excluded.body, user_name=excluded.user_name",
-                rusqlite::params![
-                    comment.id,
-                    comment.issue_id,
-                    comment.body,
-                    comment.user_name,
-                    comment.created_at,
-                ],
-            )?;
-            Ok(())
-        })
-    }
 
     pub fn get_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
         self.with_conn(|conn| {
