@@ -5,3 +5,4 @@ pub mod show_cmd;
 pub mod create_cmd;
 pub mod append_cmd;
 pub mod embed_cmd;
+pub mod triage_cmd;

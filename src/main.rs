@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod embedding;
 mod linear;
+mod llm;
 mod mcp;
 mod search;
 
@@ -124,6 +125,18 @@ enum Commands {
         /// Regenerate all embeddings
         #[arg(long)]
         force: bool,
+    },
+    /// Interactively triage unprioritized issues with AI
+    Triage {
+        /// Team key (e.g., ENG)
+        #[arg(short, long)]
+        team: Option<String>,
+        /// Max issues to triage
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Skip similar-issue context
+        #[arg(long)]
+        no_context: bool,
     },
     /// Start MCP server (stdio transport)
     Serve,
@@ -283,6 +296,20 @@ async fn main() -> Result<()> {
                 }
                 Commands::Embed { team, force } => {
                     cli::embed_cmd::handle_embed(&db, &config, team.as_deref(), force).await?;
+                }
+                Commands::Triage {
+                    team,
+                    limit,
+                    no_context,
+                } => {
+                    cli::triage_cmd::handle_triage(
+                        &db,
+                        &config,
+                        team.as_deref(),
+                        limit,
+                        no_context,
+                    )
+                    .await?;
                 }
                 Commands::Config { .. } | Commands::Serve => unreachable!(),
             }

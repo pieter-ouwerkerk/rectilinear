@@ -122,6 +122,32 @@ impl Database {
         })
     }
 
+    pub fn get_unprioritized_issues(&self, team_key: Option<&str>) -> Result<Vec<Issue>> {
+        self.with_conn(|conn| {
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
+                (
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                     FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled') AND team_key = ?1
+                     ORDER BY created_at DESC".to_string(),
+                    vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                )
+            } else {
+                (
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                     FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled')
+                     ORDER BY created_at DESC".to_string(),
+                    vec![],
+                )
+            };
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(Issue::from_row(row).unwrap())
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     pub fn count_issues(&self, team_key: Option<&str>) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {
