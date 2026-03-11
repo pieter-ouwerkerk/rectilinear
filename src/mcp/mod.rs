@@ -158,6 +158,8 @@ struct GetTriageQueueArgs {
     limit: Option<usize>,
     /// Issue identifiers to skip (already triaged this session)
     exclude: Option<Vec<String>>,
+    /// Randomize issue order instead of chronological (default false)
+    shuffle: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -500,7 +502,14 @@ impl RectilinearMcp {
             .collect();
 
         let limit = args.limit.unwrap_or(10);
-        let batch: Vec<_> = filtered.iter().take(limit).collect();
+        let batch: Vec<_> = if args.shuffle.unwrap_or(false) {
+            use rand::seq::SliceRandom;
+            let mut indices: Vec<usize> = (0..filtered.len()).collect();
+            indices.shuffle(&mut rand::rng());
+            indices.into_iter().take(limit).map(|i| &filtered[i]).collect()
+        } else {
+            filtered.iter().take(limit).collect()
+        };
 
         let total_remaining = self
             .db
