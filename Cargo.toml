@@ -15,7 +15,7 @@ tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 
 # HTTP + API
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -24,6 +24,9 @@ rmcp = { version = "0.1", features = ["server", "transport-io"] }
 
 # Config
 toml = "0.8"
+
+# Embeddings (local GGUF)
+llama-cpp-2 = "0.1"
 
 # Misc
 anyhow = "1"
