@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::db::{Database, FtsResult};
+use crate::db::Database;
 use crate::embedding::{self, Embedder};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,8 +74,8 @@ pub async fn search(
     // Post-filter
     let results: Vec<_> = results
         .into_iter()
-        .filter(|r| {
-            if let Some(team) = team_key {
+        .filter(|_r| {
+            if let Some(_team) = team_key {
                 // We'd need team info - for now skip team filter in post-filter
                 // since FTS doesn't return team info directly
                 true
@@ -157,7 +157,7 @@ async fn vector_search(
         .into_iter()
         .take(limit)
         .enumerate()
-        .filter_map(|(rank, (issue_id, (sim, identifier)))| {
+        .filter_map(|(rank, (issue_id, (sim, _identifier)))| {
             let issue = db.get_issue(&issue_id).ok()??;
             Some(SearchResult {
                 issue_id,
@@ -241,7 +241,7 @@ pub async fn find_duplicates(
     .await?;
 
     // For duplicate finding, also do a pure vector search and merge
-    let vec_results = vector_search(db, text, team_key, limit, embedder).await?;
+    let _vec_results = vector_search(db, text, team_key, limit, embedder).await?;
 
     // Keep results above threshold
     results.retain(|r| r.similarity.unwrap_or(0.0) >= threshold || r.score > 0.01);

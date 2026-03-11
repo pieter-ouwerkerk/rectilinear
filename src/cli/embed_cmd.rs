@@ -26,15 +26,14 @@ pub async fn handle_embed(
     let dim_key = "embedding_dimensions";
     if let Some(stored_dim) = db.get_metadata(dim_key)? {
         let stored: usize = stored_dim.parse().unwrap_or(0);
-        if stored != embedder.dimensions() {
-            if !force {
+        if stored != embedder.dimensions()
+            && !force {
                 anyhow::bail!(
                     "Embedding dimensions changed ({} -> {}). Run with --force to regenerate all embeddings.",
                     stored,
                     embedder.dimensions()
                 );
             }
-        }
     }
 
     let issues = db.get_issues_needing_embedding(team_key, force)?;

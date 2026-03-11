@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
@@ -441,7 +441,7 @@ impl LinearClient {
         title: Option<&str>,
         description: Option<&str>,
         priority: Option<i32>,
-        state_name: Option<&str>,
+        _state_name: Option<&str>,
     ) -> Result<()> {
         let mut input = serde_json::Map::new();
         if let Some(t) = title {
