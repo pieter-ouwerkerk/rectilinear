@@ -90,7 +90,19 @@ pub async fn handle_embed(
     let mut expected_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
-    for issue in &issues {
+    if debug {
+        eprintln!("  RSS before loop: {}MB", rss_mb().unwrap_or(0));
+    }
+
+    for (issue_num, issue) in issues.iter().enumerate() {
+        if debug && issue_num % 50 == 0 {
+            eprintln!(
+                "  chunking issue {}/{} (RSS: {}MB)",
+                issue_num + 1,
+                issues.len(),
+                rss_mb().unwrap_or(0)
+            );
+        }
         let chunks = embedding::chunk_text(
             &issue.title,
             issue.description.as_deref().unwrap_or(""),
