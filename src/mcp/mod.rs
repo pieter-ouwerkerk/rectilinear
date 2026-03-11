@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::embedding::Embedder;
+use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 use crate::search::{self, SearchMode};
 
@@ -528,13 +528,74 @@ impl RectilinearMcp {
             return Err("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)".into());
         }
 
-        let issue = self
+        // Resolve from local DB to get the Linear UUID
+        let local_issue = self
             .db
             .get_issue(&args.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
 
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+
+        // Re-fetch from Linear to get the latest version
+        let issue = client
+            .fetch_single_issue(&local_issue.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
+
+        // If someone else already prioritized it, let the caller know
+        if issue.priority != 0 {
+            return Ok(serde_json::json!({
+                "identifier": issue.identifier,
+                "status": "already_triaged",
+                "current_priority": issue.priority,
+                "current_priority_label": issue.priority_label(),
+                "message": format!(
+                    "{} was already prioritized as {} — skipping",
+                    issue.identifier, issue.priority_label()
+                ),
+            })
+            .to_string());
+        }
+
+        // Flag if the issue was modified since we last saw it
+        let was_modified = issue.content_hash != local_issue.content_hash;
+        if was_modified {
+            let mut changes = Vec::new();
+            if issue.title != local_issue.title {
+                changes.push(format!("title changed: \"{}\" → \"{}\"", local_issue.title, issue.title));
+            }
+            if issue.description != local_issue.description {
+                changes.push("description was updated".to_string());
+            }
+            if issue.state_name != local_issue.state_name {
+                changes.push(format!("state changed: {} → {}", local_issue.state_name, issue.state_name));
+            }
+            if issue.assignee_name != local_issue.assignee_name {
+                changes.push(format!(
+                    "assignee changed: {} → {}",
+                    local_issue.assignee_name.as_deref().unwrap_or("unassigned"),
+                    issue.assignee_name.as_deref().unwrap_or("unassigned")
+                ));
+            }
+            // Re-embed with the updated content
+            self.reembed_issue(&issue).await;
+
+            return Ok(serde_json::json!({
+                "identifier": issue.identifier,
+                "status": "modified_since_queued",
+                "changes": changes,
+                "current_title": issue.title,
+                "current_description": issue.description,
+                "current_state": issue.state_name,
+                "message": format!(
+                    "{} was modified since the queue was fetched — review the latest version before triaging",
+                    issue.identifier
+                ),
+            })
+            .to_string());
+        }
 
         client
             .update_issue(
@@ -560,6 +621,11 @@ impl RectilinearMcp {
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
 
+        // Re-embed if title or description changed
+        if args.title.is_some() || args.description.is_some() {
+            self.reembed_issue(&updated).await;
+        }
+
         let priority_label = match args.priority {
             1 => "Urgent",
             2 => "High",
@@ -576,6 +642,30 @@ impl RectilinearMcp {
             "status": "triaged",
         })
         .to_string())
+    }
+}
+
+impl RectilinearMcp {
+    /// Re-chunk and re-embed a single issue. Best-effort — failures are silently ignored.
+    async fn reembed_issue(&self, issue: &crate::db::Issue) {
+        let Ok(embedder) = Embedder::new(&self.config) else {
+            return;
+        };
+        let chunks = embedding::chunk_text(
+            &issue.title,
+            issue.description.as_deref().unwrap_or(""),
+            512,
+            64,
+        );
+        if let Ok(embeddings) = embedder.embed_batch(&chunks).await {
+            let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
+                .into_iter()
+                .zip(embeddings)
+                .enumerate()
+                .map(|(i, (text, emb))| (i, text, embedding::embedding_to_bytes(&emb)))
+                .collect();
+            let _ = self.db.upsert_chunks(&issue.id, &chunk_data);
+        }
     }
 }
 
