@@ -93,11 +93,7 @@ pub async fn handle_search(
         }
     }
 
-    println!(
-        "\n{} {} results",
-        "Found".dimmed(),
-        results.len()
-    );
+    println!("\n{} {} results", "Found".dimmed(), results.len());
 
     Ok(())
 }

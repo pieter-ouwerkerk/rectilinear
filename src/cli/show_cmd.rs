@@ -4,9 +4,12 @@ use colored::Colorize;
 use crate::db::Database;
 
 pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Result<()> {
-    let issue = db
-        .get_issue(id)?
-        .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found in local database. Try syncing first.", id))?;
+    let issue = db.get_issue(id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Issue '{}' not found in local database. Try syncing first.",
+            id
+        )
+    })?;
 
     if json {
         let mut value = serde_json::to_value(&issue)?;
@@ -43,7 +46,11 @@ pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Resul
         println!("\n{}", "Description:".bold());
         // Truncate very long descriptions for terminal display
         let display = if desc.len() > 2000 {
-            format!("{}...\n(truncated, {} chars total)", &desc[..2000], desc.len())
+            format!(
+                "{}...\n(truncated, {} chars total)",
+                &desc[..2000],
+                desc.len()
+            )
         } else {
             desc.clone()
         };
@@ -58,11 +65,7 @@ pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Resul
                 println!(
                     "\n  {} {} {}",
                     "─".repeat(3),
-                    comment
-                        .user_name
-                        .as_deref()
-                        .unwrap_or("Unknown")
-                        .bold(),
+                    comment.user_name.as_deref().unwrap_or("Unknown").bold(),
                     comment.created_at.dimmed()
                 );
                 for line in comment.body.lines() {

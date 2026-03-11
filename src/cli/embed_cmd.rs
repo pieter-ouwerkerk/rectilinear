@@ -70,7 +70,8 @@ pub async fn handle_embed(
     // Batch embed
     let batch_size = 50;
     let mut chunk_embeddings: Vec<(String, usize, String, Vec<f32>)> = Vec::new();
-    let mut chunk_counters: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut chunk_counters: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for batch in all_texts.chunks(batch_size) {
         let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
@@ -119,10 +120,7 @@ pub async fn handle_embed(
 
     let total_embedded = db.count_embedded_issues(team_key)?;
     let total_issues = db.count_issues(team_key)?;
-    println!(
-        "Embedded: {}/{} issues",
-        total_embedded, total_issues
-    );
+    println!("Embedded: {}/{} issues", total_embedded, total_issues);
 
     Ok(())
 }

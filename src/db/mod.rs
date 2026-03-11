@@ -185,7 +185,7 @@ impl Database {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT c.issue_id, c.chunk_index, c.chunk_text, c.embedding, i.identifier
-                 FROM chunks c JOIN issues i ON c.issue_id = i.id"
+                 FROM chunks c JOIN issues i ON c.issue_id = i.id",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(Chunk {
@@ -205,7 +205,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT c.issue_id, c.chunk_index, c.chunk_text, c.embedding, i.identifier
                  FROM chunks c JOIN issues i ON c.issue_id = i.id
-                 WHERE i.team_key = ?1"
+                 WHERE i.team_key = ?1",
             )?;
             let rows = stmt.query_map(rusqlite::params![team_key], |row| {
                 Ok(Chunk {
@@ -235,7 +235,11 @@ impl Database {
         })
     }
 
-    pub fn get_issues_needing_embedding(&self, team_key: Option<&str>, force: bool) -> Result<Vec<Issue>> {
+    pub fn get_issues_needing_embedding(
+        &self,
+        team_key: Option<&str>,
+        force: bool,
+    ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let sql = if force {
                 if let Some(team) = team_key {
@@ -278,7 +282,11 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET body=excluded.body, user_name=excluded.user_name",
                 rusqlite::params![
-                    comment.id, comment.issue_id, comment.body, comment.user_name, comment.created_at,
+                    comment.id,
+                    comment.issue_id,
+                    comment.body,
+                    comment.user_name,
+                    comment.created_at,
                 ],
             )?;
             Ok(())
@@ -307,9 +315,8 @@ impl Database {
 
     pub fn get_sync_cursor(&self, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT last_updated_at FROM sync_state WHERE team_key = ?1"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT last_updated_at FROM sync_state WHERE team_key = ?1")?;
             let mut rows = stmt.query(rusqlite::params![team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(row.get(0)?))
@@ -333,9 +340,8 @@ impl Database {
 
     pub fn is_full_sync_done(&self, team_key: &str) -> Result<bool> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT full_sync_done FROM sync_state WHERE team_key = ?1"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT full_sync_done FROM sync_state WHERE team_key = ?1")?;
             let mut rows = stmt.query(rusqlite::params![team_key])?;
             if let Some(row) = rows.next()? {
                 let done: bool = row.get(0)?;

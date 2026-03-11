@@ -11,7 +11,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rectilinear", about = "Linear issue intelligence tool", version)]
+#[command(
+    name = "rectilinear",
+    about = "Linear issue intelligence tool",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

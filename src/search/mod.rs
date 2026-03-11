@@ -54,16 +54,15 @@ pub async fn search(
     let results = match mode {
         SearchMode::Fts => fts_search(db, query, limit * 2)?,
         SearchMode::Vector => {
-            let embedder = embedder
-                .ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
+            let embedder =
+                embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
             vector_search(db, query, team_key, limit * 2, embedder).await?
         }
         SearchMode::Hybrid => {
             let fts_results = fts_search(db, query, limit * 3)?;
 
             if let Some(embedder) = embedder {
-                let vec_results =
-                    vector_search(db, query, team_key, limit * 3, embedder).await?;
+                let vec_results = vector_search(db, query, team_key, limit * 3, embedder).await?;
                 reciprocal_rank_fusion(fts_results, vec_results, rrf_k, 0.3, 0.7)
             } else {
                 // Fall back to FTS-only if no embedder

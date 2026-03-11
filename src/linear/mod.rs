@@ -174,7 +174,11 @@ impl LinearClient {
         Ok(Self { client, api_key })
     }
 
-    async fn query<T: serde::de::DeserializeOwned>(&self, query: &str, variables: serde_json::Value) -> Result<T> {
+    async fn query<T: serde::de::DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T> {
         let body = serde_json::json!({
             "query": query,
             "variables": variables,
@@ -196,7 +200,10 @@ impl LinearClient {
             anyhow::bail!("Linear API returned {}: {}", status, text);
         }
 
-        let response: GraphQLResponse<T> = resp.json().await.context("Failed to parse Linear response")?;
+        let response: GraphQLResponse<T> = resp
+            .json()
+            .await
+            .context("Failed to parse Linear response")?;
 
         if let Some(errors) = response.errors {
             let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -223,10 +230,7 @@ impl LinearClient {
         updated_after: Option<&str>,
         include_archived: bool,
     ) -> Result<(Vec<db::Issue>, bool, Option<String>)> {
-        let mut filter_parts = vec![format!(
-            "team: {{ key: {{ eq: \"{}\" }} }}",
-            team_key
-        )];
+        let mut filter_parts = vec![format!("team: {{ key: {{ eq: \"{}\" }} }}", team_key)];
         if let Some(after) = updated_after {
             filter_parts.push(format!("updatedAt: {{ gt: \"{}\" }}", after));
         }
@@ -272,7 +276,8 @@ impl LinearClient {
             .into_iter()
             .map(|i| {
                 let labels: Vec<String> = i.labels.nodes.iter().map(|l| l.name.clone()).collect();
-                let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
+                let labels_json =
+                    serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
 
                 let mut hasher = Sha256::new();
                 hasher.update(&i.title);
@@ -461,10 +466,7 @@ impl LinearClient {
         "#;
 
         let data: UpdateIssueData = self
-            .query(
-                query,
-                serde_json::json!({ "id": issue_id, "input": input }),
-            )
+            .query(query, serde_json::json!({ "id": issue_id, "input": input }))
             .await?;
 
         if !data.issue_update.success {

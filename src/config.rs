@@ -137,10 +137,9 @@ impl Config {
     }
 
     pub fn linear_api_key(&self) -> Result<&str> {
-        self.linear
-            .api_key
-            .as_deref()
-            .context("Linear API key not configured. Run: rectilinear config set linear-api-key <KEY>")
+        self.linear.api_key.as_deref().context(
+            "Linear API key not configured. Run: rectilinear config set linear-api-key <KEY>",
+        )
     }
 
     pub fn anthropic_api_key(&self) -> Result<&str> {

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::model::*;
-use rmcp::{tool, ServerHandler};
 use rmcp::schemars::JsonSchema;
+use rmcp::{tool, ServerHandler};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -112,10 +112,7 @@ impl RectilinearMcp {
         name = "search_issues",
         description = "Search Linear issues using hybrid FTS + vector search. Supports filtering by team and state."
     )]
-    async fn search_issues(
-        &self,
-        #[tool(aggr)] args: SearchArgs,
-    ) -> Result<String, String> {
+    async fn search_issues(&self, #[tool(aggr)] args: SearchArgs) -> Result<String, String> {
         let mode: SearchMode = args
             .mode
             .as_deref()
@@ -187,10 +184,7 @@ impl RectilinearMcp {
         name = "get_issue",
         description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments."
     )]
-    async fn get_issue(
-        &self,
-        #[tool(aggr)] args: GetIssueArgs,
-    ) -> Result<String, String> {
+    async fn get_issue(&self, #[tool(aggr)] args: GetIssueArgs) -> Result<String, String> {
         let issue = self
             .db
             .get_issue(&args.id)
@@ -200,10 +194,7 @@ impl RectilinearMcp {
         let mut value = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
 
         if args.include_comments.unwrap_or(false) {
-            let comments = self
-                .db
-                .get_comments(&issue.id)
-                .map_err(|e| e.to_string())?;
+            let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
             value["comments"] = serde_json::to_value(&comments).map_err(|e| e.to_string())?;
         }
 
@@ -214,10 +205,7 @@ impl RectilinearMcp {
         name = "create_issue",
         description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low)."
     )]
-    async fn create_issue(
-        &self,
-        #[tool(aggr)] args: CreateIssueArgs,
-    ) -> Result<String, String> {
+    async fn create_issue(&self, #[tool(aggr)] args: CreateIssueArgs) -> Result<String, String> {
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
 
         let team_id = client
@@ -254,10 +242,7 @@ impl RectilinearMcp {
         name = "update_issue",
         description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update."
     )]
-    async fn update_issue(
-        &self,
-        #[tool(aggr)] args: UpdateIssueArgs,
-    ) -> Result<String, String> {
+    async fn update_issue(&self, #[tool(aggr)] args: UpdateIssueArgs) -> Result<String, String> {
         let issue = self
             .db
             .get_issue(&args.id)
@@ -281,9 +266,7 @@ impl RectilinearMcp {
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
-        self.db
-            .upsert_issue(&updated)
-            .map_err(|e| e.to_string())?;
+        self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -296,10 +279,7 @@ impl RectilinearMcp {
         name = "append_to_issue",
         description = "Add a comment to an issue or append text to its description."
     )]
-    async fn append_to_issue(
-        &self,
-        #[tool(aggr)] args: AppendArgs,
-    ) -> Result<String, String> {
+    async fn append_to_issue(&self, #[tool(aggr)] args: AppendArgs) -> Result<String, String> {
         let issue = self
             .db
             .get_issue(&args.id)
@@ -333,9 +313,7 @@ impl RectilinearMcp {
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
-        self.db
-            .upsert_issue(&updated)
-            .map_err(|e| e.to_string())?;
+        self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -348,10 +326,7 @@ impl RectilinearMcp {
         name = "sync_team",
         description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync."
     )]
-    async fn sync_team(
-        &self,
-        #[tool(aggr)] args: SyncTeamArgs,
-    ) -> Result<String, String> {
+    async fn sync_team(&self, #[tool(aggr)] args: SyncTeamArgs) -> Result<String, String> {
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
         let full = args.full.unwrap_or(false);
 
@@ -377,10 +352,7 @@ impl RectilinearMcp {
         name = "issue_context",
         description = "Get an issue along with its N most similar issues, useful for understanding context and related work."
     )]
-    async fn issue_context(
-        &self,
-        #[tool(aggr)] args: IssueContextArgs,
-    ) -> Result<String, String> {
+    async fn issue_context(&self, #[tool(aggr)] args: IssueContextArgs) -> Result<String, String> {
         let issue = self
             .db
             .get_issue(&args.id)
@@ -415,10 +387,7 @@ impl RectilinearMcp {
             Vec::new()
         };
 
-        let comments = self
-            .db
-            .get_comments(&issue.id)
-            .map_err(|e| e.to_string())?;
+        let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
 
         let result = serde_json::json!({
             "issue": issue,

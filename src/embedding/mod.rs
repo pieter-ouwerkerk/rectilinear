@@ -194,10 +194,7 @@ pub fn chunk_text(title: &str, text: &str, max_tokens: usize, overlap: usize) ->
 
 /// Convert f32 embedding to bytes for storage
 pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 /// Convert bytes back to f32 embedding

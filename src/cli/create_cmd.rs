@@ -18,7 +18,9 @@ pub async fn handle_create(
 
     let team_key = team
         .or(config.linear.default_team.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("No team specified. Use --team or set default-team in config"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("No team specified. Use --team or set default-team in config")
+        })?;
 
     let team_id = client.get_team_id(team_key).await?;
 

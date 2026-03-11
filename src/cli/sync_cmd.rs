@@ -18,7 +18,9 @@ pub async fn handle_sync(
 
     let team_key = team
         .or(config.linear.default_team.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("No team specified. Use --team or set default-team in config"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("No team specified. Use --team or set default-team in config")
+        })?;
 
     let sync_type = if full { "Full" } else { "Incremental" };
     let is_first = !db.is_full_sync_done(team_key)?;
@@ -57,7 +59,11 @@ pub async fn handle_sync(
     ));
 
     let total = db.count_issues(Some(team_key))?;
-    println!("Total issues in database for {}: {}", team_key.bold(), total);
+    println!(
+        "Total issues in database for {}: {}",
+        team_key.bold(),
+        total
+    );
 
     if embed {
         println!();

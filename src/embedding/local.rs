@@ -36,8 +36,7 @@ impl LocalBackend {
             llama_cpp_2::LogOptions::default().with_logs_enabled(false),
         );
 
-        let backend = LlamaBackend::init()
-            .context("Failed to initialize llama.cpp backend")?;
+        let backend = LlamaBackend::init().context("Failed to initialize llama.cpp backend")?;
 
         let model_params = LlamaModelParams::default();
 
@@ -97,7 +96,8 @@ impl LocalBackend {
             // Build batch
             let mut batch = LlamaBatch::new(MAX_TOKENS as usize, 1);
             for (pos, &token) in tokens.iter().enumerate() {
-                batch.add(token, pos as i32, &[seq_id], pos == tokens.len() - 1)
+                batch
+                    .add(token, pos as i32, &[seq_id], pos == tokens.len() - 1)
                     .map_err(|e| anyhow::anyhow!("Failed to add token to batch: {:?}", e))?;
             }
 
@@ -166,10 +166,7 @@ impl LocalBackend {
             .context("Failed to start model download")?;
 
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "Failed to download model: HTTP {}",
-                resp.status()
-            );
+            anyhow::bail!("Failed to download model: HTTP {}", resp.status());
         }
 
         let total_size = resp.content_length();

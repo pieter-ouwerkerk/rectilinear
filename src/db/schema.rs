@@ -18,10 +18,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if current_version < 1 {
         conn.execute_batch(MIGRATION_1)?;
-        conn.execute(
-            "INSERT INTO schema_version (version) VALUES (1)",
-            [],
-        )?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])?;
     }
 
     Ok(())

@@ -149,7 +149,10 @@ pub async fn handle_triage(
             }
         );
 
-        let system = format!("{}\n\nCurrent issue context:\n{}", SYSTEM_PROMPT, issue_context);
+        let system = format!(
+            "{}\n\nCurrent issue context:\n{}",
+            SYSTEM_PROMPT, issue_context
+        );
         let mut messages: Vec<Message> = vec![Message::user(
             "Please analyze this issue and ask me clarifying questions to help determine the right priority.",
         )];
@@ -223,10 +226,8 @@ pub async fn handle_triage(
                                         let json_str = llm::extract_json(&retry_response);
                                         match serde_json::from_str::<TriageProposal>(json_str) {
                                             Ok(proposal) => {
-                                                match prompt_apply(
-                                                    issue, &proposal, &linear, db,
-                                                )
-                                                .await
+                                                match prompt_apply(issue, &proposal, &linear, db)
+                                                    .await
                                                 {
                                                     TriageAction::Applied => applied += 1,
                                                     TriageAction::Skipped => skipped += 1,
@@ -346,13 +347,7 @@ async fn prompt_apply(
             };
 
             match linear
-                .update_issue(
-                    &issue.id,
-                    title,
-                    description,
-                    Some(proposal.priority),
-                    None,
-                )
+                .update_issue(&issue.id, title, description, Some(proposal.priority), None)
                 .await
             {
                 Ok(()) => {
@@ -423,10 +418,7 @@ async fn build_similar_context(
                     4 => "Low",
                     _ => "No priority",
                 };
-                context.push_str(&format!(
-                    "  - {} ({}): {}\n",
-                    r.identifier, plabel, r.title
-                ));
+                context.push_str(&format!("  - {} ({}): {}\n", r.identifier, plabel, r.title));
             }
             context
         }

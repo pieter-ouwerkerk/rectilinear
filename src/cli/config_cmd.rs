@@ -18,10 +18,14 @@ pub fn handle_set(key: &str, value: &str) -> Result<()> {
         }
         "embedding.gemini-api-key" => config.embedding.gemini_api_key = Some(value.to_string()),
         "search.default-limit" => {
-            config.search.default_limit = value.parse().map_err(|_| anyhow::anyhow!("Invalid number"))?;
+            config.search.default_limit = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid number"))?;
         }
         "search.duplicate-threshold" => {
-            config.search.duplicate_threshold = value.parse().map_err(|_| anyhow::anyhow!("Invalid number"))?;
+            config.search.duplicate_threshold = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid number"))?;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
