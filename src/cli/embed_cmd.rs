@@ -59,6 +59,8 @@ pub async fn handle_embed(
         return Ok(());
     }
 
+    println!("{} issues to embed", issues.len());
+
     let pb = ProgressBar::new(issues.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
