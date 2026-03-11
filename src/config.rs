@@ -12,6 +12,8 @@ pub struct Config {
     pub search: SearchConfig,
     #[serde(default)]
     pub anthropic: AnthropicConfig,
+    #[serde(default)]
+    pub triage: TriageConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -56,6 +58,37 @@ pub struct SearchConfig {
     pub default_limit: usize,
     pub duplicate_threshold: f32,
     pub rrf_k: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageConfig {
+    pub mode: TriageMode,
+}
+
+impl Default for TriageConfig {
+    fn default() -> Self {
+        Self {
+            mode: TriageMode::Native,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageMode {
+    Native,
+    ClaudeCode,
+    Codex,
+}
+
+impl std::fmt::Display for TriageMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TriageMode::Native => write!(f, "native"),
+            TriageMode::ClaudeCode => write!(f, "claude-code"),
+            TriageMode::Codex => write!(f, "codex"),
+        }
+    }
 }
 
 impl Default for SearchConfig {

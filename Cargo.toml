@@ -28,6 +28,11 @@ toml = "0.8"
 # Embeddings (local GGUF)
 llama-cpp-2 = "0.1"
 
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+
 # Misc
 anyhow = "1"
 thiserror = "2"

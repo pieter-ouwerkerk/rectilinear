@@ -16,6 +16,7 @@ pub fn handle_set(key: &str, value: &str) -> Result<()> {
                 _ => anyhow::bail!("Invalid backend: {}. Use 'local' or 'api'", value),
             };
         }
+        "anthropic-api-key" => config.anthropic.api_key = Some(value.to_string()),
         "embedding.gemini-api-key" => config.embedding.gemini_api_key = Some(value.to_string()),
         "search.default-limit" => {
             config.search.default_limit = value
@@ -26,6 +27,17 @@ pub fn handle_set(key: &str, value: &str) -> Result<()> {
             config.search.duplicate_threshold = value
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid number"))?;
+        }
+        "triage.mode" => {
+            config.triage.mode = match value {
+                "native" => crate::config::TriageMode::Native,
+                "claude-code" => crate::config::TriageMode::ClaudeCode,
+                "codex" => crate::config::TriageMode::Codex,
+                _ => anyhow::bail!(
+                    "Invalid triage mode: {}. Use 'native', 'claude-code', or 'codex'",
+                    value
+                ),
+            };
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
@@ -48,6 +60,13 @@ pub fn handle_get(key: &str) -> Result<()> {
         }),
         "default-team" => config.linear.default_team,
         "embedding.backend" => Some(format!("{:?}", config.embedding.backend).to_lowercase()),
+        "anthropic-api-key" => config.anthropic.api_key.map(|k| {
+            if k.len() > 8 {
+                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "****".to_string()
+            }
+        }),
         "embedding.gemini-api-key" => config.embedding.gemini_api_key.map(|k| {
             if k.len() > 8 {
                 format!("{}...{}", &k[..4], &k[k.len() - 4..])
@@ -57,6 +76,7 @@ pub fn handle_get(key: &str) -> Result<()> {
         }),
         "search.default-limit" => Some(config.search.default_limit.to_string()),
         "search.duplicate-threshold" => Some(config.search.duplicate_threshold.to_string()),
+        "triage.mode" => Some(config.triage.mode.to_string()),
         _ => anyhow::bail!("Unknown config key: {}", key),
     };
 
@@ -99,6 +119,22 @@ pub fn handle_show() -> Result<()> {
     );
 
     println!();
+    println!("{}", "[anthropic]".bold());
+    println!(
+        "  api-key: {}",
+        config
+            .anthropic
+            .api_key
+            .as_ref()
+            .map(|k| if k.len() > 8 {
+                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "****".to_string()
+            })
+            .unwrap_or_else(|| "(not set)".dimmed().to_string())
+    );
+
+    println!();
     println!("{}", "[embedding]".bold());
     println!(
         "  backend: {}",
@@ -125,6 +161,10 @@ pub fn handle_show() -> Result<()> {
         "  duplicate-threshold: {}",
         config.search.duplicate_threshold
     );
+
+    println!();
+    println!("{}", "[triage]".bold());
+    println!("  mode: {}", config.triage.mode);
 
     Ok(())
 }

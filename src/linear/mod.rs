@@ -7,6 +7,7 @@ use crate::db::{self, Database};
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
+#[derive(Clone)]
 pub struct LinearClient {
     client: reqwest::Client,
     api_key: String,
