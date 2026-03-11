@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, WrapMode};
 
 use crate::config::{Config, TriageMode};
 use crate::db::{Database, Issue};
@@ -174,6 +174,7 @@ impl<'a> App<'a> {
                     TextArea::default()
                 };
                 ta.set_style(Style::default().fg(Color::White));
+                ta.set_wrap_mode(WrapMode::Word);
                 ta
             })
             .collect();
