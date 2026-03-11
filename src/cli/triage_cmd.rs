@@ -855,22 +855,47 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Dynamic textarea height: scale with terminal, min 2 lines (+ 2 for border)
+    // Compute per-textarea height based on content, with fair distribution of space
     let n = app.questions.len() as u16;
     let label_lines: u16 = 2;
     let gap: u16 = 1;
+    let border: u16 = 2; // top + bottom border
     let overhead_per_q = label_lines + gap;
     let available = inner.height.saturating_sub(n * overhead_per_q);
-    let textarea_inner = (available / n).max(2); // at least 2 visible lines
-    let textarea_height = textarea_inner + 2; // + border
 
-    let constraints: Vec<Constraint> = app
-        .questions
+    // Content-aware heights: each textarea gets at least its line count, min 2
+    let content_heights: Vec<u16> = app
+        .answers
         .iter()
-        .flat_map(|_| {
+        .map(|ta| (ta.lines().len() as u16).max(2))
+        .collect();
+    let total_content: u16 = content_heights.iter().sum();
+
+    let textarea_heights: Vec<u16> = if total_content + n * border <= available {
+        // Enough room: give each textarea its content height, distribute remainder
+        let remaining = available - total_content - n * border;
+        let bonus = remaining / n;
+        content_heights
+            .iter()
+            .map(|&h| h + border + bonus)
+            .collect()
+    } else {
+        // Tight: distribute available space proportionally, min 2 + border
+        content_heights
+            .iter()
+            .map(|&h| {
+                let share = (h as u32 * available as u32 / total_content.max(1) as u32) as u16;
+                share.max(2 + border)
+            })
+            .collect()
+    };
+
+    let constraints: Vec<Constraint> = textarea_heights
+        .iter()
+        .flat_map(|&h| {
             [
                 Constraint::Length(label_lines),
-                Constraint::Length(textarea_height),
+                Constraint::Length(h),
                 Constraint::Length(gap),
             ]
         })
