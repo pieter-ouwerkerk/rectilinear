@@ -1,9 +1,12 @@
+mod local;
+
 use anyhow::{Context, Result};
 
 use crate::config::{Config, EmbeddingBackend};
 
 enum Backend {
     Gemini(GeminiBackend),
+    Local(local::LocalBackend),
 }
 
 pub struct Embedder {
@@ -103,11 +106,12 @@ impl Embedder {
                 })
             }
             EmbeddingBackend::Local => {
-                anyhow::bail!(
-                    "Local embedding backend not yet implemented. \
-                     Set GEMINI_API_KEY environment variable to use the API backend, \
-                     or run: rectilinear config set embedding.gemini-api-key <KEY>"
-                )
+                let backend = local::LocalBackend::new(config)?;
+                let dimensions = backend.dimensions();
+                Ok(Self {
+                    dimensions,
+                    backend: Backend::Local(backend),
+                })
             }
         }
     }
@@ -115,6 +119,7 @@ impl Embedder {
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         match &self.backend {
             Backend::Gemini(b) => b.embed_batch(texts).await,
+            Backend::Local(b) => b.embed_batch(texts),
         }
     }
 
@@ -130,6 +135,7 @@ impl Embedder {
     pub fn backend_name(&self) -> &str {
         match &self.backend {
             Backend::Gemini(_) => "gemini-api",
+            Backend::Local(_) => "local-gguf",
         }
     }
 }
