@@ -845,15 +845,23 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Each question: 2 lines for label (allows wrapping) + 3 lines textarea + 1 gap
+    // Dynamic textarea height: scale with terminal, min 2 lines (+ 2 for border)
+    let n = app.questions.len() as u16;
+    let label_lines: u16 = 2;
+    let gap: u16 = 1;
+    let overhead_per_q = label_lines + gap;
+    let available = inner.height.saturating_sub(n * overhead_per_q);
+    let textarea_inner = (available / n).max(2); // at least 2 visible lines
+    let textarea_height = textarea_inner + 2; // + border
+
     let constraints: Vec<Constraint> = app
         .questions
         .iter()
         .flat_map(|_| {
             [
-                Constraint::Length(2), // question label (wraps)
-                Constraint::Length(3), // text input
-                Constraint::Length(1), // gap
+                Constraint::Length(label_lines),
+                Constraint::Length(textarea_height),
+                Constraint::Length(gap),
             ]
         })
         .collect();
