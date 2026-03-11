@@ -1,0 +1,464 @@
+use anyhow::Result;
+use rmcp::model::*;
+use rmcp::{tool, ServerHandler};
+use rmcp::schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::config::Config;
+use crate::db::Database;
+use crate::embedding::Embedder;
+use crate::linear::LinearClient;
+use crate::search::{self, SearchMode};
+
+#[derive(Clone)]
+pub struct RectilinearMcp {
+    db: Database,
+    config: Config,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SearchArgs {
+    /// Search query text
+    query: String,
+    /// Filter by team key (e.g., "ENG")
+    team: Option<String>,
+    /// Filter by state name
+    state: Option<String>,
+    /// Search mode: "fts", "vector", or "hybrid"
+    mode: Option<String>,
+    /// Maximum number of results
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct FindDuplicatesArgs {
+    /// Title of the potential new issue
+    title: String,
+    /// Description of the potential new issue
+    description: Option<String>,
+    /// Filter by team key
+    team: Option<String>,
+    /// Minimum similarity threshold (0.0-1.0)
+    threshold: Option<f32>,
+    /// Maximum number of results
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct GetIssueArgs {
+    /// Issue ID or identifier (e.g., "ENG-123")
+    id: String,
+    /// Whether to include comments
+    include_comments: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CreateIssueArgs {
+    /// Team key (e.g., "ENG")
+    team: String,
+    /// Issue title
+    title: String,
+    /// Issue description
+    description: Option<String>,
+    /// Priority: 1=Urgent, 2=High, 3=Medium, 4=Low
+    priority: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct UpdateIssueArgs {
+    /// Issue ID or identifier
+    id: String,
+    /// New title
+    title: Option<String>,
+    /// New description
+    description: Option<String>,
+    /// New priority
+    priority: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct AppendArgs {
+    /// Issue ID or identifier
+    id: String,
+    /// Comment text to add
+    comment: Option<String>,
+    /// Text to append to description
+    description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SyncTeamArgs {
+    /// Team key to sync
+    team: String,
+    /// Whether to do a full re-sync
+    full: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct IssueContextArgs {
+    /// Issue ID or identifier
+    id: String,
+    /// Number of similar issues to return
+    similar_count: Option<usize>,
+}
+
+#[tool(tool_box)]
+impl RectilinearMcp {
+    pub fn new(db: Database, config: Config) -> Self {
+        Self { db, config }
+    }
+
+    #[tool(
+        name = "search_issues",
+        description = "Search Linear issues using hybrid FTS + vector search. Supports filtering by team and state."
+    )]
+    async fn search_issues(
+        &self,
+        #[tool(aggr)] args: SearchArgs,
+    ) -> Result<String, String> {
+        let mode: SearchMode = args
+            .mode
+            .as_deref()
+            .unwrap_or("hybrid")
+            .parse()
+            .map_err(|e: anyhow::Error| e.to_string())?;
+
+        let limit = args.limit.unwrap_or(self.config.search.default_limit);
+
+        let embedder = if mode != SearchMode::Fts {
+            Embedder::new(&self.config).ok()
+        } else {
+            None
+        };
+
+        let results = search::search(
+            &self.db,
+            &args.query,
+            mode,
+            args.team.as_deref(),
+            args.state.as_deref(),
+            limit,
+            embedder.as_ref(),
+            self.config.search.rrf_k,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "find_duplicates",
+        description = "Find potential duplicate issues. Provide a title and optional description to find similar existing issues with similarity scores."
+    )]
+    async fn find_duplicates(
+        &self,
+        #[tool(aggr)] args: FindDuplicatesArgs,
+    ) -> Result<String, String> {
+        let embedder = Embedder::new(&self.config).map_err(|e| e.to_string())?;
+
+        let search_text = if let Some(ref desc) = args.description {
+            format!("{}\n\n{}", args.title, desc)
+        } else {
+            args.title.clone()
+        };
+
+        let threshold = args
+            .threshold
+            .unwrap_or(self.config.search.duplicate_threshold);
+        let limit = args.limit.unwrap_or(10);
+
+        let results = search::find_duplicates(
+            &self.db,
+            &search_text,
+            args.team.as_deref(),
+            threshold,
+            limit,
+            &embedder,
+            self.config.search.rrf_k,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "get_issue",
+        description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments."
+    )]
+    async fn get_issue(
+        &self,
+        #[tool(aggr)] args: GetIssueArgs,
+    ) -> Result<String, String> {
+        let issue = self
+            .db
+            .get_issue(&args.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+
+        let mut value = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
+
+        if args.include_comments.unwrap_or(false) {
+            let comments = self
+                .db
+                .get_comments(&issue.id)
+                .map_err(|e| e.to_string())?;
+            value["comments"] = serde_json::to_value(&comments).map_err(|e| e.to_string())?;
+        }
+
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "create_issue",
+        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low)."
+    )]
+    async fn create_issue(
+        &self,
+        #[tool(aggr)] args: CreateIssueArgs,
+    ) -> Result<String, String> {
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+
+        let team_id = client
+            .get_team_id(&args.team)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (issue_id, identifier) = client
+            .create_issue(
+                &team_id,
+                &args.title,
+                args.description.as_deref(),
+                args.priority,
+                &[],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let issue = client
+            .fetch_single_issue(&issue_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "id": issue_id,
+            "identifier": identifier,
+            "status": "created"
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "update_issue",
+        description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update."
+    )]
+    async fn update_issue(
+        &self,
+        #[tool(aggr)] args: UpdateIssueArgs,
+    ) -> Result<String, String> {
+        let issue = self
+            .db
+            .get_issue(&args.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+
+        client
+            .update_issue(
+                &issue.id,
+                args.title.as_deref(),
+                args.description.as_deref(),
+                args.priority,
+                None,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let updated = client
+            .fetch_single_issue(&issue.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.db
+            .upsert_issue(&updated)
+            .map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "identifier": issue.identifier,
+            "status": "updated"
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "append_to_issue",
+        description = "Add a comment to an issue or append text to its description."
+    )]
+    async fn append_to_issue(
+        &self,
+        #[tool(aggr)] args: AppendArgs,
+    ) -> Result<String, String> {
+        let issue = self
+            .db
+            .get_issue(&args.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let mut actions: Vec<&str> = Vec::new();
+
+        if let Some(ref comment_text) = args.comment {
+            client
+                .add_comment(&issue.id, comment_text)
+                .await
+                .map_err(|e| e.to_string())?;
+            actions.push("comment_added");
+        }
+
+        if let Some(ref desc_text) = args.description {
+            let new_desc = match &issue.description {
+                Some(existing) => format!("{}\n\n{}", existing, desc_text),
+                None => desc_text.clone(),
+            };
+            client
+                .update_issue(&issue.id, None, Some(&new_desc), None, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            actions.push("description_updated");
+        }
+
+        let updated = client
+            .fetch_single_issue(&issue.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.db
+            .upsert_issue(&updated)
+            .map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "identifier": issue.identifier,
+            "actions": actions
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "sync_team",
+        description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync."
+    )]
+    async fn sync_team(
+        &self,
+        #[tool(aggr)] args: SyncTeamArgs,
+    ) -> Result<String, String> {
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let full = args.full.unwrap_or(false);
+
+        let count = client
+            .sync_team(&self.db, &args.team, full, false, None)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let total = self
+            .db
+            .count_issues(Some(&args.team))
+            .map_err(|e| e.to_string())?;
+
+        Ok(serde_json::json!({
+            "synced": count,
+            "total": total,
+            "team": args.team
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "issue_context",
+        description = "Get an issue along with its N most similar issues, useful for understanding context and related work."
+    )]
+    async fn issue_context(
+        &self,
+        #[tool(aggr)] args: IssueContextArgs,
+    ) -> Result<String, String> {
+        let issue = self
+            .db
+            .get_issue(&args.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+
+        let similar_count = args.similar_count.unwrap_or(5);
+
+        let search_text = format!(
+            "{}\n\n{}",
+            issue.title,
+            issue.description.as_deref().unwrap_or("")
+        );
+
+        let similar = if let Ok(embedder) = Embedder::new(&self.config) {
+            search::find_duplicates(
+                &self.db,
+                &search_text,
+                Some(&issue.team_key),
+                0.3,
+                similar_count + 1,
+                &embedder,
+                self.config.search.rrf_k,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.issue_id != issue.id)
+            .take(similar_count)
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let comments = self
+            .db
+            .get_comments(&issue.id)
+            .map_err(|e| e.to_string())?;
+
+        let result = serde_json::json!({
+            "issue": issue,
+            "comments": comments,
+            "similar_issues": similar,
+        });
+
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+}
+
+#[tool(tool_box)]
+impl ServerHandler for RectilinearMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability {
+                    list_changed: None,
+                }),
+                ..Default::default()
+            },
+            server_info: Implementation {
+                name: "rectilinear".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            instructions: Some(
+                "Rectilinear provides Linear issue search, duplicate detection, and issue management. \
+                 Use search_issues for keyword/semantic search, find_duplicates before creating new issues, \
+                 and issue_context to understand related work."
+                    .into(),
+            ),
+        }
+    }
+}
+
+pub async fn serve(db: Database, config: Config) -> Result<()> {
+    let handler = RectilinearMcp::new(db, config);
+    let transport = rmcp::transport::io::stdio();
+    let server = rmcp::serve_server(handler, transport).await?;
+    server.waiting().await?;
+    Ok(())
+}
