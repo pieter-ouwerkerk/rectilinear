@@ -142,6 +142,8 @@ enum Commands {
         #[arg(long)]
         no_context: bool,
     },
+    /// List available Linear teams
+    Teams,
     /// Start MCP server (stdio transport)
     Serve,
 }
@@ -314,6 +316,9 @@ async fn main() -> Result<()> {
                         no_context,
                     )
                     .await?;
+                }
+                Commands::Teams => {
+                    cli::teams_cmd::handle_teams(&config).await?;
                 }
                 Commands::Config { .. } | Commands::Serve => unreachable!(),
             }
