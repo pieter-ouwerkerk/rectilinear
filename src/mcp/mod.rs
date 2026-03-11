@@ -717,6 +717,7 @@ impl ServerHandler for RectilinearMcp {
 }
 
 pub async fn serve(db: Database, config: Config) -> Result<()> {
+    eprintln!("MCP server ready (stdio transport)");
     let handler = RectilinearMcp::new(db, config);
     let transport = rmcp::transport::io::stdio();
     let server = rmcp::serve_server(handler, transport).await?;

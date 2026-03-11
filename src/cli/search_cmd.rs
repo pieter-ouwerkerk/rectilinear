@@ -137,6 +137,9 @@ pub async fn handle_find_similar(
         threshold * 100.0
     );
 
+    // Find the longest identifier for alignment
+    let max_id_len = results.iter().map(|r| r.identifier.len()).max().unwrap_or(0);
+
     for result in &results {
         let sim_pct = result.similarity.unwrap_or(0.0) * 100.0;
         let sim_bar = "█".repeat((sim_pct / 5.0) as usize);
@@ -149,11 +152,12 @@ pub async fn handle_find_similar(
         };
 
         println!(
-            "  {} {} {:.1}% {}",
+            "  {:<width$} {:>5.1}% {:<20} {}",
             result.identifier.bold(),
-            sim_color,
             sim_pct,
+            sim_color,
             result.title,
+            width = max_id_len,
         );
     }
 
