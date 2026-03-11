@@ -6,6 +6,11 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::{self, Embedder};
 
+/// Estimate tokens for a text (chars / 4, matching chunk_text's heuristic)
+fn estimate_tokens(text: &str) -> usize {
+    (text.len() + 3) / 4
+}
+
 pub async fn handle_embed(
     db: &Database,
     config: &Config,
@@ -50,11 +55,24 @@ pub async fn handle_embed(
             .progress_chars("█▉▊▋▌▍▎▏ "),
     );
 
-    let embed_batch_size = 50;
+    // Batch limits: stay well under Gemini's 100-text / token limits
+    let max_texts_per_batch = 50;
+    let max_tokens_per_batch: usize = 20_000;
+
     let mut total_chunks = 0usize;
     let mut embedded_count = 0usize;
 
-    // Process issues one at a time: chunk, embed, flush to DB, then drop
+    // Batch accumulator: (issue_id, chunk_index, text)
+    let mut batch: Vec<(String, usize, String)> = Vec::new();
+    let mut batch_tokens: usize = 0;
+
+    // Completed embeddings awaiting flush, grouped by issue_id
+    let mut pending: std::collections::HashMap<String, Vec<(usize, String, Vec<u8>)>> =
+        std::collections::HashMap::new();
+    // How many chunks each issue has total
+    let mut expected_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
     for issue in &issues {
         let chunks = embedding::chunk_text(
             &issue.title,
@@ -62,26 +80,70 @@ pub async fn handle_embed(
             512,
             64,
         );
+        expected_counts.insert(issue.id.clone(), chunks.len());
 
-        // Embed this issue's chunks (sub-batch if needed)
-        let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks.len());
-        for text_batch in chunks.chunks(embed_batch_size) {
-            let texts: Vec<String> = text_batch.to_vec();
-            let embeddings = embedder.embed_batch(&texts).await?;
-            all_embeddings.extend(embeddings);
+        for (idx, text) in chunks.into_iter().enumerate() {
+            let tokens = estimate_tokens(&text);
+
+            // If adding this chunk would exceed limits, send the batch
+            if !batch.is_empty()
+                && (batch.len() >= max_texts_per_batch
+                    || batch_tokens + tokens > max_tokens_per_batch)
+            {
+                // Embed the batch
+                let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+                let embeddings = embedder.embed_batch(&texts).await?;
+
+                for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
+                    pending
+                        .entry(id)
+                        .or_default()
+                        .push((ci, ct, embedding::embedding_to_bytes(&emb)));
+                }
+                batch_tokens = 0;
+
+                // Flush any issues where all chunks are now embedded
+                let done: Vec<String> = pending
+                    .keys()
+                    .filter(|id| {
+                        pending.get(*id).map_or(false, |c| {
+                            c.len() == *expected_counts.get(*id).unwrap_or(&0)
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                for id in done {
+                    if let Some(chunks) = pending.remove(&id) {
+                        total_chunks += chunks.len();
+                        db.upsert_chunks(&id, &chunks)?;
+                        embedded_count += 1;
+                        pb.set_position(embedded_count as u64);
+                    }
+                }
+            }
+
+            batch.push((issue.id.clone(), idx, text));
+            batch_tokens += tokens;
         }
+    }
 
-        // Flush to DB immediately
-        let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
-            .into_iter()
-            .zip(all_embeddings)
-            .enumerate()
-            .map(|(i, (text, emb))| (i, text, embedding::embedding_to_bytes(&emb)))
-            .collect();
+    // Flush remaining batch
+    if !batch.is_empty() {
+        let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+        let embeddings = embedder.embed_batch(&texts).await?;
 
-        total_chunks += chunk_data.len();
-        db.upsert_chunks(&issue.id, &chunk_data)?;
+        for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
+            pending
+                .entry(id)
+                .or_default()
+                .push((ci, ct, embedding::embedding_to_bytes(&emb)));
+        }
+    }
 
+    // Flush all remaining issues
+    for (id, chunks) in pending.drain() {
+        total_chunks += chunks.len();
+        db.upsert_chunks(&id, &chunks)?;
         embedded_count += 1;
         pb.set_position(embedded_count as u64);
     }
