@@ -11,6 +11,18 @@ fn estimate_tokens(text: &str) -> usize {
     (text.len() + 3) / 4
 }
 
+/// Get current process RSS in MB (macOS/Linux)
+fn rss_mb() -> Option<u64> {
+    let pid = std::process::id();
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    let kb: u64 = s.trim().parse().ok()?;
+    Some(kb / 1024)
+}
+
 pub async fn handle_embed(
     db: &Database,
     config: &Config,
@@ -61,6 +73,7 @@ pub async fn handle_embed(
 
     let mut total_chunks = 0usize;
     let mut embedded_count = 0usize;
+    let mut api_calls = 0usize;
 
     // Batch accumulator: (issue_id, chunk_index, text)
     let mut batch: Vec<(String, usize, String)> = Vec::new();
@@ -92,6 +105,18 @@ pub async fn handle_embed(
             {
                 // Embed the batch
                 let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+                api_calls += 1;
+                pb.suspend(|| {
+                    let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
+                    eprintln!(
+                        "  [batch {}] {} texts, ~{}k tokens, {} pending issues{}",
+                        api_calls,
+                        texts.len(),
+                        batch_tokens / 1000,
+                        pending.len(),
+                        rss,
+                    );
+                });
                 let embeddings = embedder.embed_batch(&texts).await?;
 
                 for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
@@ -130,6 +155,17 @@ pub async fn handle_embed(
     // Flush remaining batch
     if !batch.is_empty() {
         let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+        api_calls += 1;
+        pb.suspend(|| {
+            let rss = rss_mb().map(|m| format!(" | RSS: {}MB", m)).unwrap_or_default();
+            eprintln!(
+                "  [batch {} final] {} texts, ~{}k tokens{}",
+                api_calls,
+                texts.len(),
+                batch_tokens / 1000,
+                rss,
+            );
+        });
         let embeddings = embedder.embed_batch(&texts).await?;
 
         for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
