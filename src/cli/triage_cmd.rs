@@ -287,6 +287,11 @@ pub async fn handle_triage(
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
                     Ok(Event::Key(key)) => {
+                        // Deduplicate key release events (crossterm on some terminals
+                        // sends both press and release for Ctrl+C)
+                        if key.kind == crossterm::event::KeyEventKind::Release {
+                            continue;
+                        }
                         if tx_evt.send(AppEvent::Key(key)).is_err() {
                             break;
                         }
