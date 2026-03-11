@@ -148,12 +148,4 @@ impl Config {
             .as_deref()
             .context("Anthropic API key not configured. Set ANTHROPIC_API_KEY or run: rectilinear config set anthropic-api-key <KEY>")
     }
-
-    pub fn gemini_api_key(&self) -> Result<&str> {
-        self.embedding
-            .gemini_api_key
-            .as_deref()
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok().as_deref().map(|_| ""))
-            .context("Gemini API key not configured")
-    }
 }
