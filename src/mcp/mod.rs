@@ -110,6 +110,8 @@ struct CreateIssueArgs {
     description: Option<String>,
     /// Priority: 1=Urgent, 2=High, 3=Medium, 4=Low
     priority: Option<i32>,
+    /// Parent issue identifier to create as sub-issue (e.g., "CUT-42")
+    parent: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -299,6 +301,15 @@ impl RectilinearMcp {
             .await
             .map_err(|e| e.to_string())?;
 
+        let parent_id = if let Some(ref parent_ident) = args.parent {
+            let parent = self.db.get_issue(parent_ident)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Parent issue '{}' not found", parent_ident))?;
+            Some(parent.id)
+        } else {
+            None
+        };
+
         let (issue_id, identifier) = client
             .create_issue(
                 &team_id,
@@ -306,6 +317,7 @@ impl RectilinearMcp {
                 args.description.as_deref(),
                 args.priority,
                 &[],
+                parent_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;

@@ -31,7 +31,7 @@ pub async fn handle_create(
     );
 
     let (issue_id, identifier) = client
-        .create_issue(&team_id, title, description, priority, labels)
+        .create_issue(&team_id, title, description, priority, labels, None)
         .await?;
 
     println!("{} Created {}", "✓".green().bold(), identifier.bold());

@@ -375,6 +375,7 @@ impl LinearClient {
         description: Option<&str>,
         priority: Option<i32>,
         label_ids: &[String],
+        parent_id: Option<&str>,
     ) -> Result<(String, String)> {
         let mut input = serde_json::json!({
             "teamId": team_id,
@@ -389,6 +390,9 @@ impl LinearClient {
         }
         if !label_ids.is_empty() {
             input["labelIds"] = serde_json::json!(label_ids);
+        }
+        if let Some(pid) = parent_id {
+            input["parentId"] = serde_json::Value::String(pid.to_string());
         }
 
         let query = r#"
