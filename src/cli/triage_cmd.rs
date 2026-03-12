@@ -771,6 +771,8 @@ fn spawn_apply(
                 new_desc.as_deref(),
                 Some(priority),
                 None,
+                None,
+                None,
             )
             .await;
 

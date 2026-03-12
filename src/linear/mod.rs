@@ -444,6 +444,8 @@ impl LinearClient {
         description: Option<&str>,
         priority: Option<i32>,
         state_id: Option<&str>,
+        label_ids: Option<&[String]>,
+        project_id: Option<&str>,
     ) -> Result<()> {
         let mut input = serde_json::Map::new();
         if let Some(t) = title {
@@ -460,6 +462,12 @@ impl LinearClient {
         }
         if let Some(sid) = state_id {
             input.insert("stateId".into(), serde_json::Value::String(sid.to_string()));
+        }
+        if let Some(lids) = label_ids {
+            input.insert("labelIds".into(), serde_json::json!(lids));
+        }
+        if let Some(pid) = project_id {
+            input.insert("projectId".into(), serde_json::Value::String(pid.to_string()));
         }
 
         let query = r#"
@@ -590,6 +598,103 @@ impl LinearClient {
             "State '{}' not found for team {}. Available: {}",
             state_name,
             team_key,
+            available.join(", ")
+        )
+    }
+
+    /// Resolve label names to IDs for a workspace.
+    /// Linear labels are workspace-scoped, not team-scoped.
+    /// Returns IDs for all matched labels and errors for any not found.
+    pub async fn get_label_ids(&self, label_names: &[String]) -> Result<Vec<String>> {
+        if label_names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = r#"
+            query {
+                issueLabels(first: 250) {
+                    nodes { id name }
+                }
+            }
+        "#;
+
+        let data: serde_json::Value = self
+            .query(query, serde_json::json!({}))
+            .await?;
+
+        let labels = data["issueLabels"]["nodes"]
+            .as_array()
+            .context("No labels in response")?;
+
+        let mut ids = Vec::new();
+        for name in label_names {
+            let found = labels.iter().find(|l| {
+                l["name"]
+                    .as_str()
+                    .map_or(false, |n| n.eq_ignore_ascii_case(name))
+            });
+            match found {
+                Some(l) => {
+                    ids.push(
+                        l["id"]
+                            .as_str()
+                            .context("Label has no id")?
+                            .to_string(),
+                    );
+                }
+                None => {
+                    let available: Vec<&str> = labels
+                        .iter()
+                        .filter_map(|l| l["name"].as_str())
+                        .collect();
+                    anyhow::bail!(
+                        "Label '{}' not found. Available: {}",
+                        name,
+                        available.join(", ")
+                    );
+                }
+            }
+        }
+
+        Ok(ids)
+    }
+
+    /// Resolve a project name to its ID. Matches case-insensitively.
+    pub async fn get_project_id(&self, project_name: &str) -> Result<String> {
+        let query = r#"
+            query {
+                projects(first: 250) {
+                    nodes { id name }
+                }
+            }
+        "#;
+
+        let data: serde_json::Value = self
+            .query(query, serde_json::json!({}))
+            .await?;
+
+        let projects = data["projects"]["nodes"]
+            .as_array()
+            .context("No projects in response")?;
+
+        for project in projects {
+            if let Some(name) = project["name"].as_str() {
+                if name.eq_ignore_ascii_case(project_name) {
+                    return project["id"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .context("Project has no id");
+                }
+            }
+        }
+
+        let available: Vec<&str> = projects
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        anyhow::bail!(
+            "Project '{}' not found. Available: {}",
+            project_name,
             available.join(", ")
         )
     }

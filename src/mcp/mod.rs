@@ -122,6 +122,12 @@ struct UpdateIssueArgs {
     description: Option<String>,
     /// New priority
     priority: Option<i32>,
+    /// Set issue state by name (e.g., "Done", "Cancelled", "In Progress")
+    state: Option<String>,
+    /// Set labels by name (replaces all existing labels)
+    labels: Option<Vec<String>>,
+    /// Set project by name (or "none" to remove from project)
+    project: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -176,6 +182,10 @@ struct MarkTriagedArgs {
     comment: Option<String>,
     /// Set issue state (e.g., "Done", "Cancelled", "Duplicate", "Backlog"). Looked up by name for the issue's team.
     state: Option<String>,
+    /// Set labels by name (replaces all existing labels)
+    labels: Option<Vec<String>>,
+    /// Set project by name (or "none" to remove from project)
+    project: Option<String>,
 }
 
 #[tool(tool_box)]
@@ -327,13 +337,37 @@ impl RectilinearMcp {
 
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
 
+        let state_id = if let Some(ref state_name) = args.state {
+            Some(client.get_state_id(&issue.team_key, state_name).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
+        let label_ids = if let Some(ref label_names) = args.labels {
+            Some(client.get_label_ids(label_names).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
+        let project_id = if let Some(ref project_name) = args.project {
+            if project_name.eq_ignore_ascii_case("none") {
+                Some(String::new()) // Empty string removes project in Linear
+            } else {
+                Some(client.get_project_id(project_name).await.map_err(|e| e.to_string())?)
+            }
+        } else {
+            None
+        };
+
         client
             .update_issue(
                 &issue.id,
                 args.title.as_deref(),
                 args.description.as_deref(),
                 args.priority,
-                None,
+                state_id.as_deref(),
+                label_ids.as_deref(),
+                project_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -379,7 +413,7 @@ impl RectilinearMcp {
                 None => desc_text.clone(),
             };
             client
-                .update_issue(&issue.id, None, Some(&new_desc), None, None)
+                .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None)
                 .await
                 .map_err(|e| e.to_string())?;
             actions.push("description_updated");
@@ -677,12 +711,23 @@ impl RectilinearMcp {
 
         // Resolve state name to ID if provided
         let state_id = if let Some(ref state_name) = args.state {
-            Some(
-                client
-                    .get_state_id(&issue.team_key, state_name)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            )
+            Some(client.get_state_id(&issue.team_key, state_name).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
+        let label_ids = if let Some(ref label_names) = args.labels {
+            Some(client.get_label_ids(label_names).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
+        let project_id = if let Some(ref project_name) = args.project {
+            if project_name.eq_ignore_ascii_case("none") {
+                Some(String::new())
+            } else {
+                Some(client.get_project_id(project_name).await.map_err(|e| e.to_string())?)
+            }
         } else {
             None
         };
@@ -694,6 +739,8 @@ impl RectilinearMcp {
                 args.description.as_deref(),
                 Some(args.priority),
                 state_id.as_deref(),
+                label_ids.as_deref(),
+                project_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
