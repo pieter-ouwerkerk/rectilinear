@@ -824,27 +824,36 @@ impl ServerHandler for RectilinearMcp {
             instructions: Some(
                 "Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
                  ## Triage Workflow\n\
+                 IMPORTANT: Present exactly ONE issue at a time. Wait for the user's response and call mark_triaged before presenting the next issue. \
+                 Never batch multiple issues into a single message.\n\n\
                  When the user asks to triage issues:\n\
-                 1. Call get_triage_queue with the team key\n\
-                 2. BEFORE asking the user questions about each issue, use the code_search_hints field to explore the codebase. \
+                 1. Call get_triage_queue with the team key.\n\
+                 2. Take the FIRST issue from the queue. BEFORE presenting it to the user, use the code_search_hints field to explore the codebase. \
                  Search for the mentioned files, symbols, and keywords using Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references, get_hover_info). \
-                 Spend 2-4 tool calls per issue understanding the current code state.\n\
+                 Spend 2-4 tool calls understanding the current code state for THIS issue.\n\
                  3. Present a brief summary of the issue AND what you found in the code. \
                  Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. \
                  Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — \
                  the kind of questions an experienced engineer asks before writing code \
                  (e.g. \"I found WorktreeManager.cleanup() at src/worktree.rs:142 — it already handles orphaned worktrees. Is this issue about a gap in that logic, or something else entirely?\"). \
                  Suggest best-guess answers.\n\
-                 4. Based on answers, propose: priority (1-4), improved title, improved description (include relevant file paths and code references in the description)\n\
-                 5. After user confirms, call mark_triaged\n\
-                 6. Move to next issue. When batch exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
+                 4. WAIT for the user to respond. Based on their answers, propose: priority (1-4), improved title, improved description \
+                 (include relevant file paths and code references in the description), state change if appropriate (e.g. Done, Cancelled, Duplicate), \
+                 and any label or project changes.\n\
+                 5. WAIT for user confirmation, then call mark_triaged with all agreed changes.\n\
+                 6. Only after mark_triaged succeeds, move to the NEXT issue. Repeat from step 2. \
+                 When the batch is exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
                  ## Priority Framework\n\
                  1=Urgent (production down, data loss, security)\n\
                  2=High (major feature broken, significant user impact, no workaround)\n\
                  3=Medium (degraded experience, workarounds exist)\n\
                  4=Low (minor polish, nice-to-have)\n\n\
                  ## Duplicate Handling\n\
-                 If similar_issues show >0.8 similarity, flag as potential duplicate. Ask user whether to merge, close as dup, or keep separate."
+                 If similar_issues show >0.8 similarity, flag as potential duplicate. Ask user whether to merge, close as dup, or keep separate. \
+                 Use the state field in mark_triaged to set the status (e.g. state: \"Duplicate\", state: \"Done\", state: \"Cancelled\").\n\n\
+                 ## Labels and Projects\n\
+                 When triaging, consider whether the issue should be labeled or assigned to a project. \
+                 Use the labels and project fields in mark_triaged to set these. Pass project: \"none\" to remove an issue from its current project."
                     .into(),
             ),
         }

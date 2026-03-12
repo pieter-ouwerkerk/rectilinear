@@ -206,12 +206,12 @@ This exposes 10 tools to Claude Code:
 | `find_duplicates` | Semantic duplicate detection given title + description |
 | `get_issue` | Full issue details with optional comments |
 | `create_issue` | Create in Linear + sync back |
-| `update_issue` | Update title, description, priority |
+| `update_issue` | Update title, description, priority, state, labels, project |
 | `append_to_issue` | Add comment or extend description |
 | `sync_team` | Trigger sync for a team |
 | `issue_context` | Issue + its N most similar issues |
-| `get_triage_queue` | Batch of unprioritized issues enriched with similar issues |
-| `mark_triaged` | Set priority + update title/description + add comment in one call |
+| `get_triage_queue` | Batch of unprioritized issues enriched with similar issues and code search hints |
+| `mark_triaged` | Set priority, state, labels, project + update title/description + add comment in one call |
 
 ### Triage workflow
 
@@ -225,11 +225,31 @@ rectilinear sync --team CUT --embed
 
 # 3. In Claude Code, just say:
 #    "triage CUT issues"
+#    "let's triage some random CUT issues"  (uses shuffle for variety)
 ```
 
-Claude will call `get_triage_queue`, which syncs from Linear to get fresh data, then presents each issue with similar issues for context. For each issue it asks clarifying questions about impact and severity, proposes a priority and improved title/description, and after you confirm, calls `mark_triaged` to apply changes to Linear.
+**What happens:** Claude calls `get_triage_queue`, which syncs from Linear to get fresh data. For each issue, Claude:
 
-`mark_triaged` re-fetches the issue from Linear before applying changes. If someone else already prioritized it, Claude skips it. If the content changed since the queue was fetched, Claude shows what changed and re-evaluates before proceeding. Embeddings are automatically updated when content changes.
+1. Explores the codebase using extracted `code_search_hints` (file paths, identifiers, labels) to understand the current implementation
+2. Presents the issue with code findings and similar issues, then asks clarifying questions from the perspective of a staff engineer who would implement it
+3. Proposes priority, improved title/description (with code references), state changes, labels, and project assignment
+4. After you confirm, calls `mark_triaged` to apply all changes to Linear in one call
+
+Issues are presented **one at a time** — Claude waits for your input and applies changes before moving to the next.
+
+**Staleness protection:** `mark_triaged` re-fetches the issue from Linear before applying changes. If someone else already prioritized it, Claude skips it. If the content changed since the queue was fetched, Claude shows what changed and re-evaluates. Embeddings are automatically updated when content changes.
+
+**Best results:** Run triage from within your project directory so Claude can explore the actual codebase. If you use [Cuttlefish](https://github.com/pieter-ouwerkerk/cuttlefish), its MCP tools (`get_symbols`, `find_references`) give Claude even richer code context.
+
+You can also add project-specific guidance in your `CLAUDE.md`:
+
+```markdown
+## Triage
+
+When triaging Linear issues, present and resolve one issue at a time
+before moving to the next. Explore the codebase to understand each
+issue's context before asking questions.
+```
 
 ## Data storage
 
