@@ -583,7 +583,7 @@ impl RectilinearMcp {
         }
 
         let result = serde_json::json!({
-            "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary when asking clarifying questions.",
+            "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary. Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — the kind of questions an experienced engineer asks before writing code.",
             "queue": enriched,
             "total_remaining": total_remaining,
             "team": args.team,
@@ -768,7 +768,10 @@ impl ServerHandler for RectilinearMcp {
                  2. BEFORE asking the user questions about each issue, use the code_search_hints field to explore the codebase. \
                  Search for the mentioned files, symbols, and keywords using Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references, get_hover_info). \
                  Spend 2-4 tool calls per issue understanding the current code state.\n\
-                 3. Present a brief summary of the issue AND what you found in the code. Then ask 2-4 clarifying questions that incorporate your code findings \
+                 3. Present a brief summary of the issue AND what you found in the code. \
+                 Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. \
+                 Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — \
+                 the kind of questions an experienced engineer asks before writing code \
                  (e.g. \"I found WorktreeManager.cleanup() at src/worktree.rs:142 — it already handles orphaned worktrees. Is this issue about a gap in that logic, or something else entirely?\"). \
                  Suggest best-guess answers.\n\
                  4. Based on answers, propose: priority (1-4), improved title, improved description (include relevant file paths and code references in the description)\n\
