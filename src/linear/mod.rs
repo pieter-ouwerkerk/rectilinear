@@ -443,7 +443,7 @@ impl LinearClient {
         title: Option<&str>,
         description: Option<&str>,
         priority: Option<i32>,
-        _state_name: Option<&str>,
+        state_id: Option<&str>,
     ) -> Result<()> {
         let mut input = serde_json::Map::new();
         if let Some(t) = title {
@@ -457,6 +457,9 @@ impl LinearClient {
         }
         if let Some(p) = priority {
             input.insert("priority".into(), serde_json::Value::Number(p.into()));
+        }
+        if let Some(sid) = state_id {
+            input.insert("stateId".into(), serde_json::Value::String(sid.to_string()));
         }
 
         let query = r#"
@@ -534,5 +537,60 @@ impl LinearClient {
             .find(|t| t.key.eq_ignore_ascii_case(team_key))
             .map(|t| t.id.clone())
             .with_context(|| format!("Team '{}' not found", team_key))
+    }
+
+    /// Look up a workflow state ID by name for a given team.
+    /// Matches case-insensitively (e.g. "done", "cancelled", "duplicate").
+    pub async fn get_state_id(&self, team_key: &str, state_name: &str) -> Result<String> {
+        let team_id = self.get_team_id(team_key).await?;
+        let query = r#"
+            query($teamId: String!) {
+                team(id: $teamId) {
+                    states { nodes { id name type } }
+                }
+            }
+        "#;
+
+        let data: serde_json::Value = self
+            .query(query, serde_json::json!({ "teamId": team_id }))
+            .await?;
+
+        let states = data["team"]["states"]["nodes"]
+            .as_array()
+            .context("No states in response")?;
+
+        for state in states {
+            if let Some(name) = state["name"].as_str() {
+                if name.eq_ignore_ascii_case(state_name) {
+                    return state["id"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .context("State has no id");
+                }
+            }
+        }
+
+        // Also try matching by type (e.g. "completed", "canceled")
+        for state in states {
+            if let Some(t) = state["type"].as_str() {
+                if t.eq_ignore_ascii_case(state_name) {
+                    return state["id"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .context("State has no id");
+                }
+            }
+        }
+
+        let available: Vec<&str> = states
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        anyhow::bail!(
+            "State '{}' not found for team {}. Available: {}",
+            state_name,
+            team_key,
+            available.join(", ")
+        )
     }
 }

@@ -174,6 +174,8 @@ struct MarkTriagedArgs {
     description: Option<String>,
     /// Triage comment explaining the decision (optional)
     comment: Option<String>,
+    /// Set issue state (e.g., "Done", "Cancelled", "Duplicate", "Backlog"). Looked up by name for the issue's team.
+    state: Option<String>,
 }
 
 #[tool(tool_box)]
@@ -673,13 +675,25 @@ impl RectilinearMcp {
             .to_string());
         }
 
+        // Resolve state name to ID if provided
+        let state_id = if let Some(ref state_name) = args.state {
+            Some(
+                client
+                    .get_state_id(&issue.team_key, state_name)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+
         client
             .update_issue(
                 &issue.id,
                 args.title.as_deref(),
                 args.description.as_deref(),
                 Some(args.priority),
-                None,
+                state_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
