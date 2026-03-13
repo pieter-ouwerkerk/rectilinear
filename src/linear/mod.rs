@@ -50,6 +50,7 @@ struct PageInfo {
 struct LinearIssue {
     id: String,
     identifier: String,
+    url: String,
     title: String,
     description: Option<String>,
     priority: i32,
@@ -256,7 +257,7 @@ impl LinearClient {
                     {}
                 ) {{
                     nodes {{
-                        id identifier title description priority
+                        id identifier url title description priority
                         createdAt updatedAt
                         state {{ name type }}
                         team {{ key }}
@@ -290,6 +291,7 @@ impl LinearClient {
                 db::Issue {
                     id: i.id,
                     identifier: i.identifier,
+                    url: i.url,
                     team_key: i.team.key,
                     title: i.title,
                     description: i.description,
@@ -497,7 +499,7 @@ impl LinearClient {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
-                    id identifier title description priority
+                    id identifier url title description priority
                     createdAt updatedAt
                     state { name type }
                     team { key }
@@ -525,6 +527,7 @@ impl LinearClient {
         Ok(db::Issue {
             id: i.id,
             identifier: i.identifier,
+            url: i.url,
             team_key: i.team.key,
             title: i.title,
             description: i.description,
