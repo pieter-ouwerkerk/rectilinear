@@ -777,8 +777,9 @@ fn spawn_apply(
             .await;
 
         if result.is_ok() {
-            if let Ok(updated) = linear.fetch_single_issue(&issue_id).await {
+            if let Ok((updated, relations)) = linear.fetch_single_issue(&issue_id).await {
                 db.upsert_issue(&updated).ok();
+                db.upsert_relations(&updated.id, &relations).ok();
             }
         }
 

@@ -46,8 +46,9 @@ pub async fn handle_append(
     }
 
     // Sync the updated issue back
-    let updated = client.fetch_single_issue(&issue.id).await?;
+    let (updated, relations) = client.fetch_single_issue(&issue.id).await?;
     db.upsert_issue(&updated)?;
+    db.upsert_relations(&updated.id, &relations)?;
     println!("{} Synced to local database", "✓".green());
 
     Ok(())
