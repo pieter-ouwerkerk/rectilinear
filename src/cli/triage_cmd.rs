@@ -271,6 +271,7 @@ pub async fn handle_triage(
     team: Option<&str>,
     limit: Option<usize>,
     no_context: bool,
+    include_completed: bool,
 ) -> Result<()> {
     let llm = LlmClient::new(config)?;
     let linear = LinearClient::new(config)?;
@@ -281,7 +282,7 @@ pub async fn handle_triage(
             anyhow::anyhow!("No team specified. Use --team or set default-team in config")
         })?;
 
-    let issues = db.get_unprioritized_issues(Some(team_key), false)?;
+    let issues = db.get_unprioritized_issues(Some(team_key), include_completed)?;
     if issues.is_empty() {
         let total = db.count_issues(Some(team_key))?;
         if total == 0 {

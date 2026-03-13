@@ -141,6 +141,9 @@ enum Commands {
         /// Skip similar-issue context
         #[arg(long)]
         no_context: bool,
+        /// Include completed/canceled issues (for archival prioritization)
+        #[arg(long)]
+        include_completed: bool,
     },
     /// List available Linear teams
     Teams,
@@ -316,6 +319,7 @@ async fn main() -> Result<()> {
                     team,
                     limit,
                     no_context,
+                    include_completed,
                 } => {
                     cli::triage_cmd::handle_triage(
                         &db,
@@ -323,6 +327,7 @@ async fn main() -> Result<()> {
                         team.as_deref(),
                         limit,
                         no_context,
+                        include_completed,
                     )
                     .await?;
                 }
