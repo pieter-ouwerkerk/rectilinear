@@ -331,6 +331,7 @@ impl RectilinearMcp {
         Ok(serde_json::json!({
             "id": issue_id,
             "identifier": identifier,
+            "url": issue.url,
             "status": "created"
         })
         .to_string())
@@ -392,6 +393,7 @@ impl RectilinearMcp {
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
+            "url": issue.url,
             "status": "updated"
         })
         .to_string())
@@ -618,6 +620,7 @@ impl RectilinearMcp {
 
             enriched.push(serde_json::json!({
                 "identifier": issue.identifier,
+                "url": issue.url,
                 "title": issue.title,
                 "description": description,
                 "state_name": issue.state_name,
@@ -631,7 +634,7 @@ impl RectilinearMcp {
         }
 
         let result = serde_json::json!({
-            "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary. Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — the kind of questions an experienced engineer asks before writing code.",
+            "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary. Always include the issue's Linear URL as a clickable markdown link [IDENTIFIER](url). Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — the kind of questions an experienced engineer asks before writing code.",
             "queue": enriched,
             "total_remaining": total_remaining,
             "team": args.team,
@@ -672,6 +675,7 @@ impl RectilinearMcp {
         if issue.priority != 0 {
             return Ok(serde_json::json!({
                 "identifier": issue.identifier,
+                "url": issue.url,
                 "status": "already_triaged",
                 "current_priority": issue.priority,
                 "current_priority_label": issue.priority_label(),
@@ -708,6 +712,7 @@ impl RectilinearMcp {
 
             return Ok(serde_json::json!({
                 "identifier": issue.identifier,
+                "url": issue.url,
                 "status": "modified_since_queued",
                 "changes": changes,
                 "current_title": issue.title,
@@ -785,6 +790,7 @@ impl RectilinearMcp {
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
+            "url": issue.url,
             "priority": args.priority,
             "priority_label": priority_label,
             "title": args.title.as_deref().unwrap_or(&issue.title),
@@ -865,7 +871,11 @@ impl ServerHandler for RectilinearMcp {
                  Use the state field in mark_triaged to set the status (e.g. state: \"Duplicate\", state: \"Done\", state: \"Cancelled\").\n\n\
                  ## Labels and Projects\n\
                  When triaging, consider whether the issue should be labeled or assigned to a project. \
-                 Use the labels and project fields in mark_triaged to set these. Pass project: \"none\" to remove an issue from its current project."
+                 Use the labels and project fields in mark_triaged to set these. Pass project: \"none\" to remove an issue from its current project.\n\n\
+                 ## Linear Links\n\
+                 ALWAYS include the Linear issue URL (from the `url` field) as a clickable markdown link when presenting issues to the user. \
+                 Format as [IDENTIFIER](url) so the user can click through to Linear directly. \
+                 Do this for the main issue being discussed AND for any similar/duplicate issues referenced."
                     .into(),
             ),
         }
