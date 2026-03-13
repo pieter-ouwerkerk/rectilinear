@@ -26,8 +26,18 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])?;
     }
 
+    if current_version < 3 {
+        conn.execute_batch(MIGRATION_3)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (3)", [])?;
+    }
+
     Ok(())
 }
+
+// Add url column to issues
+const MIGRATION_3: &str = "
+ALTER TABLE issues ADD COLUMN url TEXT NOT NULL DEFAULT '';
+";
 
 // Fix contentless FTS5 triggers: use 'delete' command instead of DELETE FROM
 const MIGRATION_2: &str = "

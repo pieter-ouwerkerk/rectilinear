@@ -44,19 +44,19 @@ impl Database {
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
                    labels_json=excluded.labels_json, updated_at=excluded.updated_at,
-                   content_hash=excluded.content_hash, synced_at=datetime('now')",
+                   content_hash=excluded.content_hash, url=excluded.url, synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
                     issue.state_name, issue.state_type, issue.priority, issue.assignee_name,
                     issue.project_name, issue.labels_json, issue.created_at, issue.updated_at,
-                    issue.content_hash,
+                    issue.content_hash, issue.url,
                 ],
             )?;
             Ok(())
@@ -66,7 +66,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -82,14 +82,14 @@ impl Database {
         self.with_conn(|conn| {
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
                 (
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
                      FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled') AND team_key = ?1
                      ORDER BY created_at DESC".to_string(),
                     vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
                 )
             } else {
                 (
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
                      FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled')
                      ORDER BY created_at DESC".to_string(),
                     vec![],
@@ -215,11 +215,11 @@ impl Database {
             let sql = if force {
                 if let Some(team) = team_key {
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
                          FROM issues WHERE team_key = '{}'", team
                     )
                 } else {
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
                      FROM issues".to_string()
                 }
             } else {
@@ -229,7 +229,7 @@ impl Database {
                     String::new()
                 };
                 format!(
-                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at
+                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url
                      FROM issues i
                      LEFT JOIN (SELECT DISTINCT issue_id FROM chunks) c ON i.id = c.issue_id
                      WHERE c.issue_id IS NULL {}",
@@ -375,6 +375,7 @@ pub struct Issue {
     pub updated_at: String,
     pub content_hash: String,
     pub synced_at: Option<String>,
+    pub url: String,
 }
 
 impl Issue {
@@ -395,6 +396,7 @@ impl Issue {
             updated_at: row.get(12)?,
             content_hash: row.get(13)?,
             synced_at: row.get(14)?,
+            url: row.get(15)?,
         })
     }
 
