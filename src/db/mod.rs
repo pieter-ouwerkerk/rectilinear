@@ -104,25 +104,6 @@ impl Database {
         })
     }
 
-    pub fn count_unprioritized_issues(&self, team_key: Option<&str>) -> Result<usize> {
-        self.with_conn(|conn| {
-            let count: usize = if let Some(team) = team_key {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled') AND team_key = ?1",
-                    rusqlite::params![team],
-                    |row| row.get(0),
-                )?
-            } else {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled')",
-                    [],
-                    |row| row.get(0),
-                )?
-            };
-            Ok(count)
-        })
-    }
-
     pub fn count_issues(&self, team_key: Option<&str>) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {
