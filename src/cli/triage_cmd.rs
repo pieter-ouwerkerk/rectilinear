@@ -281,7 +281,7 @@ pub async fn handle_triage(
             anyhow::anyhow!("No team specified. Use --team or set default-team in config")
         })?;
 
-    let issues = db.get_unprioritized_issues(Some(team_key))?;
+    let issues = db.get_unprioritized_issues(Some(team_key), false)?;
     if issues.is_empty() {
         let total = db.count_issues(Some(team_key))?;
         if total == 0 {

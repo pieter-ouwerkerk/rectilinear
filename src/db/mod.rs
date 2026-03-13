@@ -78,20 +78,29 @@ impl Database {
         })
     }
 
-    pub fn get_unprioritized_issues(&self, team_key: Option<&str>) -> Result<Vec<Issue>> {
+    pub fn get_unprioritized_issues(&self, team_key: Option<&str>, include_completed: bool) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
+            let state_filter = if include_completed {
+                ""
+            } else {
+                " AND state_type NOT IN ('completed', 'canceled')"
+            };
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
                 (
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
-                     FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled') AND team_key = ?1
-                     ORDER BY created_at DESC".to_string(),
+                    format!(
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                         FROM issues WHERE priority = 0{} AND team_key = ?1
+                         ORDER BY created_at DESC", state_filter
+                    ),
                     vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
                 )
             } else {
                 (
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
-                     FROM issues WHERE priority = 0 AND state_type NOT IN ('completed', 'canceled')
-                     ORDER BY created_at DESC".to_string(),
+                    format!(
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                         FROM issues WHERE priority = 0{}
+                         ORDER BY created_at DESC", state_filter
+                    ),
                     vec![],
                 )
             };
