@@ -10,6 +10,80 @@ use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 use crate::search::{self, SearchMode};
 
+/// Scan a JSON value for issue identifiers (e.g. "CUT-42") and add a `referenced_issues`
+/// field with their URLs so agents can render them as clickable links.
+fn enrich_with_issue_links(value: &mut serde_json::Value, db: &Database) {
+    let text = value.to_string();
+    let identifiers = extract_issue_identifiers(&text);
+    if identifiers.is_empty() {
+        return;
+    }
+
+    let mut refs = serde_json::Map::new();
+    for ident in &identifiers {
+        if let Ok(Some(issue)) = db.get_issue(ident) {
+            if !issue.url.is_empty() {
+                refs.insert(ident.clone(), serde_json::json!({
+                    "url": issue.url,
+                    "title": issue.title,
+                    "state": issue.state_name,
+                }));
+            }
+        }
+    }
+
+    if !refs.is_empty() {
+        if let serde_json::Value::Object(map) = value {
+            map.insert("referenced_issues".to_string(), serde_json::Value::Object(refs));
+        }
+    }
+}
+
+/// Extract issue identifiers (e.g. "CUT-42", "ENG-123") from text.
+/// Matches patterns like 1-4 uppercase letters followed by a dash and digits.
+fn extract_issue_identifiers(text: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Look for uppercase letter start
+        if bytes[i].is_ascii_uppercase() {
+            let start = i;
+            // Consume 1-6 uppercase letters
+            while i < len && bytes[i].is_ascii_uppercase() {
+                i += 1;
+            }
+            let key_len = i - start;
+            if key_len >= 1 && key_len <= 6 && i < len && bytes[i] == b'-' {
+                i += 1; // skip dash
+                let digit_start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > digit_start {
+                    // Make sure it's not part of a larger word
+                    let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+                    let after_ok = i >= len || !bytes[i].is_ascii_alphanumeric();
+                    if before_ok && after_ok {
+                        let ident = text[start..i].to_string();
+                        if seen.insert(ident.clone()) {
+                            result.push(ident);
+                        }
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// Extract code-relevant search hints from issue title, description, and labels.
 /// Returns terms that Claude should search for in the codebase.
 fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<String> {
@@ -190,6 +264,18 @@ struct MarkTriagedArgs {
     project: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ManageRelationArgs {
+    /// Action: "add" or "remove"
+    action: String,
+    /// Source issue identifier (e.g., "CUT-42")
+    issue: String,
+    /// Related issue identifier (e.g., "CUT-99")
+    related_issue: String,
+    /// Relation type: "blocks", "blocked_by", "related", "duplicate"
+    relation_type: String,
+}
+
 #[tool(tool_box)]
 impl RectilinearMcp {
     pub fn new(db: Database, config: Config) -> Self {
@@ -281,11 +367,17 @@ impl RectilinearMcp {
 
         let mut value = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
 
+        let relations = self.db.get_relations_enriched(&issue.id).map_err(|e| e.to_string())?;
+        if !relations.is_empty() {
+            value["relations"] = serde_json::to_value(&relations).map_err(|e| e.to_string())?;
+        }
+
         if args.include_comments.unwrap_or(false) {
             let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
             value["comments"] = serde_json::to_value(&comments).map_err(|e| e.to_string())?;
         }
 
+        enrich_with_issue_links(&mut value, &self.db);
         serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
     }
 
@@ -322,11 +414,12 @@ impl RectilinearMcp {
             .await
             .map_err(|e| e.to_string())?;
 
-        let issue = client
+        let (issue, relations) = client
             .fetch_single_issue(&issue_id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
+        self.db.upsert_relations(&issue.id, &relations).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "id": issue_id,
@@ -385,11 +478,12 @@ impl RectilinearMcp {
             .await
             .map_err(|e| e.to_string())?;
 
-        let updated = client
+        let (updated, relations) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+        self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -433,11 +527,12 @@ impl RectilinearMcp {
             actions.push("description_updated");
         }
 
-        let updated = client
+        let (updated, relations) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+        self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -512,13 +607,16 @@ impl RectilinearMcp {
         };
 
         let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
+        let relations = self.db.get_relations_enriched(&issue.id).map_err(|e| e.to_string())?;
 
-        let result = serde_json::json!({
+        let mut result = serde_json::json!({
             "issue": issue,
             "comments": comments,
             "similar_issues": similar,
+            "relations": relations,
         });
 
+        enrich_with_issue_links(&mut result, &self.db);
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
 
@@ -611,6 +709,8 @@ impl RectilinearMcp {
                 Vec::new()
             };
 
+            let relations = self.db.get_relations_enriched(&issue.id).unwrap_or_default();
+
             // Extract search hints from title and description for code exploration
             let code_search_hints = extract_code_hints(
                 &issue.title,
@@ -629,17 +729,19 @@ impl RectilinearMcp {
                 "labels": issue.labels(),
                 "created_at": issue.created_at,
                 "similar_issues": similar,
+                "relations": relations,
                 "code_search_hints": code_search_hints,
             }));
         }
 
-        let result = serde_json::json!({
+        let mut result = serde_json::json!({
             "instruction": "IMPORTANT: For each issue below, BEFORE asking the user any questions, search the codebase using the code_search_hints. Use Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references) to understand the current code state. Then present your code findings alongside the issue summary. Always include the issue's Linear URL as a clickable markdown link [IDENTIFIER](url). Assume the perspective of a principal staff software engineer who has been tasked to implement this issue. Ask 2-4 thoughtful clarifying questions that would help elucidate any ambiguity or uncertainty in the issue description — the kind of questions an experienced engineer asks before writing code.",
             "queue": enriched,
             "total_remaining": total_remaining,
             "team": args.team,
         });
 
+        enrich_with_issue_links(&mut result, &self.db);
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
     }
 
@@ -665,11 +767,12 @@ impl RectilinearMcp {
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
 
         // Re-fetch from Linear to get the latest version
-        let issue = client
+        let (issue, issue_relations) = client
             .fetch_single_issue(&local_issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
+        self.db.upsert_relations(&issue.id, &issue_relations).map_err(|e| e.to_string())?;
 
         // If someone else already prioritized it, let the caller know
         if issue.priority != 0 {
@@ -769,11 +872,12 @@ impl RectilinearMcp {
                 .map_err(|e| e.to_string())?;
         }
 
-        let updated = client
+        let (updated, updated_relations) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+        self.db.upsert_relations(&updated.id, &updated_relations).map_err(|e| e.to_string())?;
 
         // Re-embed if title or description changed
         if args.title.is_some() || args.description.is_some() {
@@ -797,6 +901,92 @@ impl RectilinearMcp {
             "status": "triaged",
         })
         .to_string())
+    }
+
+    #[tool(
+        name = "manage_relation",
+        description = "Add or remove a relation between two issues. Relation types: 'blocks', 'blocked_by', 'related', 'duplicate'. Use action 'add' to create or 'remove' to delete a relation."
+    )]
+    async fn manage_relation(
+        &self,
+        #[tool(aggr)] args: ManageRelationArgs,
+    ) -> Result<String, String> {
+        let valid_types = ["blocks", "blocked_by", "related", "duplicate"];
+        if !valid_types.contains(&args.relation_type.as_str()) {
+            return Err(format!(
+                "Invalid relation_type '{}'. Must be one of: {}",
+                args.relation_type,
+                valid_types.join(", ")
+            ));
+        }
+
+        let source = self.db.get_issue(&args.issue)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.issue))?;
+        let target = self.db.get_issue(&args.related_issue)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Issue '{}' not found", args.related_issue))?;
+
+        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+
+        match args.action.as_str() {
+            "add" => {
+                let relation_id = client
+                    .create_relation(&source.id, &target.id, &args.relation_type)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                // Re-fetch to update local relations
+                let (updated, relations) = client
+                    .fetch_single_issue(&source.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+                self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+
+                Ok(serde_json::json!({
+                    "status": "added",
+                    "relation_id": relation_id,
+                    "issue": source.identifier,
+                    "related_issue": target.identifier,
+                    "relation_type": args.relation_type,
+                }).to_string())
+            }
+            "remove" => {
+                // For blocked_by, the stored relation is reversed
+                let (db_source, db_target, db_type) = if args.relation_type == "blocked_by" {
+                    (&target.id, &source.id, "blocks")
+                } else {
+                    (&source.id, &target.id, args.relation_type.as_str())
+                };
+
+                let relation_id = self.db
+                    .find_relation_id(db_source, db_target, db_type)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!(
+                        "No '{}' relation found between {} and {}",
+                        args.relation_type, args.issue, args.related_issue
+                    ))?;
+
+                client.delete_relation(&relation_id).await.map_err(|e| e.to_string())?;
+
+                // Re-fetch to update local relations
+                let (updated, relations) = client
+                    .fetch_single_issue(&source.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
+                self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+
+                Ok(serde_json::json!({
+                    "status": "removed",
+                    "issue": source.identifier,
+                    "related_issue": target.identifier,
+                    "relation_type": args.relation_type,
+                }).to_string())
+            }
+            _ => Err("action must be 'add' or 'remove'".into()),
+        }
     }
 }
 
@@ -872,10 +1062,16 @@ impl ServerHandler for RectilinearMcp {
                  ## Labels and Projects\n\
                  When triaging, consider whether the issue should be labeled or assigned to a project. \
                  Use the labels and project fields in mark_triaged to set these. Pass project: \"none\" to remove an issue from its current project.\n\n\
+                 ## Issue Relations\n\
+                 Issues may have relations (blocks, blocked_by, related, duplicate) visible in the `relations` field. \
+                 When triaging, surface blocking relationships — they affect priority. Use manage_relation to add/remove relations. \
+                 If an issue blocks or is blocked by another, always mention this prominently.\n\n\
                  ## Linear Links\n\
                  ALWAYS include the Linear issue URL (from the `url` field) as a clickable markdown link when presenting issues to the user. \
                  Format as [IDENTIFIER](url) so the user can click through to Linear directly. \
-                 Do this for the main issue being discussed AND for any similar/duplicate issues referenced."
+                 Do this for the main issue being discussed AND for any related, blocking, or similar issues referenced. \
+                 Tool responses include a `referenced_issues` field that maps any issue identifiers found in descriptions/comments \
+                 to their URLs and titles — use these to render all mentioned issues as clickable links."
                     .into(),
             ),
         }
