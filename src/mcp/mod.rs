@@ -659,11 +659,7 @@ impl RectilinearMcp {
             filtered.iter().take(limit).collect()
         };
 
-        let total_remaining = self
-            .db
-            .count_unprioritized_issues(Some(&args.team))
-            .map_err(|e| e.to_string())?
-            .saturating_sub(exclude_set.len());
+        let total_remaining = filtered.len();
 
         let embedder = Embedder::new(&self.config).ok();
 
