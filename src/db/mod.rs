@@ -138,6 +138,96 @@ impl Database {
         })
     }
 
+    // --- Relations ---
+
+    pub fn upsert_relations(&self, issue_id: &str, relations: &[Relation]) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM issue_relations WHERE issue_id = ?1",
+                rusqlite::params![issue_id],
+            )?;
+            let mut stmt = conn.prepare(
+                "INSERT OR IGNORE INTO issue_relations (id, issue_id, related_issue_id, related_issue_identifier, relation_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            )?;
+            for rel in relations {
+                stmt.execute(rusqlite::params![
+                    rel.id, rel.issue_id, rel.related_issue_id,
+                    rel.related_issue_identifier, rel.relation_type,
+                ])?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn get_relations_enriched(&self, issue_id: &str) -> Result<Vec<EnrichedRelation>> {
+        self.with_conn(|conn| {
+            // Relations where this issue is the source
+            let mut stmt = conn.prepare(
+                "SELECT r.id, r.relation_type, r.related_issue_identifier,
+                        COALESCE(i.title, ''), COALESCE(i.state_name, ''), COALESCE(i.url, '')
+                 FROM issue_relations r
+                 LEFT JOIN issues i ON r.related_issue_id = i.id
+                 WHERE r.issue_id = ?1"
+            )?;
+            let forward = stmt.query_map(rusqlite::params![issue_id], |row| {
+                Ok(EnrichedRelation {
+                    relation_id: row.get(0)?,
+                    relation_type: row.get(1)?,
+                    issue_identifier: row.get(2)?,
+                    issue_title: row.get(3)?,
+                    issue_state: row.get(4)?,
+                    issue_url: row.get(5)?,
+                })
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+
+            // Relations where this issue is the target — flip direction
+            let mut stmt2 = conn.prepare(
+                "SELECT r.id, r.relation_type, i2.identifier,
+                        COALESCE(i2.title, ''), COALESCE(i2.state_name, ''), COALESCE(i2.url, '')
+                 FROM issue_relations r
+                 JOIN issues i ON r.related_issue_id = i.id
+                 JOIN issues i2 ON r.issue_id = i2.id
+                 WHERE r.related_issue_id = i.id AND i.id = ?1"
+            )?;
+            let inverse = stmt2.query_map(rusqlite::params![issue_id], |row| {
+                let raw_type: String = row.get(1)?;
+                let flipped = match raw_type.as_str() {
+                    "blocks" => "blocked_by".to_string(),
+                    "blocked_by" => "blocks".to_string(),
+                    other => other.to_string(), // related, duplicate are symmetric
+                };
+                Ok(EnrichedRelation {
+                    relation_id: row.get(0)?,
+                    relation_type: flipped,
+                    issue_identifier: row.get(2)?,
+                    issue_title: row.get(3)?,
+                    issue_state: row.get(4)?,
+                    issue_url: row.get(5)?,
+                })
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+
+            let mut all = forward;
+            all.extend(inverse);
+            Ok(all)
+        })
+    }
+
+    /// Look up a relation ID between two issues (by identifier) for deletion
+    pub fn find_relation_id(&self, issue_id: &str, related_issue_id: &str, relation_type: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM issue_relations WHERE issue_id = ?1 AND related_issue_id = ?2 AND relation_type = ?3"
+            )?;
+            let mut rows = stmt.query(rusqlite::params![issue_id, related_issue_id, relation_type])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(row.get(0)?))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
     // --- Chunks (embeddings) ---
 
     pub fn upsert_chunks(&self, issue_id: &str, chunks: &[(usize, String, Vec<u8>)]) -> Result<()> {
@@ -414,6 +504,25 @@ impl Issue {
             _ => "Unknown",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relation {
+    pub id: String,
+    pub issue_id: String,
+    pub related_issue_id: String,
+    pub related_issue_identifier: String,
+    pub relation_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedRelation {
+    pub relation_id: String,
+    pub relation_type: String,
+    pub issue_identifier: String,
+    pub issue_title: String,
+    pub issue_state: String,
+    pub issue_url: String,
 }
 
 #[derive(Debug, Clone)]

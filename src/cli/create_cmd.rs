@@ -37,8 +37,9 @@ pub async fn handle_create(
     println!("{} Created {}", "✓".green().bold(), identifier.bold());
 
     // Sync the created issue back to local DB
-    let issue = client.fetch_single_issue(&issue_id).await?;
+    let (issue, relations) = client.fetch_single_issue(&issue_id).await?;
     db.upsert_issue(&issue)?;
+    db.upsert_relations(&issue.id, &relations)?;
     println!("{} Synced to local database", "✓".green());
 
     Ok(())

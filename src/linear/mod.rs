@@ -63,6 +63,28 @@ struct LinearIssue {
     assignee: Option<LinearUser>,
     project: Option<LinearProject>,
     labels: LinearLabelConnection,
+    #[serde(default)]
+    relations: LinearRelationConnection,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LinearRelationConnection {
+    nodes: Vec<LinearRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearRelation {
+    id: String,
+    #[serde(rename = "type")]
+    relation_type: String,
+    #[serde(rename = "relatedIssue")]
+    related_issue: LinearRelatedIssue,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearRelatedIssue {
+    id: String,
+    identifier: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +185,37 @@ struct UpdateIssuePayload {
     success: bool,
 }
 
+// --- Relation mutation types ---
+
+#[derive(Debug, Deserialize)]
+struct CreateRelationData {
+    #[serde(rename = "issueRelationCreate")]
+    issue_relation_create: CreateRelationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRelationPayload {
+    success: bool,
+    #[serde(rename = "issueRelation")]
+    issue_relation: Option<CreatedRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatedRelation {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteRelationData {
+    #[serde(rename = "issueRelationDelete")]
+    issue_relation_delete: DeleteRelationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteRelationPayload {
+    success: bool,
+}
+
 // --- Single issue query ---
 
 #[derive(Debug, Deserialize)]
@@ -226,13 +279,23 @@ impl LinearClient {
         Ok(data.teams.nodes)
     }
 
+    fn extract_relations(issue_id: &str, linear_issue: &LinearIssue) -> Vec<db::Relation> {
+        linear_issue.relations.nodes.iter().map(|r| db::Relation {
+            id: r.id.clone(),
+            issue_id: issue_id.to_string(),
+            related_issue_id: r.related_issue.id.clone(),
+            related_issue_identifier: r.related_issue.identifier.clone(),
+            relation_type: r.relation_type.clone(),
+        }).collect()
+    }
+
     pub async fn fetch_issues(
         &self,
         team_key: &str,
         after_cursor: Option<&str>,
         updated_after: Option<&str>,
         include_archived: bool,
-    ) -> Result<(Vec<db::Issue>, bool, Option<String>)> {
+    ) -> Result<(Vec<(db::Issue, Vec<db::Relation>)>, bool, Option<String>)> {
         let mut filter_parts = vec![format!("team: {{ key: {{ eq: \"{}\" }} }}", team_key)];
         if let Some(after) = updated_after {
             filter_parts.push(format!("updatedAt: {{ gt: \"{}\" }}", after));
@@ -264,6 +327,7 @@ impl LinearClient {
                         assignee {{ name }}
                         project {{ name }}
                         labels {{ nodes {{ name }} }}
+                        relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
                     }}
                     pageInfo {{ hasNextPage endCursor }}
                 }}
@@ -273,7 +337,7 @@ impl LinearClient {
 
         let data: IssuesData = self.query(&query, serde_json::json!({})).await?;
 
-        let issues: Vec<db::Issue> = data
+        let issues: Vec<(db::Issue, Vec<db::Relation>)> = data
             .issues
             .nodes
             .into_iter()
@@ -288,7 +352,9 @@ impl LinearClient {
                 hasher.update(&labels_json);
                 let content_hash = hex::encode(hasher.finalize());
 
-                db::Issue {
+                let relations = Self::extract_relations(&i.id, &i);
+
+                let issue = db::Issue {
                     id: i.id,
                     identifier: i.identifier,
                     url: i.url,
@@ -305,7 +371,8 @@ impl LinearClient {
                     updated_at: i.updated_at,
                     content_hash,
                     synced_at: None,
-                }
+                };
+                (issue, relations)
             })
             .collect();
 
@@ -345,11 +412,12 @@ impl LinearClient {
                 .await?;
 
             let count = issues.len();
-            for issue in &issues {
+            for (issue, relations) in &issues {
                 if max_updated.is_none() || Some(&issue.updated_at) > max_updated.as_ref() {
                     max_updated = Some(issue.updated_at.clone());
                 }
                 db.upsert_issue(issue)?;
+                db.upsert_relations(&issue.id, relations)?;
             }
             total += count;
 
@@ -495,7 +563,7 @@ impl LinearClient {
         Ok(())
     }
 
-    pub async fn fetch_single_issue(&self, issue_id: &str) -> Result<db::Issue> {
+    pub async fn fetch_single_issue(&self, issue_id: &str) -> Result<(db::Issue, Vec<db::Relation>)> {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
@@ -506,6 +574,7 @@ impl LinearClient {
                     assignee { name }
                     project { name }
                     labels { nodes { name } }
+                    relations { nodes { id type relatedIssue { id identifier } } }
                 }
             }
         "#;
@@ -524,7 +593,9 @@ impl LinearClient {
         hasher.update(&labels_json);
         let content_hash = hex::encode(hasher.finalize());
 
-        Ok(db::Issue {
+        let relations = Self::extract_relations(&i.id, &i);
+
+        let issue = db::Issue {
             id: i.id,
             identifier: i.identifier,
             url: i.url,
@@ -541,7 +612,9 @@ impl LinearClient {
             updated_at: i.updated_at,
             content_hash,
             synced_at: None,
-        })
+        };
+
+        Ok((issue, relations))
     }
 
     /// Get a team's ID from its key
@@ -704,5 +777,69 @@ impl LinearClient {
             project_name,
             available.join(", ")
         )
+    }
+
+    /// Create a relation between two issues.
+    /// Linear API types: "blocks", "duplicate", "related".
+    /// If relation_type is "blocked_by", we swap the issues and create a "blocks" relation.
+    pub async fn create_relation(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        relation_type: &str,
+    ) -> Result<String> {
+        let (actual_issue_id, actual_related_id, api_type) = if relation_type == "blocked_by" {
+            (related_issue_id, issue_id, "blocks")
+        } else {
+            (issue_id, related_issue_id, relation_type)
+        };
+
+        let query = r#"
+            mutation($input: IssueRelationCreateInput!) {
+                issueRelationCreate(input: $input) {
+                    success
+                    issueRelation { id }
+                }
+            }
+        "#;
+
+        let input = serde_json::json!({
+            "issueId": actual_issue_id,
+            "relatedIssueId": actual_related_id,
+            "type": api_type,
+        });
+
+        let data: CreateRelationData = self
+            .query(query, serde_json::json!({ "input": input }))
+            .await?;
+
+        if !data.issue_relation_create.success {
+            anyhow::bail!("Failed to create relation");
+        }
+
+        let relation = data.issue_relation_create.issue_relation
+            .context("No relation returned")?;
+        Ok(relation.id)
+    }
+
+    /// Delete a relation by its ID.
+    pub async fn delete_relation(&self, relation_id: &str) -> Result<()> {
+        let query = r#"
+            mutation($id: String!) {
+                issueRelationDelete(id: $id) {
+                    success
+                }
+            }
+        "#;
+
+        let data: DeleteRelationData = self
+            .query(query, serde_json::json!({ "id": relation_id }))
+            .await?;
+
+        if !data.issue_relation_delete.success {
+            anyhow::bail!("Failed to delete relation");
+        }
+
+        Ok(())
     }
 }

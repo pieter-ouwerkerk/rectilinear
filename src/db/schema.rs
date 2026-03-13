@@ -31,8 +31,27 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (3)", [])?;
     }
 
+    if current_version < 4 {
+        conn.execute_batch(MIGRATION_4)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (4)", [])?;
+    }
+
     Ok(())
 }
+
+// Add issue_relations table
+const MIGRATION_4: &str = "
+CREATE TABLE IF NOT EXISTS issue_relations (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    related_issue_id TEXT NOT NULL,
+    related_issue_identifier TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    UNIQUE(issue_id, related_issue_id, relation_type)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_issue ON issue_relations(issue_id);
+CREATE INDEX IF NOT EXISTS idx_relations_related ON issue_relations(related_issue_id);
+";
 
 // Add url column to issues
 const MIGRATION_3: &str = "

@@ -13,6 +13,10 @@ pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Resul
 
     if json {
         let mut value = serde_json::to_value(&issue)?;
+        let relations = db.get_relations_enriched(&issue.id)?;
+        if !relations.is_empty() {
+            value["relations"] = serde_json::to_value(&relations)?;
+        }
         if comments {
             let comments = db.get_comments(&issue.id)?;
             value["comments"] = serde_json::to_value(&comments)?;
@@ -41,6 +45,35 @@ pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Resul
 
     println!("  {} {}", "Created:".dimmed(), issue.created_at);
     println!("  {} {}", "Updated:".dimmed(), issue.updated_at);
+    if !issue.url.is_empty() {
+        println!("  {} {}", "URL:".dimmed(), issue.url);
+    }
+
+    let relations = db.get_relations_enriched(&issue.id)?;
+    if !relations.is_empty() {
+        println!();
+        println!("{}", "Relations:".bold());
+        for rel in &relations {
+            let state_suffix = if rel.issue_state.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", rel.issue_state)
+            };
+            let title_suffix = if rel.issue_title.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", rel.issue_title)
+            };
+            println!(
+                "  {} {} {}{}{}",
+                format!("{}:", rel.relation_type).dimmed(),
+                rel.issue_identifier.bold(),
+                title_suffix,
+                state_suffix.dimmed(),
+                if rel.issue_url.is_empty() { String::new() } else { format!(" {}", rel.issue_url.dimmed()) }
+            );
+        }
+    }
 
     if let Some(ref desc) = issue.description {
         println!("\n{}", "Description:".bold());
