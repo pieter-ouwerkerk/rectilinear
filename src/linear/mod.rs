@@ -612,7 +612,9 @@ impl LinearClient {
             updated_at: i.updated_at,
             content_hash,
             synced_at: None,
-        })
+        };
+
+        Ok((issue, relations))
     }
 
     /// Get a team's ID from its key
@@ -775,5 +777,69 @@ impl LinearClient {
             project_name,
             available.join(", ")
         )
+    }
+
+    /// Create a relation between two issues.
+    /// Linear API types: "blocks", "duplicate", "related".
+    /// If relation_type is "blocked_by", we swap the issues and create a "blocks" relation.
+    pub async fn create_relation(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        relation_type: &str,
+    ) -> Result<String> {
+        let (actual_issue_id, actual_related_id, api_type) = if relation_type == "blocked_by" {
+            (related_issue_id, issue_id, "blocks")
+        } else {
+            (issue_id, related_issue_id, relation_type)
+        };
+
+        let query = r#"
+            mutation($input: IssueRelationCreateInput!) {
+                issueRelationCreate(input: $input) {
+                    success
+                    issueRelation { id }
+                }
+            }
+        "#;
+
+        let input = serde_json::json!({
+            "issueId": actual_issue_id,
+            "relatedIssueId": actual_related_id,
+            "type": api_type,
+        });
+
+        let data: CreateRelationData = self
+            .query(query, serde_json::json!({ "input": input }))
+            .await?;
+
+        if !data.issue_relation_create.success {
+            anyhow::bail!("Failed to create relation");
+        }
+
+        let relation = data.issue_relation_create.issue_relation
+            .context("No relation returned")?;
+        Ok(relation.id)
+    }
+
+    /// Delete a relation by its ID.
+    pub async fn delete_relation(&self, relation_id: &str) -> Result<()> {
+        let query = r#"
+            mutation($id: String!) {
+                issueRelationDelete(id: $id) {
+                    success
+                }
+            }
+        "#;
+
+        let data: DeleteRelationData = self
+            .query(query, serde_json::json!({ "id": relation_id }))
+            .await?;
+
+        if !data.issue_relation_delete.success {
+            anyhow::bail!("Failed to delete relation");
+        }
+
+        Ok(())
     }
 }
