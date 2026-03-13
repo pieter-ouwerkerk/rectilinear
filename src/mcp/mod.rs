@@ -1033,7 +1033,9 @@ impl ServerHandler for RectilinearMcp {
                  IMPORTANT: Present exactly ONE issue at a time. Wait for the user's response and call mark_triaged before presenting the next issue. \
                  Never batch multiple issues into a single message.\n\n\
                  When the user asks to triage issues:\n\
-                 1. Call get_triage_queue with the team key.\n\
+                 1. Call get_triage_queue with the team key. IMPORTANT: Always use get_triage_queue from rectilinear — \
+                 never use Linear's list_issues as a substitute. If the user asks to include completed issues, \
+                 pass include_completed: true.\n\
                  2. Take the FIRST issue from the queue. BEFORE presenting it to the user, use the code_search_hints field to explore the codebase. \
                  Search for the mentioned files, symbols, and keywords using Grep, Glob, Read, or Cuttlefish MCP tools (get_symbols, find_references, get_hover_info). \
                  Spend 2-4 tool calls understanding the current code state for THIS issue.\n\
