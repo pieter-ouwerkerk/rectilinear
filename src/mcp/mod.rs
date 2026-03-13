@@ -84,6 +84,49 @@ fn extract_issue_identifiers(text: &str) -> Vec<String> {
     result
 }
 
+/// Extract markdown image references from text (e.g., `![alt](url)` or `![](url)`).
+fn extract_image_references(text: &str) -> Vec<&str> {
+    let mut images = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("![") {
+        if let Some(alt_end) = remaining[start + 2..].find("](") {
+            let paren_start = start + 2 + alt_end + 2;
+            if let Some(paren_end) = remaining[paren_start..].find(')') {
+                let full_end = paren_start + paren_end + 1;
+                images.push(&remaining[start..full_end]);
+                remaining = &remaining[full_end..];
+                continue;
+            }
+        }
+        remaining = &remaining[start + 2..];
+    }
+    images
+}
+
+/// If `new_description` would drop image references present in `original`, append them.
+fn preserve_images(original: &str, new_description: &str) -> String {
+    let original_images = extract_image_references(original);
+    if original_images.is_empty() {
+        return new_description.to_string();
+    }
+
+    let mut missing: Vec<&str> = Vec::new();
+    for img in &original_images {
+        if !new_description.contains(img) {
+            missing.push(img);
+        }
+    }
+
+    if missing.is_empty() {
+        return new_description.to_string();
+    }
+
+    let mut result = new_description.to_string();
+    result.push_str("\n\n");
+    result.push_str(&missing.join("\n"));
+    result
+}
+
 /// Extract code-relevant search hints from issue title, description, and labels.
 /// Returns terms that Claude should search for in the codebase.
 fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<String> {
@@ -432,7 +475,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "update_issue",
-        description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update."
+        description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update. Prefer append_to_issue for adding context. Image references in the original description are automatically preserved when updating."
     )]
     async fn update_issue(&self, #[tool(aggr)] args: UpdateIssueArgs) -> Result<String, String> {
         let issue = self
@@ -465,11 +508,24 @@ impl RectilinearMcp {
             None
         };
 
+        // If updating description, re-fetch from Linear to preserve any image references
+        let safe_description = if args.description.is_some() {
+            let (latest, _) = client.fetch_single_issue(&issue.id).await.map_err(|e| e.to_string())?;
+            args.description.as_ref().map(|new_desc| {
+                match &latest.description {
+                    Some(original) => preserve_images(original, new_desc),
+                    None => new_desc.clone(),
+                }
+            })
+        } else {
+            None
+        };
+
         client
             .update_issue(
                 &issue.id,
                 args.title.as_deref(),
-                args.description.as_deref(),
+                safe_description.as_deref(),
                 args.priority,
                 state_id.as_deref(),
                 label_ids.as_deref(),
@@ -743,7 +799,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "mark_triaged",
-        description = "Mark an issue as triaged by setting priority and optionally updating title, description, and adding a triage comment. Combines update + comment into one call."
+        description = "Mark an issue as triaged by setting priority and optionally updating title, description, and adding a triage comment. Combines update + comment into one call. Prefer using the comment field over description for adding context — description updates risk losing formatting. Image references in the original description are automatically preserved."
     )]
     async fn mark_triaged(
         &self,
@@ -848,11 +904,19 @@ impl RectilinearMcp {
             None
         };
 
+        // Preserve any image references from the original description
+        let safe_description = args.description.as_ref().map(|new_desc| {
+            match &issue.description {
+                Some(original) => preserve_images(original, new_desc),
+                None => new_desc.clone(),
+            }
+        });
+
         client
             .update_issue(
                 &issue.id,
                 args.title.as_deref(),
-                args.description.as_deref(),
+                safe_description.as_deref(),
                 Some(args.priority),
                 state_id.as_deref(),
                 label_ids.as_deref(),
@@ -1041,9 +1105,10 @@ impl ServerHandler for RectilinearMcp {
                  the kind of questions an experienced engineer asks before writing code \
                  (e.g. \"I found WorktreeManager.cleanup() at src/worktree.rs:142 — it already handles orphaned worktrees. Is this issue about a gap in that logic, or something else entirely?\"). \
                  Suggest best-guess answers.\n\
-                 4. WAIT for the user to respond. Based on their answers, propose: priority (1-4), improved title, improved description \
-                 (include relevant file paths and code references in the description), state change if appropriate (e.g. Done, Cancelled, Duplicate), \
-                 and any label or project changes.\n\
+                 4. WAIT for the user to respond. Based on their answers, propose: priority (1-4), improved title, \
+                 triage comment (use the comment field for adding context, code references, and file paths — prefer comments over description changes to avoid losing images or formatting), \
+                 state change if appropriate (e.g. Done, Cancelled, Duplicate), and any label or project changes. \
+                 Only update the description if the original is genuinely wrong or missing key information.\n\
                  5. WAIT for user confirmation, then call mark_triaged with all agreed changes.\n\
                  6. Only after mark_triaged succeeds, move to the NEXT issue. Repeat from step 2. \
                  When the batch is exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
@@ -1081,4 +1146,60 @@ pub async fn serve(db: Database, config: Config) -> Result<()> {
     let server = rmcp::serve_server(handler, transport).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_image_references() {
+        let text = "Some text ![screenshot](https://uploads.linear.app/abc.png) more text";
+        let images = extract_image_references(text);
+        assert_eq!(images, vec!["![screenshot](https://uploads.linear.app/abc.png)"]);
+    }
+
+    #[test]
+    fn test_extract_multiple_images() {
+        let text = "![a](url1) text ![b](url2)";
+        let images = extract_image_references(text);
+        assert_eq!(images, vec!["![a](url1)", "![b](url2)"]);
+    }
+
+    #[test]
+    fn test_extract_empty_alt() {
+        let text = "![](https://example.com/img.png)";
+        let images = extract_image_references(text);
+        assert_eq!(images, vec!["![](https://example.com/img.png)"]);
+    }
+
+    #[test]
+    fn test_no_images() {
+        let text = "Just some regular text with [a link](url)";
+        let images = extract_image_references(text);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_preserve_images_no_originals() {
+        let result = preserve_images("no images here", "new description");
+        assert_eq!(result, "new description");
+    }
+
+    #[test]
+    fn test_preserve_images_keeps_missing() {
+        let original = "Text ![img](https://uploads.linear.app/abc.png) more";
+        let new_desc = "Rewritten description";
+        let result = preserve_images(original, new_desc);
+        assert!(result.starts_with("Rewritten description"));
+        assert!(result.contains("![img](https://uploads.linear.app/abc.png)"));
+    }
+
+    #[test]
+    fn test_preserve_images_already_present() {
+        let original = "Text ![img](url)";
+        let new_desc = "New text ![img](url)";
+        let result = preserve_images(original, new_desc);
+        assert_eq!(result, "New text ![img](url)");
+    }
 }
