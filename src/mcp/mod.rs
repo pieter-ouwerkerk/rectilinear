@@ -242,6 +242,8 @@ struct GetTriageQueueArgs {
     exclude: Option<Vec<String>>,
     /// Randomize issue order instead of chronological (default false)
     shuffle: Option<bool>,
+    /// Include completed/canceled issues (default false). Useful for archival prioritization.
+    include_completed: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -635,7 +637,7 @@ impl RectilinearMcp {
 
         let all_issues = self
             .db
-            .get_unprioritized_issues(Some(&args.team))
+            .get_unprioritized_issues(Some(&args.team), args.include_completed.unwrap_or(false))
             .map_err(|e| e.to_string())?;
 
         let exclude_set: std::collections::HashSet<&str> = args
@@ -1047,6 +1049,9 @@ impl ServerHandler for RectilinearMcp {
                  5. WAIT for user confirmation, then call mark_triaged with all agreed changes.\n\
                  6. Only after mark_triaged succeeds, move to the NEXT issue. Repeat from step 2. \
                  When the batch is exhausted, call get_triage_queue again with processed identifiers in exclude.\n\n\
+                 ## Archival Mode\n\
+                 To triage completed/canceled issues (for archival prioritization), pass include_completed: true to get_triage_queue. \
+                 This surfaces Done/Canceled/Duplicate issues that have no priority set. The workflow is the same — set a priority for historical record.\n\n\
                  ## Priority Framework\n\
                  1=Urgent (production down, data loss, security)\n\
                  2=High (major feature broken, significant user impact, no workaround)\n\
