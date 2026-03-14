@@ -1,11 +1,13 @@
 mod cli;
-mod config;
-mod db;
-mod embedding;
-mod linear;
 mod llm;
 mod mcp;
-mod search;
+
+// Core modules re-exported from the library crate
+pub use rectilinear_core::config;
+pub use rectilinear_core::db;
+pub use rectilinear_core::embedding;
+pub use rectilinear_core::linear;
+pub use rectilinear_core::search;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
