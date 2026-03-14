@@ -50,31 +50,37 @@ Linear remains the source of truth. The local database is a read-optimized cache
 | CLI | clap (derive) |
 | Database | rusqlite (bundled, FTS5) |
 | Vector storage | f32 blobs + cosine similarity in Rust |
-| Embeddings | Gemini API (768-dim) or local GGUF (EmbeddingGemma, 256-dim) |
+| Embeddings | Gemini API (768-dim), or local GGUF with `local-embeddings` feature (EmbeddingGemma, 256-dim) |
 | Linear API | reqwest + GraphQL |
 | MCP server | rmcp, stdio transport |
 | Config | TOML at `~/.config/rectilinear/config.toml` |
 
-## Setup
+## Install
+
+### From crates.io
+
+```sh
+cargo install rectilinear
+```
+
+To include the local GGUF embedding backend (EmbeddingGemma-300M, requires cmake):
+
+```sh
+cargo install rectilinear --features local-embeddings
+```
+
+### From source
+
+```sh
+git clone https://github.com/pieter-ouwerkerk/rectilinear.git && cd rectilinear
+cargo build --release
+cp target/release/rectilinear ~/.local/bin/
+```
 
 ### Prerequisites
 
-- Rust toolchain (`rustup` — https://rustup.rs)
 - A Linear API key (https://linear.app/settings/api)
 - Optional: a Gemini API key for embeddings (https://aistudio.google.com/apikey)
-
-### Build
-
-```sh
-git clone <repo-url> && cd rectilinear
-cargo build --release
-```
-
-The binary is at `target/release/rectilinear`. Copy it somewhere on your `$PATH`:
-
-```sh
-cp target/release/rectilinear ~/.local/bin/
-```
 
 ### Configure
 
@@ -116,7 +122,7 @@ rectilinear sync --team ENG --include-archived
 
 ### Generate embeddings
 
-Embeddings power vector search and duplicate detection. Uses the Gemini API by default if `GEMINI_API_KEY` is set, otherwise falls back to a local GGUF model (EmbeddingGemma-300M, auto-downloaded on first use).
+Embeddings power vector search and duplicate detection. Uses the Gemini API if `GEMINI_API_KEY` is set. If you installed with `--features local-embeddings`, it can also use a local GGUF model (EmbeddingGemma-300M, auto-downloaded on first use) as a fallback.
 
 ```sh
 # Embed issues that don't have embeddings yet
