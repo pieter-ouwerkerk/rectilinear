@@ -129,7 +129,8 @@ impl Embedder {
 
     /// Create an embedder using the local GGUF backend.
     #[cfg(feature = "local-embeddings")]
-    pub fn new_local(models_dir: &std::path::Path) -> Result<Self> {
+    pub fn new_local(_models_dir: &std::path::Path) -> Result<Self> {
+        // TODO: pass models_dir through to LocalBackend instead of using Config default
         let config = Config {
             embedding: crate::config::EmbeddingConfig {
                 backend: EmbeddingBackend::Local,

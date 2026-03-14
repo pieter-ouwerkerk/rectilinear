@@ -145,7 +145,8 @@ pub struct RectilinearEngine {
     db: Database,
     linear_api_key: String,
     gemini_api_key: Option<String>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    /// Kept alive so async methods have a runtime. Not read directly.
+    _runtime: Arc<tokio::runtime::Runtime>,
 }
 
 #[uniffi::export]
@@ -174,7 +175,7 @@ impl RectilinearEngine {
             db,
             linear_api_key,
             gemini_api_key,
-            runtime: Arc::new(runtime),
+            _runtime: Arc::new(runtime),
         })
     }
 
