@@ -401,14 +401,30 @@ impl RectilinearMcp {
 
     #[tool(
         name = "get_issue",
-        description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments."
+        description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments. Falls back to fetching from Linear API if not found locally."
     )]
     async fn get_issue(&self, #[tool(aggr)] args: GetIssueArgs) -> Result<String, String> {
-        let issue = self
-            .db
-            .get_issue(&args.id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
+        let issue = match self.db.get_issue(&args.id).map_err(|e| e.to_string())? {
+            Some(issue) => issue,
+            None => {
+                // Not found locally — try fetching from Linear API by identifier
+                let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+                let result = client
+                    .fetch_issue_by_identifier(&args.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                match result {
+                    Some((issue, relations)) => {
+                        self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
+                        self.db
+                            .upsert_relations(&issue.id, &relations)
+                            .map_err(|e| e.to_string())?;
+                        issue
+                    }
+                    None => return Err(format!("Issue '{}' not found", args.id)),
+                }
+            }
+        };
 
         let mut value = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
 
