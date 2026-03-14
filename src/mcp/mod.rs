@@ -444,7 +444,15 @@ impl RectilinearMcp {
 
     #[tool(
         name = "create_issue",
-        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low)."
+        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low).
+
+IMPORTANT — Before calling this tool, you MUST:
+
+1. **Disambiguate the request.** Ask the user 2-4 clarifying questions to sharpen scope, acceptance criteria, and edge cases. Think like a principal engineer: what assumptions are you making? What could go wrong? What's in vs. out of scope? Do not create the issue until the user has answered.
+
+2. **Check for duplicates.** Call find_duplicates with the intended title/description to verify this issue doesn't already exist. If a match is found (>0.8 similarity), show it to the user and ask whether to proceed, update the existing issue, or cancel.
+
+3. **Write a clear title and description.** The title should be imperative and specific (e.g. 'Add rate limiting to /api/upload endpoint' not 'rate limiting'). The description should include: what the desired behavior is, why it matters, and any constraints or acceptance criteria surfaced during disambiguation."
     )]
     async fn create_issue(&self, #[tool(aggr)] args: CreateIssueArgs) -> Result<String, String> {
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
