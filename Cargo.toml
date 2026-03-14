@@ -10,9 +10,13 @@ license = "MIT"
 repository = "https://github.com/pieter-ouwerkerk/rectilinear"
 description = "Linear issue intelligence tool with hybrid FTS + vector search"
 
+[features]
+default = []
+local-embeddings = ["rectilinear-core/local-embeddings"]
+
 [dependencies]
 # Core library
-rectilinear-core = { path = "crates/rectilinear-core", features = ["local-embeddings"] }
+rectilinear-core = { version = "0.1.0", path = "crates/rectilinear-core" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -33,9 +37,6 @@ rmcp = { version = "0.1", features = ["server", "transport-io"] }
 
 # Config
 toml = "0.8"
-
-# Embeddings (local GGUF — binary always includes it)
-llama-cpp-2 = "0.1"
 
 # TUI
 ratatui = "0.30"

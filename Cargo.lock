@@ -2293,7 +2293,6 @@ dependencies = [
  "dirs",
  "hex",
  "indicatif",
- "llama-cpp-2",
  "rand 0.10.0",
  "ratatui",
  "rectilinear-core",
