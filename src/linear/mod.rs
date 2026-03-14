@@ -341,39 +341,7 @@ impl LinearClient {
             .issues
             .nodes
             .into_iter()
-            .map(|i| {
-                let labels: Vec<String> = i.labels.nodes.iter().map(|l| l.name.clone()).collect();
-                let labels_json =
-                    serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
-
-                let mut hasher = Sha256::new();
-                hasher.update(&i.title);
-                hasher.update(i.description.as_deref().unwrap_or(""));
-                hasher.update(&labels_json);
-                let content_hash = hex::encode(hasher.finalize());
-
-                let relations = Self::extract_relations(&i.id, &i);
-
-                let issue = db::Issue {
-                    id: i.id,
-                    identifier: i.identifier,
-                    url: i.url,
-                    team_key: i.team.key,
-                    title: i.title,
-                    description: i.description,
-                    state_name: i.state.name,
-                    state_type: i.state.state_type,
-                    priority: i.priority,
-                    assignee_name: i.assignee.map(|a| a.name),
-                    project_name: i.project.map(|p| p.name),
-                    labels_json,
-                    created_at: i.created_at,
-                    updated_at: i.updated_at,
-                    content_hash,
-                    synced_at: None,
-                };
-                (issue, relations)
-            })
+            .map(Self::convert_linear_issue)
             .collect();
 
         Ok((
@@ -583,7 +551,64 @@ impl LinearClient {
             .query(query, serde_json::json!({ "id": issue_id }))
             .await?;
 
-        let i = data.issue;
+        Ok(Self::convert_linear_issue(data.issue))
+    }
+
+    /// Fetch a single issue from Linear by its identifier (e.g., "CUT-537").
+    /// Parses the identifier into team key + number and queries via the issues filter.
+    pub async fn fetch_issue_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<(db::Issue, Vec<db::Relation>)>> {
+        // Parse "CUT-537" into team_key="CUT", number=537
+        let parts: Vec<&str> = identifier.rsplitn(2, '-').collect();
+        if parts.len() != 2 {
+            anyhow::bail!(
+                "Invalid issue identifier '{}': expected format like 'ENG-123'",
+                identifier
+            );
+        }
+        let number: i32 = parts[0]
+            .parse()
+            .with_context(|| format!("Invalid issue number in '{}'", identifier))?;
+        let team_key = parts[1];
+
+        let query = format!(
+            r#"query {{
+                issues(
+                    filter: {{
+                        team: {{ key: {{ eq: "{}" }} }},
+                        number: {{ eq: {} }}
+                    }},
+                    first: 1
+                ) {{
+                    nodes {{
+                        id identifier url title description priority
+                        createdAt updatedAt
+                        state {{ name type }}
+                        team {{ key }}
+                        assignee {{ name }}
+                        project {{ name }}
+                        labels {{ nodes {{ name }} }}
+                        relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
+                    }}
+                    pageInfo {{ hasNextPage endCursor }}
+                }}
+            }}"#,
+            team_key, number
+        );
+
+        let data: IssuesData = self.query(&query, serde_json::json!({})).await?;
+
+        Ok(data
+            .issues
+            .nodes
+            .into_iter()
+            .next()
+            .map(Self::convert_linear_issue))
+    }
+
+    fn convert_linear_issue(i: LinearIssue) -> (db::Issue, Vec<db::Relation>) {
         let labels: Vec<String> = i.labels.nodes.iter().map(|l| l.name.clone()).collect();
         let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
 
@@ -614,7 +639,7 @@ impl LinearClient {
             synced_at: None,
         };
 
-        Ok((issue, relations))
+        (issue, relations)
     }
 
     /// Get a team's ID from its key
