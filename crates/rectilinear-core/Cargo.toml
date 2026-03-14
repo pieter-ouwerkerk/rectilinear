@@ -2,6 +2,8 @@
 name = "rectilinear-core"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/pieter-ouwerkerk/rectilinear"
 description = "Core engine for Linear issue intelligence — search, sync, embeddings"
 
 [lib]

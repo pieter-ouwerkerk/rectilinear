@@ -6,6 +6,8 @@ resolver = "2"
 name = "rectilinear"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/pieter-ouwerkerk/rectilinear"
 description = "Linear issue intelligence tool with hybrid FTS + vector search"
 
 [dependencies]
