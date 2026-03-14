@@ -1,0 +1,49 @@
+[package]
+name = "rectilinear-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core engine for Linear issue intelligence — search, sync, embeddings"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+name = "rectilinear_core"
+
+[features]
+default = ["api-embeddings"]
+api-embeddings = []
+local-embeddings = ["llama-cpp-2", "indicatif"]
+
+[dependencies]
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+
+# HTTP + API (rustls for iOS cross-compile)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "0.8"
+
+# Embeddings (local GGUF — optional, macOS only)
+llama-cpp-2 = { version = "0.1", optional = true }
+indicatif = { version = "0.17", optional = true }
+
+# UniFFI
+uniffi = { version = "0.29", features = ["cli"] }
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# Misc
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"

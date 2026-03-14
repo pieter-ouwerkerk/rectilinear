@@ -230,6 +230,14 @@ impl LinearClient {
         Ok(Self { client, api_key })
     }
 
+    /// Create a client with an explicit API key (for FFI callers).
+    pub fn with_api_key(api_key: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.to_string(),
+        }
+    }
+
     async fn query<T: serde::de::DeserializeOwned>(
         &self,
         query: &str,
@@ -357,7 +365,7 @@ impl LinearClient {
         team_key: &str,
         full: bool,
         include_archived: bool,
-        progress: Option<&indicatif::ProgressBar>,
+        progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
         let updated_after = if full {
             None
@@ -389,8 +397,8 @@ impl LinearClient {
             }
             total += count;
 
-            if let Some(pb) = progress {
-                pb.set_message(format!("{} issues synced", total));
+            if let Some(cb) = progress {
+                cb(total);
             }
 
             if !has_next || count == 0 {

@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/rectilinear-core"]
+resolver = "2"
+
 [package]
 name = "rectilinear"
 version = "0.1.0"
@@ -5,13 +9,16 @@ edition = "2021"
 description = "Linear issue intelligence tool with hybrid FTS + vector search"
 
 [dependencies]
+# Core library
+rectilinear-core = { path = "crates/rectilinear-core", features = ["local-embeddings"] }
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
 
-# Database
+# Database (re-used from core, but binary needs direct access too)
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 
 # HTTP + API
@@ -25,7 +32,7 @@ rmcp = { version = "0.1", features = ["server", "transport-io"] }
 # Config
 toml = "0.8"
 
-# Embeddings (local GGUF)
+# Embeddings (local GGUF — binary always includes it)
 llama-cpp-2 = "0.1"
 
 # TUI

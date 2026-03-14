@@ -1,3 +1,4 @@
+#[cfg(feature = "local-embeddings")]
 mod local;
 
 use anyhow::{Context, Result};
@@ -6,6 +7,7 @@ use crate::config::{Config, EmbeddingBackend};
 
 enum Backend {
     Gemini(GeminiBackend),
+    #[cfg(feature = "local-embeddings")]
     Local(local::LocalBackend),
 }
 
@@ -99,12 +101,9 @@ impl Embedder {
                 let key = gemini_key.context(
                     "Gemini API key required for API backend. Set GEMINI_API_KEY or configure in config.",
                 )?;
-                let backend = GeminiBackend::new(&key);
-                Ok(Self {
-                    dimensions: 768,
-                    backend: Backend::Gemini(backend),
-                })
+                Self::new_api(&key)
             }
+            #[cfg(feature = "local-embeddings")]
             EmbeddingBackend::Local => {
                 let backend = local::LocalBackend::new(config)?;
                 let dimensions = backend.dimensions();
@@ -113,12 +112,44 @@ impl Embedder {
                     backend: Backend::Local(backend),
                 })
             }
+            #[cfg(not(feature = "local-embeddings"))]
+            EmbeddingBackend::Local => {
+                anyhow::bail!("Local embeddings not available — compile with `local-embeddings` feature")
+            }
         }
+    }
+
+    /// Create an embedder using the Gemini API backend.
+    pub fn new_api(api_key: &str) -> Result<Self> {
+        Ok(Self {
+            dimensions: 768,
+            backend: Backend::Gemini(GeminiBackend::new(api_key)),
+        })
+    }
+
+    /// Create an embedder using the local GGUF backend.
+    #[cfg(feature = "local-embeddings")]
+    pub fn new_local(_models_dir: &std::path::Path) -> Result<Self> {
+        // TODO: pass models_dir through to LocalBackend instead of using Config default
+        let config = Config {
+            embedding: crate::config::EmbeddingConfig {
+                backend: EmbeddingBackend::Local,
+                gemini_api_key: None,
+            },
+            ..Config::default()
+        };
+        let backend = local::LocalBackend::new(&config)?;
+        let dimensions = backend.dimensions();
+        Ok(Self {
+            dimensions,
+            backend: Backend::Local(backend),
+        })
     }
 
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         match &self.backend {
             Backend::Gemini(b) => b.embed_batch(texts).await,
+            #[cfg(feature = "local-embeddings")]
             Backend::Local(b) => b.embed_batch(texts),
         }
     }
@@ -135,6 +166,7 @@ impl Embedder {
     pub fn backend_name(&self) -> &str {
         match &self.backend {
             Backend::Gemini(_) => "gemini-api",
+            #[cfg(feature = "local-embeddings")]
             Backend::Local(_) => "local-gguf",
         }
     }
