@@ -221,8 +221,10 @@ pub fn handle_interactive() -> Result<()> {
         };
     }
 
-    if let Some(new) = prompt_secret("  gemini-api-key", config.embedding.gemini_api_key.as_deref())?
-    {
+    if let Some(new) = prompt_secret(
+        "  gemini-api-key",
+        config.embedding.gemini_api_key.as_deref(),
+    )? {
         config.embedding.gemini_api_key = Some(new);
     }
 
@@ -303,9 +305,7 @@ fn prompt_choice(label: &str, current: &str, options: &[&str]) -> Result<Option<
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                if using_tab && i == selected {
-                    format!("[{}]", o).bold().to_string()
-                } else if !using_tab && i == current_idx {
+                if (using_tab && i == selected) || (!using_tab && i == current_idx) {
                     format!("[{}]", o).bold().to_string()
                 } else {
                     o.to_string()

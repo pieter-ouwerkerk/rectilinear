@@ -2,7 +2,9 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use serde::Deserialize;
 use std::io;
 use std::sync::Arc;
@@ -44,7 +46,11 @@ Rules:
 - Keep the description concise but informative"#;
 
 const DEFAULT_QUESTIONS: &[(&str, &str, &str)] = &[
-    ("impact", "Impact", "How many users are affected? Is it blocking?"),
+    (
+        "impact",
+        "Impact",
+        "How many users are affected? Is it blocking?",
+    ),
     ("frequency", "Frequency", "How often does this occur?"),
     (
         "severity",
@@ -238,7 +244,10 @@ impl<'a> App<'a> {
             } else {
                 answer
             };
-            prompt.push_str(&format!("\n# {}: {}\n\n{}\n", q.label, q.question, answer_text));
+            prompt.push_str(&format!(
+                "\n# {}: {}\n\n{}\n",
+                q.label, q.question, answer_text
+            ));
         }
 
         prompt
@@ -419,6 +428,7 @@ pub async fn handle_triage(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_key(
     app: &mut App<'_>,
     key: KeyEvent,
@@ -476,7 +486,10 @@ async fn handle_key(
                 KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     submit_answers(app, llm, tx);
                 }
-                KeyCode::Char('d') if key.modifiers.is_empty() && app.answers[app.focused_field].lines().join("").is_empty() => {
+                KeyCode::Char('d')
+                    if key.modifiers.is_empty()
+                        && app.answers[app.focused_field].lines().join("").is_empty() =>
+                {
                     // Only toggle description if focused textarea is empty (so 'd' can be typed normally)
                     app.show_desc = true;
                     app.desc_scroll = 0;
@@ -587,10 +600,7 @@ fn submit_answers(app: &mut App<'_>, llm: &LlmClient, tx: &mpsc::UnboundedSender
 
 fn copy_to_clipboard(text: &str) -> bool {
     use std::process::{Command, Stdio};
-    let mut child = match Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -742,11 +752,7 @@ fn spawn_apply(
 
     let issue_id = app.current_issue().id.clone();
     let current_title = app.current_issue().title.clone();
-    let current_desc = app
-        .current_issue()
-        .description
-        .clone()
-        .unwrap_or_default();
+    let current_desc = app.current_issue().description.clone().unwrap_or_default();
 
     let new_title = if proposal.title != current_title {
         Some(proposal.title.clone())
@@ -805,10 +811,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     };
 
     let outer = Layout::vertical([
-        Constraint::Length(5),    // header
-        Constraint::Min(8),       // questions/main
+        Constraint::Length(5),              // header
+        Constraint::Min(8),                 // questions/main
         Constraint::Length(similar_height), // similar issues bar
-        Constraint::Length(1),    // status bar
+        Constraint::Length(1),              // status bar
     ])
     .split(f.area());
 
@@ -836,7 +842,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         Phase::Reviewing(proposal) => {
             render_proposal(f, outer[1], app, proposal);
         }
-        Phase::PromptReview { prompt, scroll, copied } => {
+        Phase::PromptReview {
+            prompt,
+            scroll,
+            copied,
+        } => {
             render_prompt_review(f, outer[1], prompt, *scroll, *copied, &app.triage_mode);
         }
     }
@@ -1025,12 +1035,7 @@ fn render_questions(f: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::vertical(constraints).split(inner);
 
-    for (i, (question, textarea)) in app
-        .questions
-        .iter()
-        .zip(app.answers.iter_mut())
-        .enumerate()
-    {
+    for (i, (question, textarea)) in app.questions.iter().zip(app.answers.iter_mut()).enumerate() {
         let label_area = chunks[i * 3];
         let input_area = chunks[i * 3 + 1];
 
@@ -1264,9 +1269,7 @@ fn parse_markdown_spans(text: &str, base_color: Color) -> Vec<Span<'static>> {
     while !remaining.is_empty() {
         let next_bold = remaining.find("**");
         let next_code = remaining.find('`');
-        let next_italic = remaining.find('*').filter(|&pos| {
-            next_bold.map_or(true, |bp| pos != bp)
-        });
+        let next_italic = remaining.find('*').filter(|&pos| next_bold != Some(pos));
 
         let next = [
             next_bold.map(|p| (p, "**")),

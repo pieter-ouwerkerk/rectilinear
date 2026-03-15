@@ -252,10 +252,7 @@ impl RectilinearEngine {
     }
 
     /// Get enriched relations for an issue.
-    pub fn get_relations(
-        &self,
-        issue_id: String,
-    ) -> Result<Vec<RtRelation>, RectilinearError> {
+    pub fn get_relations(&self, issue_id: String) -> Result<Vec<RtRelation>, RectilinearError> {
         Ok(self
             .db
             .get_relations_enriched(&issue_id)?
@@ -277,12 +274,12 @@ impl RectilinearEngine {
         // Group blockers by issue ID
         let mut blocker_map: std::collections::HashMap<String, Vec<RtBlocker>> =
             std::collections::HashMap::new();
-        for (issue_id, identifier, title, state_name, state_type) in blockers {
-            let is_terminal = matches!(state_type.as_str(), "completed" | "canceled");
-            blocker_map.entry(issue_id).or_default().push(RtBlocker {
-                identifier,
-                title,
-                state_name,
+        for b in blockers {
+            let is_terminal = matches!(b.state_type.as_str(), "completed" | "canceled");
+            blocker_map.entry(b.issue_id).or_default().push(RtBlocker {
+                identifier: b.identifier,
+                title: b.title,
+                state_name: b.state_name,
                 is_terminal,
             });
         }
@@ -317,11 +314,7 @@ impl RectilinearEngine {
     // ── Async methods (network I/O) ─────────────────────────────
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
-    pub async fn sync_team(
-        &self,
-        team_key: String,
-        full: bool,
-    ) -> Result<u64, RectilinearError> {
+    pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
         let client = LinearClient::with_api_key(&self.linear_api_key);
         let count = client
             .sync_team(&self.db, &team_key, full, false, None)
@@ -365,13 +358,14 @@ impl RectilinearEngine {
         threshold: f32,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
         let config = Config::load().unwrap_or_default();
-        let embedder = self
-            .make_embedder(&config)
-            .await?
-            .ok_or_else(|| RectilinearError::Config {
-                message: "Embedder not available — set GEMINI_API_KEY or enable local embeddings"
-                    .into(),
-            })?;
+        let embedder =
+            self.make_embedder(&config)
+                .await?
+                .ok_or_else(|| RectilinearError::Config {
+                    message:
+                        "Embedder not available — set GEMINI_API_KEY or enable local embeddings"
+                            .into(),
+                })?;
 
         let results = search::find_duplicates(
             &self.db,
@@ -453,12 +447,11 @@ impl RectilinearEngine {
             .or(config.embedding.gemini_api_key.as_deref());
 
         if let Some(api_key) = key {
-            Ok(Some(
-                crate::embedding::Embedder::new_api(api_key)
-                    .map_err(|e| RectilinearError::Config {
-                        message: e.to_string(),
-                    })?,
-            ))
+            Ok(Some(crate::embedding::Embedder::new_api(api_key).map_err(
+                |e| RectilinearError::Config {
+                    message: e.to_string(),
+                },
+            )?))
         } else {
             #[cfg(feature = "local-embeddings")]
             {
@@ -466,10 +459,11 @@ impl RectilinearEngine {
                     message: e.to_string(),
                 })?;
                 Ok(Some(
-                    crate::embedding::Embedder::new_local(&models_dir)
-                        .map_err(|e| RectilinearError::Config {
+                    crate::embedding::Embedder::new_local(&models_dir).map_err(|e| {
+                        RectilinearError::Config {
                             message: e.to_string(),
-                        })?,
+                        }
+                    })?,
                 ))
             }
             #[cfg(not(feature = "local-embeddings"))]

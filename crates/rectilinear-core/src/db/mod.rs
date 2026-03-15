@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub struct BlockerRow {
+    pub issue_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub state_name: String,
+    pub state_type: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -78,7 +86,11 @@ impl Database {
         })
     }
 
-    pub fn get_unprioritized_issues(&self, team_key: Option<&str>, include_completed: bool) -> Result<Vec<Issue>> {
+    pub fn get_unprioritized_issues(
+        &self,
+        team_key: Option<&str>,
+        include_completed: bool,
+    ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let state_filter = if include_completed {
                 ""
@@ -149,10 +161,7 @@ impl Database {
 
     /// For a set of issue IDs, return all `blocked_by` relations with resolved state info.
     /// Returns (issue_id, blocker_identifier, blocker_title, blocker_state_name, blocker_state_type).
-    pub fn get_blockers_for_issues(
-        &self,
-        issue_ids: &[String],
-    ) -> Result<Vec<(String, String, String, String, String)>> {
+    pub fn get_blockers_for_issues(&self, issue_ids: &[String]) -> Result<Vec<BlockerRow>> {
         if issue_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -192,13 +201,13 @@ impl Database {
             for sql in [&sql_fwd, &sql_inv] {
                 let mut stmt = conn.prepare(sql)?;
                 let rows = stmt.query_map(param_refs.as_slice(), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
+                    Ok(BlockerRow {
+                        issue_id: row.get(0)?,
+                        identifier: row.get(1)?,
+                        title: row.get(2)?,
+                        state_name: row.get(3)?,
+                        state_type: row.get(4)?,
+                    })
                 })?;
                 for row in rows {
                     results.push(row?);
@@ -253,18 +262,20 @@ impl Database {
                         COALESCE(i.title, ''), COALESCE(i.state_name, ''), COALESCE(i.url, '')
                  FROM issue_relations r
                  LEFT JOIN issues i ON r.related_issue_id = i.id
-                 WHERE r.issue_id = ?1"
+                 WHERE r.issue_id = ?1",
             )?;
-            let forward = stmt.query_map(rusqlite::params![issue_id], |row| {
-                Ok(EnrichedRelation {
-                    relation_id: row.get(0)?,
-                    relation_type: row.get(1)?,
-                    issue_identifier: row.get(2)?,
-                    issue_title: row.get(3)?,
-                    issue_state: row.get(4)?,
-                    issue_url: row.get(5)?,
-                })
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+            let forward = stmt
+                .query_map(rusqlite::params![issue_id], |row| {
+                    Ok(EnrichedRelation {
+                        relation_id: row.get(0)?,
+                        relation_type: row.get(1)?,
+                        issue_identifier: row.get(2)?,
+                        issue_title: row.get(3)?,
+                        issue_state: row.get(4)?,
+                        issue_url: row.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             // Relations where this issue is the target — flip direction
             let mut stmt2 = conn.prepare(
@@ -273,24 +284,26 @@ impl Database {
                  FROM issue_relations r
                  JOIN issues i ON r.related_issue_id = i.id
                  JOIN issues i2 ON r.issue_id = i2.id
-                 WHERE r.related_issue_id = i.id AND i.id = ?1"
+                 WHERE r.related_issue_id = i.id AND i.id = ?1",
             )?;
-            let inverse = stmt2.query_map(rusqlite::params![issue_id], |row| {
-                let raw_type: String = row.get(1)?;
-                let flipped = match raw_type.as_str() {
-                    "blocks" => "blocked_by".to_string(),
-                    "blocked_by" => "blocks".to_string(),
-                    other => other.to_string(), // related, duplicate are symmetric
-                };
-                Ok(EnrichedRelation {
-                    relation_id: row.get(0)?,
-                    relation_type: flipped,
-                    issue_identifier: row.get(2)?,
-                    issue_title: row.get(3)?,
-                    issue_state: row.get(4)?,
-                    issue_url: row.get(5)?,
-                })
-            })?.collect::<std::result::Result<Vec<_>, _>>()?;
+            let inverse = stmt2
+                .query_map(rusqlite::params![issue_id], |row| {
+                    let raw_type: String = row.get(1)?;
+                    let flipped = match raw_type.as_str() {
+                        "blocks" => "blocked_by".to_string(),
+                        "blocked_by" => "blocks".to_string(),
+                        other => other.to_string(), // related, duplicate are symmetric
+                    };
+                    Ok(EnrichedRelation {
+                        relation_id: row.get(0)?,
+                        relation_type: flipped,
+                        issue_identifier: row.get(2)?,
+                        issue_title: row.get(3)?,
+                        issue_state: row.get(4)?,
+                        issue_url: row.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             let mut all = forward;
             all.extend(inverse);
@@ -299,7 +312,12 @@ impl Database {
     }
 
     /// Look up a relation ID between two issues (by identifier) for deletion
-    pub fn find_relation_id(&self, issue_id: &str, related_issue_id: &str, relation_type: &str) -> Result<Option<String>> {
+    pub fn find_relation_id(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        relation_type: &str,
+    ) -> Result<Option<String>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id FROM issue_relations WHERE issue_id = ?1 AND related_issue_id = ?2 AND relation_type = ?3"
