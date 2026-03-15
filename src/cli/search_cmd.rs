@@ -138,7 +138,11 @@ pub async fn handle_find_similar(
     );
 
     // Find the longest identifier for alignment
-    let max_id_len = results.iter().map(|r| r.identifier.len()).max().unwrap_or(0);
+    let max_id_len = results
+        .iter()
+        .map(|r| r.identifier.len())
+        .max()
+        .unwrap_or(0);
 
     for result in &results {
         let sim_pct = result.similarity.unwrap_or(0.0) * 100.0;

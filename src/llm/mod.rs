@@ -26,7 +26,6 @@ impl Message {
             content: content.into(),
         }
     }
-
 }
 
 #[derive(Debug, Deserialize)]

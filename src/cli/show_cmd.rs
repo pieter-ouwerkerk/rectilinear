@@ -70,7 +70,11 @@ pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Resul
                 rel.issue_identifier.bold(),
                 title_suffix,
                 state_suffix.dimmed(),
-                if rel.issue_url.is_empty() { String::new() } else { format!(" {}", rel.issue_url.dimmed()) }
+                if rel.issue_url.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", rel.issue_url.dimmed())
+                }
             );
         }
     }

@@ -9,7 +9,7 @@ use crate::embedding::{self, Embedder};
 
 /// Estimate tokens for a text (chars / 4, matching chunk_text's heuristic)
 fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Get current process RSS in MB (macOS/Linux)
@@ -97,8 +97,8 @@ pub async fn handle_embed(
 
     for (issue_num, issue) in issues.iter().enumerate() {
         if debug {
-            eprint!(
-                "  [issue {}/{}] {} ({} chars) batch: {}/{} texts (RSS: {}MB)\n",
+            eprintln!(
+                "  [issue {}/{}] {} ({} chars) batch: {}/{} texts (RSS: {}MB)",
                 issue_num + 1,
                 issues.len(),
                 &issue.identifier,
@@ -154,10 +154,11 @@ pub async fn handle_embed(
                 }
 
                 for ((id, ci, ct), emb) in batch.drain(..).zip(embeddings) {
-                    pending
-                        .entry(id)
-                        .or_default()
-                        .push((ci, ct, embedding::embedding_to_bytes(&emb)));
+                    pending.entry(id).or_default().push((
+                        ci,
+                        ct,
+                        embedding::embedding_to_bytes(&emb),
+                    ));
                 }
                 batch_tokens = 0;
 
@@ -165,9 +166,9 @@ pub async fn handle_embed(
                 let done: Vec<String> = pending
                     .keys()
                     .filter(|id| {
-                        pending.get(*id).map_or(false, |c| {
-                            c.len() == *expected_counts.get(*id).unwrap_or(&0)
-                        })
+                        pending
+                            .get(*id)
+                            .is_some_and(|c| c.len() == *expected_counts.get(*id).unwrap_or(&0))
                     })
                     .cloned()
                     .collect();

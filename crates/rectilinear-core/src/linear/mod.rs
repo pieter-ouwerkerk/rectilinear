@@ -288,13 +288,18 @@ impl LinearClient {
     }
 
     fn extract_relations(issue_id: &str, linear_issue: &LinearIssue) -> Vec<db::Relation> {
-        linear_issue.relations.nodes.iter().map(|r| db::Relation {
-            id: r.id.clone(),
-            issue_id: issue_id.to_string(),
-            related_issue_id: r.related_issue.id.clone(),
-            related_issue_identifier: r.related_issue.identifier.clone(),
-            relation_type: r.relation_type.clone(),
-        }).collect()
+        linear_issue
+            .relations
+            .nodes
+            .iter()
+            .map(|r| db::Relation {
+                id: r.id.clone(),
+                issue_id: issue_id.to_string(),
+                related_issue_id: r.related_issue.id.clone(),
+                related_issue_identifier: r.related_issue.identifier.clone(),
+                relation_type: r.relation_type.clone(),
+            })
+            .collect()
     }
 
     pub async fn fetch_issues(
@@ -517,7 +522,10 @@ impl LinearClient {
             input.insert("labelIds".into(), serde_json::json!(lids));
         }
         if let Some(pid) = project_id {
-            input.insert("projectId".into(), serde_json::Value::String(pid.to_string()));
+            input.insert(
+                "projectId".into(),
+                serde_json::Value::String(pid.to_string()),
+            );
         }
 
         let query = r#"
@@ -539,7 +547,10 @@ impl LinearClient {
         Ok(())
     }
 
-    pub async fn fetch_single_issue(&self, issue_id: &str) -> Result<(db::Issue, Vec<db::Relation>)> {
+    pub async fn fetch_single_issue(
+        &self,
+        issue_id: &str,
+    ) -> Result<(db::Issue, Vec<db::Relation>)> {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
@@ -703,10 +714,7 @@ impl LinearClient {
             }
         }
 
-        let available: Vec<&str> = states
-            .iter()
-            .filter_map(|s| s["name"].as_str())
-            .collect();
+        let available: Vec<&str> = states.iter().filter_map(|s| s["name"].as_str()).collect();
         anyhow::bail!(
             "State '{}' not found for team {}. Available: {}",
             state_name,
@@ -731,9 +739,7 @@ impl LinearClient {
             }
         "#;
 
-        let data: serde_json::Value = self
-            .query(query, serde_json::json!({}))
-            .await?;
+        let data: serde_json::Value = self.query(query, serde_json::json!({})).await?;
 
         let labels = data["issueLabels"]["nodes"]
             .as_array()
@@ -744,22 +750,15 @@ impl LinearClient {
             let found = labels.iter().find(|l| {
                 l["name"]
                     .as_str()
-                    .map_or(false, |n| n.eq_ignore_ascii_case(name))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
             });
             match found {
                 Some(l) => {
-                    ids.push(
-                        l["id"]
-                            .as_str()
-                            .context("Label has no id")?
-                            .to_string(),
-                    );
+                    ids.push(l["id"].as_str().context("Label has no id")?.to_string());
                 }
                 None => {
-                    let available: Vec<&str> = labels
-                        .iter()
-                        .filter_map(|l| l["name"].as_str())
-                        .collect();
+                    let available: Vec<&str> =
+                        labels.iter().filter_map(|l| l["name"].as_str()).collect();
                     anyhow::bail!(
                         "Label '{}' not found. Available: {}",
                         name,
@@ -782,9 +781,7 @@ impl LinearClient {
             }
         "#;
 
-        let data: serde_json::Value = self
-            .query(query, serde_json::json!({}))
-            .await?;
+        let data: serde_json::Value = self.query(query, serde_json::json!({})).await?;
 
         let projects = data["projects"]["nodes"]
             .as_array()
@@ -801,10 +798,7 @@ impl LinearClient {
             }
         }
 
-        let available: Vec<&str> = projects
-            .iter()
-            .filter_map(|p| p["name"].as_str())
-            .collect();
+        let available: Vec<&str> = projects.iter().filter_map(|p| p["name"].as_str()).collect();
         anyhow::bail!(
             "Project '{}' not found. Available: {}",
             project_name,
@@ -850,7 +844,9 @@ impl LinearClient {
             anyhow::bail!("Failed to create relation");
         }
 
-        let relation = data.issue_relation_create.issue_relation
+        let relation = data
+            .issue_relation_create
+            .issue_relation
             .context("No relation returned")?;
         Ok(relation.id)
     }

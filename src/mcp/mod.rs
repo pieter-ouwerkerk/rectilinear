@@ -23,18 +23,24 @@ fn enrich_with_issue_links(value: &mut serde_json::Value, db: &Database) {
     for ident in &identifiers {
         if let Ok(Some(issue)) = db.get_issue(ident) {
             if !issue.url.is_empty() {
-                refs.insert(ident.clone(), serde_json::json!({
-                    "url": issue.url,
-                    "title": issue.title,
-                    "state": issue.state_name,
-                }));
+                refs.insert(
+                    ident.clone(),
+                    serde_json::json!({
+                        "url": issue.url,
+                        "title": issue.title,
+                        "state": issue.state_name,
+                    }),
+                );
             }
         }
     }
 
     if !refs.is_empty() {
         if let serde_json::Value::Object(map) = value {
-            map.insert("referenced_issues".to_string(), serde_json::Value::Object(refs));
+            map.insert(
+                "referenced_issues".to_string(),
+                serde_json::Value::Object(refs),
+            );
         }
     }
 }
@@ -58,7 +64,7 @@ fn extract_issue_identifiers(text: &str) -> Vec<String> {
                 i += 1;
             }
             let key_len = i - start;
-            if key_len >= 1 && key_len <= 6 && i < len && bytes[i] == b'-' {
+            if (1..=6).contains(&key_len) && i < len && bytes[i] == b'-' {
                 i += 1; // skip dash
                 let digit_start = i;
                 while i < len && bytes[i].is_ascii_digit() {
@@ -135,8 +141,14 @@ fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<
 
     // Extract file paths (e.g. src/foo.rs, Components/Bar.swift)
     for word in combined.split_whitespace() {
-        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-');
-        if (word.contains('/') && word.contains('.')) || word.ends_with(".rs") || word.ends_with(".ts") || word.ends_with(".swift") {
+        let word = word.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+        });
+        if (word.contains('/') && word.contains('.'))
+            || word.ends_with(".rs")
+            || word.ends_with(".ts")
+            || word.ends_with(".swift")
+        {
             hints.push(word.to_string());
         }
     }
@@ -153,11 +165,17 @@ fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<
         let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
         // PascalCase: at least 2 uppercase letters with lowercase between
         let upper_count = word.chars().filter(|c| c.is_uppercase()).count();
-        if upper_count >= 2 && word.len() >= 4 && word.chars().next().map_or(false, |c| c.is_uppercase()) {
+        if upper_count >= 2
+            && word.len() >= 4
+            && word.chars().next().is_some_and(|c| c.is_uppercase())
+        {
             hints.push(word.to_string());
         }
         // snake_case
-        if word.contains('_') && word.chars().all(|c| c.is_alphanumeric() || c == '_') && word.len() >= 4 {
+        if word.contains('_')
+            && word.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && word.len() >= 4
+        {
             hints.push(word.to_string());
         }
     }
@@ -428,7 +446,10 @@ impl RectilinearMcp {
 
         let mut value = serde_json::to_value(&issue).map_err(|e| e.to_string())?;
 
-        let relations = self.db.get_relations_enriched(&issue.id).map_err(|e| e.to_string())?;
+        let relations = self
+            .db
+            .get_relations_enriched(&issue.id)
+            .map_err(|e| e.to_string())?;
         if !relations.is_empty() {
             value["relations"] = serde_json::to_value(&relations).map_err(|e| e.to_string())?;
         }
@@ -463,7 +484,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .map_err(|e| e.to_string())?;
 
         let parent_id = if let Some(ref parent_ident) = args.parent {
-            let parent = self.db.get_issue(parent_ident)
+            let parent = self
+                .db
+                .get_issue(parent_ident)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Parent issue '{}' not found", parent_ident))?;
             Some(parent.id)
@@ -488,7 +511,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
-        self.db.upsert_relations(&issue.id, &relations).map_err(|e| e.to_string())?;
+        self.db
+            .upsert_relations(&issue.id, &relations)
+            .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "id": issue_id,
@@ -513,13 +538,23 @@ IMPORTANT — Before calling this tool, you MUST:
         let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
 
         let state_id = if let Some(ref state_name) = args.state {
-            Some(client.get_state_id(&issue.team_key, state_name).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .get_state_id(&issue.team_key, state_name)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(client.get_label_ids(label_names).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .get_label_ids(label_names)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
@@ -528,7 +563,12 @@ IMPORTANT — Before calling this tool, you MUST:
             if project_name.eq_ignore_ascii_case("none") {
                 Some(String::new()) // Empty string removes project in Linear
             } else {
-                Some(client.get_project_id(project_name).await.map_err(|e| e.to_string())?)
+                Some(
+                    client
+                        .get_project_id(project_name)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                )
             }
         } else {
             None
@@ -536,13 +576,16 @@ IMPORTANT — Before calling this tool, you MUST:
 
         // If updating description, re-fetch from Linear to preserve any image references
         let safe_description = if args.description.is_some() {
-            let (latest, _) = client.fetch_single_issue(&issue.id).await.map_err(|e| e.to_string())?;
-            args.description.as_ref().map(|new_desc| {
-                match &latest.description {
+            let (latest, _) = client
+                .fetch_single_issue(&issue.id)
+                .await
+                .map_err(|e| e.to_string())?;
+            args.description
+                .as_ref()
+                .map(|new_desc| match &latest.description {
                     Some(original) => preserve_images(original, new_desc),
                     None => new_desc.clone(),
-                }
-            })
+                })
         } else {
             None
         };
@@ -565,7 +608,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
-        self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+        self.db
+            .upsert_relations(&updated.id, &relations)
+            .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -614,7 +659,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
-        self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+        self.db
+            .upsert_relations(&updated.id, &relations)
+            .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
             "identifier": issue.identifier,
@@ -689,7 +736,10 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
-        let relations = self.db.get_relations_enriched(&issue.id).map_err(|e| e.to_string())?;
+        let relations = self
+            .db
+            .get_relations_enriched(&issue.id)
+            .map_err(|e| e.to_string())?;
 
         let mut result = serde_json::json!({
             "issue": issue,
@@ -712,7 +762,9 @@ IMPORTANT — Before calling this tool, you MUST:
     ) -> Result<String, String> {
         // Incremental sync to pick up changes made by other users
         if let Ok(client) = LinearClient::new(&self.config) {
-            let _ = client.sync_team(&self.db, &args.team, false, false, None).await;
+            let _ = client
+                .sync_team(&self.db, &args.team, false, false, None)
+                .await;
         }
 
         let all_issues = self
@@ -736,7 +788,11 @@ IMPORTANT — Before calling this tool, you MUST:
             use rand::seq::SliceRandom;
             let mut indices: Vec<usize> = (0..filtered.len()).collect();
             indices.shuffle(&mut rand::rng());
-            indices.into_iter().take(limit).map(|i| &filtered[i]).collect()
+            indices
+                .into_iter()
+                .take(limit)
+                .map(|i| &filtered[i])
+                .collect()
         } else {
             filtered.iter().take(limit).collect()
         };
@@ -747,27 +803,20 @@ IMPORTANT — Before calling this tool, you MUST:
 
         let mut enriched = Vec::new();
         for issue in &batch {
-            let description = issue
-                .description
-                .as_deref()
-                .map(|d| {
-                    if d.len() > 2000 {
-                        let mut end = 2000;
-                        while end > 0 && !d.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        &d[..end]
-                    } else {
-                        d
+            let description = issue.description.as_deref().map(|d| {
+                if d.len() > 2000 {
+                    let mut end = 2000;
+                    while end > 0 && !d.is_char_boundary(end) {
+                        end -= 1;
                     }
-                });
+                    &d[..end]
+                } else {
+                    d
+                }
+            });
 
             let similar = if let Some(ref embedder) = embedder {
-                let search_text = format!(
-                    "{}\n\n{}",
-                    issue.title,
-                    description.unwrap_or("")
-                );
+                let search_text = format!("{}\n\n{}", issue.title, description.unwrap_or(""));
                 search::find_duplicates(
                     &self.db,
                     &search_text,
@@ -787,14 +836,14 @@ IMPORTANT — Before calling this tool, you MUST:
                 Vec::new()
             };
 
-            let relations = self.db.get_relations_enriched(&issue.id).unwrap_or_default();
+            let relations = self
+                .db
+                .get_relations_enriched(&issue.id)
+                .unwrap_or_default();
 
             // Extract search hints from title and description for code exploration
-            let code_search_hints = extract_code_hints(
-                &issue.title,
-                description.unwrap_or(""),
-                &issue.labels(),
-            );
+            let code_search_hints =
+                extract_code_hints(&issue.title, description.unwrap_or(""), &issue.labels());
 
             enriched.push(serde_json::json!({
                 "identifier": issue.identifier,
@@ -827,10 +876,7 @@ IMPORTANT — Before calling this tool, you MUST:
         name = "mark_triaged",
         description = "Mark an issue as triaged by setting priority and optionally updating title, description, and adding a triage comment. Combines update + comment into one call. Prefer using the comment field over description for adding context — description updates risk losing formatting. Image references in the original description are automatically preserved."
     )]
-    async fn mark_triaged(
-        &self,
-        #[tool(aggr)] args: MarkTriagedArgs,
-    ) -> Result<String, String> {
+    async fn mark_triaged(&self, #[tool(aggr)] args: MarkTriagedArgs) -> Result<String, String> {
         if args.priority < 1 || args.priority > 4 {
             return Err("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)".into());
         }
@@ -850,7 +896,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
-        self.db.upsert_relations(&issue.id, &issue_relations).map_err(|e| e.to_string())?;
+        self.db
+            .upsert_relations(&issue.id, &issue_relations)
+            .map_err(|e| e.to_string())?;
 
         // If someone else already prioritized it, let the caller know
         if issue.priority != 0 {
@@ -873,13 +921,19 @@ IMPORTANT — Before calling this tool, you MUST:
         if was_modified {
             let mut changes = Vec::new();
             if issue.title != local_issue.title {
-                changes.push(format!("title changed: \"{}\" → \"{}\"", local_issue.title, issue.title));
+                changes.push(format!(
+                    "title changed: \"{}\" → \"{}\"",
+                    local_issue.title, issue.title
+                ));
             }
             if issue.description != local_issue.description {
                 changes.push("description was updated".to_string());
             }
             if issue.state_name != local_issue.state_name {
-                changes.push(format!("state changed: {} → {}", local_issue.state_name, issue.state_name));
+                changes.push(format!(
+                    "state changed: {} → {}",
+                    local_issue.state_name, issue.state_name
+                ));
             }
             if issue.assignee_name != local_issue.assignee_name {
                 changes.push(format!(
@@ -909,13 +963,23 @@ IMPORTANT — Before calling this tool, you MUST:
 
         // Resolve state name to ID if provided
         let state_id = if let Some(ref state_name) = args.state {
-            Some(client.get_state_id(&issue.team_key, state_name).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .get_state_id(&issue.team_key, state_name)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(client.get_label_ids(label_names).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .get_label_ids(label_names)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
@@ -924,19 +988,25 @@ IMPORTANT — Before calling this tool, you MUST:
             if project_name.eq_ignore_ascii_case("none") {
                 Some(String::new())
             } else {
-                Some(client.get_project_id(project_name).await.map_err(|e| e.to_string())?)
+                Some(
+                    client
+                        .get_project_id(project_name)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                )
             }
         } else {
             None
         };
 
         // Preserve any image references from the original description
-        let safe_description = args.description.as_ref().map(|new_desc| {
-            match &issue.description {
+        let safe_description = args
+            .description
+            .as_ref()
+            .map(|new_desc| match &issue.description {
                 Some(original) => preserve_images(original, new_desc),
                 None => new_desc.clone(),
-            }
-        });
+            });
 
         client
             .update_issue(
@@ -963,7 +1033,9 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
-        self.db.upsert_relations(&updated.id, &updated_relations).map_err(|e| e.to_string())?;
+        self.db
+            .upsert_relations(&updated.id, &updated_relations)
+            .map_err(|e| e.to_string())?;
 
         // Re-embed if title or description changed
         if args.title.is_some() || args.description.is_some() {
@@ -1006,10 +1078,14 @@ IMPORTANT — Before calling this tool, you MUST:
             ));
         }
 
-        let source = self.db.get_issue(&args.issue)
+        let source = self
+            .db
+            .get_issue(&args.issue)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.issue))?;
-        let target = self.db.get_issue(&args.related_issue)
+        let target = self
+            .db
+            .get_issue(&args.related_issue)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.related_issue))?;
 
@@ -1028,7 +1104,9 @@ IMPORTANT — Before calling this tool, you MUST:
                     .await
                     .map_err(|e| e.to_string())?;
                 self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
-                self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+                self.db
+                    .upsert_relations(&updated.id, &relations)
+                    .map_err(|e| e.to_string())?;
 
                 Ok(serde_json::json!({
                     "status": "added",
@@ -1036,7 +1114,8 @@ IMPORTANT — Before calling this tool, you MUST:
                     "issue": source.identifier,
                     "related_issue": target.identifier,
                     "relation_type": args.relation_type,
-                }).to_string())
+                })
+                .to_string())
             }
             "remove" => {
                 // For blocked_by, the stored relation is reversed
@@ -1046,15 +1125,21 @@ IMPORTANT — Before calling this tool, you MUST:
                     (&source.id, &target.id, args.relation_type.as_str())
                 };
 
-                let relation_id = self.db
+                let relation_id = self
+                    .db
                     .find_relation_id(db_source, db_target, db_type)
                     .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!(
-                        "No '{}' relation found between {} and {}",
-                        args.relation_type, args.issue, args.related_issue
-                    ))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "No '{}' relation found between {} and {}",
+                            args.relation_type, args.issue, args.related_issue
+                        )
+                    })?;
 
-                client.delete_relation(&relation_id).await.map_err(|e| e.to_string())?;
+                client
+                    .delete_relation(&relation_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                 // Re-fetch to update local relations
                 let (updated, relations) = client
@@ -1062,14 +1147,17 @@ IMPORTANT — Before calling this tool, you MUST:
                     .await
                     .map_err(|e| e.to_string())?;
                 self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
-                self.db.upsert_relations(&updated.id, &relations).map_err(|e| e.to_string())?;
+                self.db
+                    .upsert_relations(&updated.id, &relations)
+                    .map_err(|e| e.to_string())?;
 
                 Ok(serde_json::json!({
                     "status": "removed",
                     "issue": source.identifier,
                     "related_issue": target.identifier,
                     "relation_type": args.relation_type,
-                }).to_string())
+                })
+                .to_string())
             }
             _ => Err("action must be 'add' or 'remove'".into()),
         }
@@ -1187,7 +1275,10 @@ mod tests {
     fn test_extract_image_references() {
         let text = "Some text ![screenshot](https://uploads.linear.app/abc.png) more text";
         let images = extract_image_references(text);
-        assert_eq!(images, vec!["![screenshot](https://uploads.linear.app/abc.png)"]);
+        assert_eq!(
+            images,
+            vec!["![screenshot](https://uploads.linear.app/abc.png)"]
+        );
     }
 
     #[test]
