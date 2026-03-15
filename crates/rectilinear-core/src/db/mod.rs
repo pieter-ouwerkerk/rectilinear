@@ -113,6 +113,101 @@ impl Database {
         })
     }
 
+    pub fn get_issues_by_state_types(
+        &self,
+        team_key: &str,
+        state_types: &[String],
+    ) -> Result<Vec<Issue>> {
+        self.with_conn(|conn| {
+            let placeholders: String = state_types
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, \
+                 priority, assignee_name, project_name, labels_json, created_at, updated_at, \
+                 content_hash, synced_at, url \
+                 FROM issues WHERE team_key = ?1 AND state_type IN ({placeholders}) \
+                 ORDER BY priority ASC, created_at DESC"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(team_key.to_string())];
+            for st in state_types {
+                params.push(Box::new(st.clone()));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(Issue::from_row(row).unwrap())
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// For a set of issue IDs, return all `blocked_by` relations with resolved state info.
+    /// Returns (issue_id, blocker_identifier, blocker_title, blocker_state_name, blocker_state_type).
+    pub fn get_blockers_for_issues(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<(String, String, String, String, String)>> {
+        if issue_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        self.with_conn(|conn| {
+            let placeholders: String = issue_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            // Forward: issue has a "blocked_by" relation
+            let sql_fwd = format!(
+                "SELECT r.issue_id, COALESCE(i.identifier, r.related_issue_identifier),
+                        COALESCE(i.title, ''), COALESCE(i.state_name, ''), COALESCE(i.state_type, '')
+                 FROM issue_relations r
+                 LEFT JOIN issues i ON r.related_issue_id = i.id
+                 WHERE r.issue_id IN ({placeholders}) AND r.relation_type = 'blocked_by'"
+            );
+
+            // Inverse: another issue has a "blocks" relation pointing at this issue
+            let sql_inv = format!(
+                "SELECT r.related_issue_id, i2.identifier,
+                        COALESCE(i2.title, ''), COALESCE(i2.state_name, ''), COALESCE(i2.state_type, '')
+                 FROM issue_relations r
+                 JOIN issues i ON r.related_issue_id = i.id
+                 JOIN issues i2 ON r.issue_id = i2.id
+                 WHERE r.related_issue_id IN ({placeholders}) AND r.relation_type = 'blocks'"
+            );
+
+            let mut results = Vec::new();
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                issue_ids.iter().map(|id| Box::new(id.clone()) as _).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+
+            for sql in [&sql_fwd, &sql_inv] {
+                let mut stmt = conn.prepare(sql)?;
+                let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?;
+                for row in rows {
+                    results.push(row?);
+                }
+            }
+            Ok(results)
+        })
+    }
+
     pub fn count_issues(&self, team_key: Option<&str>) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {

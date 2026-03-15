@@ -121,6 +121,33 @@ impl From<crate::db::EnrichedRelation> for RtRelation {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct RtBlocker {
+    pub identifier: String,
+    pub title: String,
+    pub state_name: String,
+    pub is_terminal: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtIssueEnriched {
+    pub id: String,
+    pub identifier: String,
+    pub team_key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub state_name: String,
+    pub state_type: String,
+    pub priority: i32,
+    pub assignee_name: Option<String>,
+    pub project_name: Option<String>,
+    pub labels: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub url: String,
+    pub blocked_by: Vec<RtBlocker>,
+}
+
 #[derive(uniffi::Enum)]
 pub enum RtSearchMode {
     Fts,
@@ -234,6 +261,56 @@ impl RectilinearEngine {
             .get_relations_enriched(&issue_id)?
             .into_iter()
             .map(RtRelation::from)
+            .collect())
+    }
+
+    /// Get issues filtered by team and state types, enriched with blocker info.
+    pub fn get_active_issues(
+        &self,
+        team: String,
+        state_types: Vec<String>,
+    ) -> Result<Vec<RtIssueEnriched>, RectilinearError> {
+        let issues = self.db.get_issues_by_state_types(&team, &state_types)?;
+        let issue_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
+        let blockers = self.db.get_blockers_for_issues(&issue_ids)?;
+
+        // Group blockers by issue ID
+        let mut blocker_map: std::collections::HashMap<String, Vec<RtBlocker>> =
+            std::collections::HashMap::new();
+        for (issue_id, identifier, title, state_name, state_type) in blockers {
+            let is_terminal = matches!(state_type.as_str(), "completed" | "canceled");
+            blocker_map.entry(issue_id).or_default().push(RtBlocker {
+                identifier,
+                title,
+                state_name,
+                is_terminal,
+            });
+        }
+
+        Ok(issues
+            .into_iter()
+            .map(|issue| {
+                let labels: Vec<String> =
+                    serde_json::from_str(&issue.labels_json).unwrap_or_default();
+                let blocked_by = blocker_map.remove(&issue.id).unwrap_or_default();
+                RtIssueEnriched {
+                    id: issue.id,
+                    identifier: issue.identifier,
+                    team_key: issue.team_key,
+                    title: issue.title,
+                    description: issue.description,
+                    state_name: issue.state_name,
+                    state_type: issue.state_type,
+                    priority: issue.priority,
+                    assignee_name: issue.assignee_name,
+                    project_name: issue.project_name,
+                    labels,
+                    created_at: issue.created_at,
+                    updated_at: issue.updated_at,
+                    url: issue.url,
+                    blocked_by,
+                }
+            })
             .collect())
     }
 
