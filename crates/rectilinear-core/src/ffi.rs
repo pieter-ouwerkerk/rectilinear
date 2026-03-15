@@ -195,7 +195,7 @@ impl RectilinearEngine {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl RectilinearEngine {
     /// Create a new engine with an explicit database path and API keys.
     #[uniffi::constructor]
