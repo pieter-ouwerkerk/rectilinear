@@ -238,6 +238,17 @@ impl LinearClient {
         }
     }
 
+    /// Create a client reusing an existing `reqwest::Client`.
+    ///
+    /// Use this when the HTTP client was already constructed inside a tokio
+    /// runtime context (e.g. from the FFI layer).
+    pub fn with_http_client(client: reqwest::Client, api_key: &str) -> Self {
+        Self {
+            client,
+            api_key: api_key.to_string(),
+        }
+    }
+
     async fn query<T: serde::de::DeserializeOwned>(
         &self,
         query: &str,

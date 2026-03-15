@@ -179,6 +179,9 @@ pub struct RectilinearEngine {
     db: Database,
     linear_api_key: String,
     gemini_api_key: Option<String>,
+    /// Pre-built HTTP client, created inside the tokio runtime so its DNS
+    /// resolver is bound to a live reactor.
+    http_client: reqwest::Client,
     /// Kept alive so async methods have a runtime. Not read directly.
     _runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -205,10 +208,18 @@ impl RectilinearEngine {
 
         let db = Database::open(path)?;
 
+        // Build the HTTP client inside the runtime context so its DNS
+        // resolver is bound to a live reactor (required by hyper).
+        let http_client = {
+            let _guard = runtime.enter();
+            reqwest::Client::new()
+        };
+
         Ok(Self {
             db,
             linear_api_key,
             gemini_api_key,
+            http_client,
             _runtime: Arc::new(runtime),
         })
     }
@@ -322,7 +333,7 @@ impl RectilinearEngine {
 
     /// List all teams from Linear.
     pub async fn list_teams(&self) -> Result<Vec<RtTeam>, RectilinearError> {
-        let client = LinearClient::with_api_key(&self.linear_api_key);
+        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
         let teams = client
             .list_teams()
             .await
@@ -341,7 +352,7 @@ impl RectilinearEngine {
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
     pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
-        let client = LinearClient::with_api_key(&self.linear_api_key);
+        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
         let count = client
             .sync_team(&self.db, &team_key, full, false, None)
             .await
@@ -415,7 +426,7 @@ impl RectilinearEngine {
         priority: Option<i32>,
         state: Option<String>,
     ) -> Result<(), RectilinearError> {
-        let client = LinearClient::with_api_key(&self.linear_api_key);
+        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
 
         let state_id = if let Some(ref state_name) = state {
             // Need to resolve state name → ID. Get team from issue first.
@@ -473,11 +484,15 @@ impl RectilinearEngine {
             .or(config.embedding.gemini_api_key.as_deref());
 
         if let Some(api_key) = key {
-            Ok(Some(crate::embedding::Embedder::new_api(api_key).map_err(
-                |e| RectilinearError::Config {
+            Ok(Some(
+                crate::embedding::Embedder::new_api_with_http_client(
+                    self.http_client.clone(),
+                    api_key,
+                )
+                .map_err(|e| RectilinearError::Config {
                     message: e.to_string(),
-                },
-            )?))
+                })?,
+            ))
         } else {
             #[cfg(feature = "local-embeddings")]
             {

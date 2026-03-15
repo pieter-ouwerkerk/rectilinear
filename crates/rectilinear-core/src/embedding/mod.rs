@@ -31,6 +31,13 @@ impl GeminiBackend {
         }
     }
 
+    fn with_http_client(client: reqwest::Client, api_key: &str) -> Self {
+        Self {
+            client,
+            api_key: api_key.to_string(),
+        }
+    }
+
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2-preview:batchEmbedContents?key={}",
@@ -126,6 +133,14 @@ impl Embedder {
         Ok(Self {
             dimensions: 768,
             backend: Backend::Gemini(GeminiBackend::new(api_key)),
+        })
+    }
+
+    /// Create an embedder using the Gemini API backend with a pre-built HTTP client.
+    pub fn new_api_with_http_client(client: reqwest::Client, api_key: &str) -> Result<Self> {
+        Ok(Self {
+            dimensions: 768,
+            backend: Backend::Gemini(GeminiBackend::with_http_client(client, api_key)),
         })
     }
 
