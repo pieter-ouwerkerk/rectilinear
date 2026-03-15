@@ -148,6 +148,13 @@ pub struct RtIssueEnriched {
     pub blocked_by: Vec<RtBlocker>,
 }
 
+#[derive(uniffi::Record)]
+pub struct RtTeam {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+}
+
 #[derive(uniffi::Enum)]
 pub enum RtSearchMode {
     Fts,
@@ -312,6 +319,25 @@ impl RectilinearEngine {
     }
 
     // ── Async methods (network I/O) ─────────────────────────────
+
+    /// List all teams from Linear.
+    pub async fn list_teams(&self) -> Result<Vec<RtTeam>, RectilinearError> {
+        let client = LinearClient::with_api_key(&self.linear_api_key);
+        let teams = client
+            .list_teams()
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })?;
+        Ok(teams
+            .into_iter()
+            .map(|t| RtTeam {
+                id: t.id,
+                key: t.key,
+                name: t.name,
+            })
+            .collect())
+    }
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
     pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
