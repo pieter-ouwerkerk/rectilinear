@@ -9,7 +9,7 @@ use crate::db::Database;
 use crate::linear::LinearClient;
 use crate::search;
 use std::path::Path;
-use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 // ── Error ────────────────────────────────────────────────────────────
 
@@ -179,11 +179,20 @@ pub struct RectilinearEngine {
     db: Database,
     linear_api_key: String,
     gemini_api_key: Option<String>,
-    /// Pre-built HTTP client, created inside the tokio runtime so its DNS
-    /// resolver is bound to a live reactor.
-    http_client: reqwest::Client,
-    /// Kept alive so async methods have a runtime. Not read directly.
-    _runtime: Arc<tokio::runtime::Runtime>,
+    /// Lazily initialized on first async call so it's created inside
+    /// UniFFI's Tokio runtime, binding hyper's DNS resolver to a live reactor.
+    http_client: OnceCell<reqwest::Client>,
+}
+
+impl RectilinearEngine {
+    /// Get or create the HTTP client. Lazily initialized so it's created
+    /// inside the caller's Tokio runtime (UniFFI's), binding hyper's DNS
+    /// resolver to a live reactor.
+    async fn client(&self) -> &reqwest::Client {
+        self.http_client
+            .get_or_init(|| async { reqwest::Client::new() })
+            .await
+    }
 }
 
 #[uniffi::export]
@@ -195,10 +204,6 @@ impl RectilinearEngine {
         linear_api_key: String,
         gemini_api_key: Option<String>,
     ) -> Result<Self, RectilinearError> {
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| RectilinearError::Config {
-            message: format!("Failed to create async runtime: {e}"),
-        })?;
-
         let path = Path::new(&db_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| RectilinearError::Config {
@@ -208,19 +213,11 @@ impl RectilinearEngine {
 
         let db = Database::open(path)?;
 
-        // Build the HTTP client inside the runtime context so its DNS
-        // resolver is bound to a live reactor (required by hyper).
-        let http_client = {
-            let _guard = runtime.enter();
-            reqwest::Client::new()
-        };
-
         Ok(Self {
             db,
             linear_api_key,
             gemini_api_key,
-            http_client,
-            _runtime: Arc::new(runtime),
+            http_client: OnceCell::new(),
         })
     }
 
@@ -333,7 +330,8 @@ impl RectilinearEngine {
 
     /// List all teams from Linear.
     pub async fn list_teams(&self) -> Result<Vec<RtTeam>, RectilinearError> {
-        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
         let teams = client
             .list_teams()
             .await
@@ -352,7 +350,8 @@ impl RectilinearEngine {
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
     pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
-        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
         let count = client
             .sync_team(&self.db, &team_key, full, false, None)
             .await
@@ -426,7 +425,8 @@ impl RectilinearEngine {
         priority: Option<i32>,
         state: Option<String>,
     ) -> Result<(), RectilinearError> {
-        let client = LinearClient::with_http_client(self.http_client.clone(), &self.linear_api_key);
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
 
         let state_id = if let Some(ref state_name) = state {
             // Need to resolve state name → ID. Get team from issue first.
@@ -486,7 +486,7 @@ impl RectilinearEngine {
         if let Some(api_key) = key {
             Ok(Some(
                 crate::embedding::Embedder::new_api_with_http_client(
-                    self.http_client.clone(),
+                    self.client().await.clone(),
                     api_key,
                 )
                 .map_err(|e| RectilinearError::Config {
