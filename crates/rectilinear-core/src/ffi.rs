@@ -162,6 +162,15 @@ pub enum RtSearchMode {
     Hybrid,
 }
 
+#[derive(uniffi::Record)]
+pub struct RtFieldCompleteness {
+    pub total: u64,
+    pub with_description: u64,
+    pub with_priority: u64,
+    pub with_labels: u64,
+    pub with_project: u64,
+}
+
 impl From<RtSearchMode> for search::SearchMode {
     fn from(mode: RtSearchMode) -> Self {
         match mode {
@@ -269,6 +278,22 @@ impl RectilinearEngine {
     /// Count issues that have at least one embedding chunk.
     pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
         Ok(self.db.count_embedded_issues(team.as_deref())? as u64)
+    }
+
+    /// Get field completeness counts in a single query.
+    pub fn get_field_completeness(
+        &self,
+        team: Option<String>,
+    ) -> Result<RtFieldCompleteness, RectilinearError> {
+        let (total, desc, pri, labels, proj) =
+            self.db.get_field_completeness(team.as_deref())?;
+        Ok(RtFieldCompleteness {
+            total: total as u64,
+            with_description: desc as u64,
+            with_priority: pri as u64,
+            with_labels: labels as u64,
+            with_project: proj as u64,
+        })
     }
 
     /// Get enriched relations for an issue.
