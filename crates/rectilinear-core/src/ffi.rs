@@ -213,6 +213,7 @@ pub struct RtTeamSummary {
     pub key: String,
     pub issue_count: u64,
     pub embedded_count: u64,
+    pub last_synced_at: Option<String>,
 }
 
 impl From<crate::db::TeamSummary> for RtTeamSummary {
@@ -221,6 +222,7 @@ impl From<crate::db::TeamSummary> for RtTeamSummary {
             key: t.key,
             issue_count: t.issue_count as u64,
             embedded_count: t.embedded_count as u64,
+            last_synced_at: t.last_synced_at,
         }
     }
 }

@@ -606,9 +606,9 @@ impl Database {
     pub fn set_sync_cursor(&self, team_key: &str, last_updated_at: &str) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO sync_state (team_key, last_updated_at, full_sync_done)
-                 VALUES (?1, ?2, 1)
-                 ON CONFLICT(team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1",
+                "INSERT INTO sync_state (team_key, last_updated_at, full_sync_done, last_synced_at)
+                 VALUES (?1, ?2, 1, datetime('now'))
+                 ON CONFLICT(team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1, last_synced_at=datetime('now')",
                 rusqlite::params![team_key, last_updated_at],
             )?;
             Ok(())
@@ -625,6 +625,21 @@ impl Database {
                 Ok(done)
             } else {
                 Ok(false)
+            }
+        })
+    }
+
+    /// Get the wall-clock time of the last sync for a team.
+    pub fn get_last_synced_at(&self, team_key: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT last_synced_at FROM sync_state WHERE team_key = ?1"
+            )?;
+            let mut rows = stmt.query(rusqlite::params![team_key])?;
+            if let Some(row) = rows.next()? {
+                Ok(row.get(0)?)
+            } else {
+                Ok(None)
             }
         })
     }
@@ -662,9 +677,11 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT i.team_key,
                         COUNT(DISTINCT i.id) AS issue_count,
-                        COUNT(DISTINCT c.issue_id) AS embedded_count
+                        COUNT(DISTINCT c.issue_id) AS embedded_count,
+                        s.last_synced_at
                  FROM issues i
                  LEFT JOIN chunks c ON i.id = c.issue_id
+                 LEFT JOIN sync_state s ON i.team_key = s.team_key
                  GROUP BY i.team_key
                  ORDER BY i.team_key"
             )?;
@@ -673,6 +690,7 @@ impl Database {
                     key: row.get(0)?,
                     issue_count: row.get(1)?,
                     embedded_count: row.get(2)?,
+                    last_synced_at: row.get(3)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -831,6 +849,7 @@ pub struct TeamSummary {
     pub key: String,
     pub issue_count: usize,
     pub embedded_count: usize,
+    pub last_synced_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -1017,6 +1036,24 @@ mod tests {
         assert_eq!(by_key["TST"].embedded_count, 2);
         assert_eq!(by_key["OTH"].issue_count, 1);
         assert_eq!(by_key["OTH"].embedded_count, 0);
+    }
+
+    #[test]
+    fn list_synced_teams_includes_last_synced_at() {
+        let (db, _dir) = test_db();
+
+        let issue = make_issue("TST-1", "TST");
+        db.upsert_issue(&issue).unwrap();
+
+        // Before any sync, last_synced_at should be None
+        let teams = db.list_synced_teams().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert!(teams[0].last_synced_at.is_none());
+
+        // After setting sync cursor, last_synced_at should be set
+        db.set_sync_cursor("TST", "2026-01-01T00:00:00Z").unwrap();
+        let teams = db.list_synced_teams().unwrap();
+        assert!(teams[0].last_synced_at.is_some());
     }
 
     #[test]

@@ -36,8 +36,18 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (4)", [])?;
     }
 
+    if current_version < 5 {
+        conn.execute_batch(MIGRATION_5)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (5)", [])?;
+    }
+
     Ok(())
 }
+
+// Add last_synced_at to sync_state
+const MIGRATION_5: &str = "
+ALTER TABLE sync_state ADD COLUMN last_synced_at TEXT;
+";
 
 // Add issue_relations table
 const MIGRATION_4: &str = "
