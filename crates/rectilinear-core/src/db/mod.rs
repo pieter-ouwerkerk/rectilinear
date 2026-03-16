@@ -234,6 +234,51 @@ impl Database {
         })
     }
 
+    /// Count issues with each optional field populated. Returns (total, with_description, with_priority, with_labels, with_project).
+    pub fn get_field_completeness(
+        &self,
+        team_key: Option<&str>,
+    ) -> Result<(usize, usize, usize, usize, usize)> {
+        self.with_conn(|conn| {
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+                if let Some(team) = team_key {
+                    (
+                        "SELECT COUNT(*),
+                                SUM(CASE WHEN description IS NOT NULL AND description != '' THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN priority > 0 THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN labels_json != '[]' THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN project_name IS NOT NULL AND project_name != '' THEN 1 ELSE 0 END)
+                         FROM issues WHERE team_key = ?1"
+                            .to_string(),
+                        vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                    )
+                } else {
+                    (
+                        "SELECT COUNT(*),
+                                SUM(CASE WHEN description IS NOT NULL AND description != '' THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN priority > 0 THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN labels_json != '[]' THEN 1 ELSE 0 END),
+                                SUM(CASE WHEN project_name IS NOT NULL AND project_name != '' THEN 1 ELSE 0 END)
+                         FROM issues"
+                            .to_string(),
+                        vec![],
+                    )
+                };
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let row = conn.query_row(&sql, param_refs.as_slice(), |row| {
+                Ok((
+                    row.get::<_, usize>(0)?,
+                    row.get::<_, Option<usize>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<usize>>(2)?.unwrap_or(0),
+                    row.get::<_, Option<usize>>(3)?.unwrap_or(0),
+                    row.get::<_, Option<usize>>(4)?.unwrap_or(0),
+                ))
+            })?;
+            Ok(row)
+        })
+    }
+
     // --- Relations ---
 
     pub fn upsert_relations(&self, issue_id: &str, relations: &[Relation]) -> Result<()> {
@@ -687,5 +732,61 @@ mod tests {
         assert_eq!(db.count_embedded_issues(Some("TST")).unwrap(), 1);
         assert_eq!(db.count_embedded_issues(Some("OTH")).unwrap(), 1);
         assert_eq!(db.count_embedded_issues(Some("NONE")).unwrap(), 0);
+    }
+
+    #[test]
+    fn get_field_completeness_empty_db() {
+        let (db, _dir) = test_db();
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(None).unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(desc, 0);
+        assert_eq!(pri, 0);
+        assert_eq!(labels, 0);
+        assert_eq!(proj, 0);
+    }
+
+    #[test]
+    fn get_field_completeness_with_data() {
+        let (db, _dir) = test_db();
+
+        // Issue with all fields
+        let mut full = make_issue("TST-1", "TST");
+        full.description = Some("Has desc".into());
+        full.priority = 2;
+        full.labels_json = r#"["bug"]"#.into();
+        full.project_name = Some("Proj".into());
+        db.upsert_issue(&full).unwrap();
+
+        // Issue with no optional fields
+        let mut sparse = make_issue("TST-2", "TST");
+        sparse.description = None;
+        sparse.priority = 0;
+        sparse.labels_json = "[]".into();
+        sparse.project_name = None;
+        db.upsert_issue(&sparse).unwrap();
+
+        // Issue on different team
+        let mut other = make_issue("OTH-1", "OTH");
+        other.description = Some("Has desc".into());
+        other.priority = 0;
+        other.labels_json = "[]".into();
+        other.project_name = None;
+        db.upsert_issue(&other).unwrap();
+
+        // Global
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(None).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(desc, 2); // full + other
+        assert_eq!(pri, 1); // full only
+        assert_eq!(labels, 1); // full only
+        assert_eq!(proj, 1); // full only
+
+        // Team filter
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(Some("TST")).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(desc, 1);
+        assert_eq!(pri, 1);
+        assert_eq!(labels, 1);
+        assert_eq!(proj, 1);
     }
 }
