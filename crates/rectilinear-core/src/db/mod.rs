@@ -279,6 +279,90 @@ impl Database {
         })
     }
 
+    /// List all issues with summary info (no description text). Supports pagination,
+    /// optional team filter, and optional text filter on identifier/title.
+    #[allow(unused_assignments)]
+    pub fn list_all_issues(
+        &self,
+        team_key: Option<&str>,
+        filter: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<IssueSummary>> {
+        self.with_conn(|conn| {
+            let mut conditions = Vec::new();
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut param_idx = 1;
+
+            if let Some(team) = team_key {
+                conditions.push(format!("i.team_key = ?{param_idx}"));
+                params.push(Box::new(team.to_string()));
+                param_idx += 1;
+            }
+
+            if let Some(text) = filter {
+                let like = format!("%{text}%");
+                conditions.push(format!(
+                    "(i.identifier LIKE ?{} OR i.title LIKE ?{})",
+                    param_idx,
+                    param_idx + 1
+                ));
+                params.push(Box::new(like.clone()));
+                params.push(Box::new(like));
+                param_idx += 2;
+            }
+
+            let _ = param_idx;
+
+            let where_clause = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+
+            let limit_idx = params.len() + 1;
+            let offset_idx = params.len() + 2;
+
+            let sql = format!(
+                "SELECT i.id, i.identifier, i.team_key, i.title, i.state_name, i.state_type,
+                        i.priority, i.project_name, i.labels_json, i.updated_at, i.url,
+                        i.description IS NOT NULL AND i.description != '' AS has_desc,
+                        EXISTS(SELECT 1 FROM chunks c WHERE c.issue_id = i.id) AS has_emb
+                 FROM issues i
+                 {where_clause}
+                 ORDER BY i.updated_at DESC
+                 LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+            );
+            params.push(Box::new(limit as i64));
+            params.push(Box::new(offset as i64));
+
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                let labels_json: String = row.get(8)?;
+                let labels: Vec<String> =
+                    serde_json::from_str(&labels_json).unwrap_or_default();
+                Ok(IssueSummary {
+                    id: row.get(0)?,
+                    identifier: row.get(1)?,
+                    team_key: row.get(2)?,
+                    title: row.get(3)?,
+                    state_name: row.get(4)?,
+                    state_type: row.get(5)?,
+                    priority: row.get(6)?,
+                    project_name: row.get(7)?,
+                    labels,
+                    updated_at: row.get(9)?,
+                    url: row.get(10)?,
+                    has_description: row.get(11)?,
+                    has_embedding: row.get(12)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // --- Relations ---
 
     pub fn upsert_relations(&self, issue_id: &str, relations: &[Relation]) -> Result<()> {
@@ -701,6 +785,23 @@ pub struct FtsResult {
     pub bm25_score: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct IssueSummary {
+    pub id: String,
+    pub identifier: String,
+    pub team_key: String,
+    pub title: String,
+    pub state_name: String,
+    pub state_type: String,
+    pub priority: i32,
+    pub project_name: Option<String>,
+    pub labels: Vec<String>,
+    pub updated_at: String,
+    pub url: String,
+    pub has_description: bool,
+    pub has_embedding: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_helpers::*;
@@ -788,5 +889,66 @@ mod tests {
         assert_eq!(pri, 1);
         assert_eq!(labels, 1);
         assert_eq!(proj, 1);
+    }
+
+    #[test]
+    fn list_all_issues_pagination_and_filter() {
+        let (db, _dir) = test_db();
+
+        for i in 1..=5 {
+            let mut issue = make_issue(&format!("TST-{i}"), "TST");
+            issue.updated_at = format!("2026-01-0{i}T00:00:00Z");
+            db.upsert_issue(&issue).unwrap();
+        }
+        let mut other = make_issue("OTH-1", "OTH");
+        other.updated_at = "2026-01-06T00:00:00Z".to_string();
+        db.upsert_issue(&other).unwrap();
+
+        // All issues, first page
+        let page1 = db.list_all_issues(None, None, 3, 0).unwrap();
+        assert_eq!(page1.len(), 3);
+        // Ordered by updated_at DESC — OTH-1 is newest
+        assert_eq!(page1[0].identifier, "OTH-1");
+
+        // Second page
+        let page2 = db.list_all_issues(None, None, 3, 3).unwrap();
+        assert_eq!(page2.len(), 3);
+
+        // Third page (empty)
+        let page3 = db.list_all_issues(None, None, 3, 6).unwrap();
+        assert_eq!(page3.len(), 0);
+
+        // Team filter
+        let tst = db.list_all_issues(Some("TST"), None, 10, 0).unwrap();
+        assert_eq!(tst.len(), 5);
+
+        // Text filter
+        let filtered = db.list_all_issues(None, Some("TST-3"), 10, 0).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].identifier, "TST-3");
+
+        // Title filter
+        let title_match = db.list_all_issues(None, Some("Test issue OTH"), 10, 0).unwrap();
+        assert_eq!(title_match.len(), 1);
+    }
+
+    #[test]
+    fn list_all_issues_has_embedding_flag() {
+        let (db, _dir) = test_db();
+
+        let issue1 = make_issue("TST-1", "TST");
+        let issue2 = make_issue("TST-2", "TST");
+        db.upsert_issue(&issue1).unwrap();
+        db.upsert_issue(&issue2).unwrap();
+
+        // Only issue1 gets an embedding
+        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+
+        let issues = db.list_all_issues(None, None, 10, 0).unwrap();
+        let by_id: std::collections::HashMap<_, _> =
+            issues.iter().map(|i| (i.identifier.as_str(), i)).collect();
+
+        assert!(by_id["TST-1"].has_embedding);
+        assert!(!by_id["TST-2"].has_embedding);
     }
 }
