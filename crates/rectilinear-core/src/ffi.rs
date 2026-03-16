@@ -341,8 +341,7 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
-        let (total, desc, pri, labels, proj) =
-            self.db.get_field_completeness(team.as_deref())?;
+        let (total, desc, pri, labels, proj) = self.db.get_field_completeness(team.as_deref())?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,

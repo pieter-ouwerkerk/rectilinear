@@ -341,8 +341,7 @@ impl Database {
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(param_refs.as_slice(), |row| {
                 let labels_json: String = row.get(8)?;
-                let labels: Vec<String> =
-                    serde_json::from_str(&labels_json).unwrap_or_default();
+                let labels: Vec<String> = serde_json::from_str(&labels_json).unwrap_or_default();
                 Ok(IssueSummary {
                     id: row.get(0)?,
                     identifier: row.get(1)?,
@@ -632,9 +631,8 @@ impl Database {
     /// Get the wall-clock time of the last sync for a team.
     pub fn get_last_synced_at(&self, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT last_synced_at FROM sync_state WHERE team_key = ?1"
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT last_synced_at FROM sync_state WHERE team_key = ?1")?;
             let mut rows = stmt.query(rusqlite::params![team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(row.get(0)?)
@@ -683,7 +681,7 @@ impl Database {
                  LEFT JOIN chunks c ON i.id = c.issue_id
                  LEFT JOIN sync_state s ON i.team_key = s.team_key
                  GROUP BY i.team_key
-                 ORDER BY i.team_key"
+                 ORDER BY i.team_key",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(TeamSummary {
@@ -874,8 +872,10 @@ mod tests {
         db.upsert_issue(&issue3).unwrap();
 
         // Only issue1 and issue3 have embeddings
-        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
-        db.upsert_chunks(&issue3.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))])
+            .unwrap();
+        db.upsert_chunks(&issue3.id, &[(0, "chunk".into(), fake_embedding(768))])
+            .unwrap();
 
         // Global count
         assert_eq!(db.count_embedded_issues(None).unwrap(), 2);
@@ -978,7 +978,9 @@ mod tests {
         assert_eq!(filtered[0].identifier, "TST-3");
 
         // Title filter
-        let title_match = db.list_all_issues(None, Some("Test issue OTH"), 10, 0).unwrap();
+        let title_match = db
+            .list_all_issues(None, Some("Test issue OTH"), 10, 0)
+            .unwrap();
         assert_eq!(title_match.len(), 1);
     }
 
@@ -992,7 +994,8 @@ mod tests {
         db.upsert_issue(&issue2).unwrap();
 
         // Only issue1 gets an embedding
-        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))])
+            .unwrap();
 
         let issues = db.list_all_issues(None, None, 10, 0).unwrap();
         let by_id: std::collections::HashMap<_, _> =
@@ -1019,7 +1022,8 @@ mod tests {
             db.upsert_issue(&issue).unwrap();
             if i <= 2 {
                 // Embed first 2
-                db.upsert_chunks(&issue.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+                db.upsert_chunks(&issue.id, &[(0, "chunk".into(), fake_embedding(768))])
+                    .unwrap();
             }
         }
         let other = make_issue("OTH-1", "OTH");
@@ -1063,11 +1067,15 @@ mod tests {
         let issue = make_issue("TST-1", "TST");
         db.upsert_issue(&issue).unwrap();
         // Insert multiple chunks for the same issue — count should still be 1
-        db.upsert_chunks(&issue.id, &[
-            (0, "chunk0".into(), fake_embedding(768)),
-            (1, "chunk1".into(), fake_embedding(768)),
-            (2, "chunk2".into(), fake_embedding(768)),
-        ]).unwrap();
+        db.upsert_chunks(
+            &issue.id,
+            &[
+                (0, "chunk0".into(), fake_embedding(768)),
+                (1, "chunk1".into(), fake_embedding(768)),
+                (2, "chunk2".into(), fake_embedding(768)),
+            ],
+        )
+        .unwrap();
 
         let teams = db.list_synced_teams().unwrap();
         assert_eq!(teams.len(), 1);
