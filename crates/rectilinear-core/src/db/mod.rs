@@ -1,4 +1,6 @@
 pub mod schema;
+#[cfg(test)]
+mod test_helpers;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -652,4 +654,38 @@ pub struct FtsResult {
     pub state_name: String,
     pub priority: i32,
     pub bm25_score: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_helpers::*;
+
+    #[test]
+    fn count_embedded_issues_empty_db() {
+        let (db, _dir) = test_db();
+        assert_eq!(db.count_embedded_issues(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_embedded_issues_with_data() {
+        let (db, _dir) = test_db();
+
+        let issue1 = make_issue("TST-1", "TST");
+        let issue2 = make_issue("TST-2", "TST");
+        let issue3 = make_issue("OTH-1", "OTH");
+        db.upsert_issue(&issue1).unwrap();
+        db.upsert_issue(&issue2).unwrap();
+        db.upsert_issue(&issue3).unwrap();
+
+        // Only issue1 and issue3 have embeddings
+        db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+        db.upsert_chunks(&issue3.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+
+        // Global count
+        assert_eq!(db.count_embedded_issues(None).unwrap(), 2);
+        // Team filter
+        assert_eq!(db.count_embedded_issues(Some("TST")).unwrap(), 1);
+        assert_eq!(db.count_embedded_issues(Some("OTH")).unwrap(), 1);
+        assert_eq!(db.count_embedded_issues(Some("NONE")).unwrap(), 0);
+    }
 }
