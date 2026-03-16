@@ -171,6 +171,43 @@ pub struct RtFieldCompleteness {
     pub with_project: u64,
 }
 
+#[derive(uniffi::Record)]
+pub struct RtIssueSummary {
+    pub id: String,
+    pub identifier: String,
+    pub team_key: String,
+    pub title: String,
+    pub state_name: String,
+    pub state_type: String,
+    pub priority: i32,
+    pub project_name: Option<String>,
+    pub labels: Vec<String>,
+    pub updated_at: String,
+    pub url: String,
+    pub has_description: bool,
+    pub has_embedding: bool,
+}
+
+impl From<crate::db::IssueSummary> for RtIssueSummary {
+    fn from(s: crate::db::IssueSummary) -> Self {
+        Self {
+            id: s.id,
+            identifier: s.identifier,
+            team_key: s.team_key,
+            title: s.title,
+            state_name: s.state_name,
+            state_type: s.state_type,
+            priority: s.priority,
+            project_name: s.project_name,
+            labels: s.labels,
+            updated_at: s.updated_at,
+            url: s.url,
+            has_description: s.has_description,
+            has_embedding: s.has_embedding,
+        }
+    }
+}
+
 impl From<RtSearchMode> for search::SearchMode {
     fn from(mode: RtSearchMode) -> Self {
         match mode {
@@ -294,6 +331,23 @@ impl RectilinearEngine {
             with_labels: labels as u64,
             with_project: proj as u64,
         })
+    }
+
+    /// List all issues with lightweight summary data. Supports pagination and filtering.
+    pub fn list_all_issues(
+        &self,
+        team: Option<String>,
+        filter: Option<String>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<RtIssueSummary>, RectilinearError> {
+        let issues = self.db.list_all_issues(
+            team.as_deref(),
+            filter.as_deref(),
+            limit as usize,
+            offset as usize,
+        )?;
+        Ok(issues.into_iter().map(RtIssueSummary::from).collect())
     }
 
     /// Get enriched relations for an issue.
