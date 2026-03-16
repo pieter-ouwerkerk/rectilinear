@@ -655,6 +655,30 @@ impl Database {
 
     // --- FTS search ---
 
+    /// List teams that have synced issues, with issue and embedding counts.
+    /// Local-only query — no network required.
+    pub fn list_synced_teams(&self) -> Result<Vec<TeamSummary>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT i.team_key,
+                        COUNT(DISTINCT i.id) AS issue_count,
+                        COUNT(DISTINCT c.issue_id) AS embedded_count
+                 FROM issues i
+                 LEFT JOIN chunks c ON i.id = c.issue_id
+                 GROUP BY i.team_key
+                 ORDER BY i.team_key"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(TeamSummary {
+                    key: row.get(0)?,
+                    issue_count: row.get(1)?,
+                    embedded_count: row.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     pub fn fts_search(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
@@ -800,6 +824,13 @@ pub struct IssueSummary {
     pub url: String,
     pub has_description: bool,
     pub has_embedding: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TeamSummary {
+    pub key: String,
+    pub issue_count: usize,
+    pub embedded_count: usize,
 }
 
 #[cfg(test)]
@@ -950,5 +981,60 @@ mod tests {
 
         assert!(by_id["TST-1"].has_embedding);
         assert!(!by_id["TST-2"].has_embedding);
+    }
+
+    #[test]
+    fn list_synced_teams_empty_db() {
+        let (db, _dir) = test_db();
+        let teams = db.list_synced_teams().unwrap();
+        assert!(teams.is_empty());
+    }
+
+    #[test]
+    fn list_synced_teams_with_data() {
+        let (db, _dir) = test_db();
+
+        // 3 issues on TST, 1 on OTH
+        for i in 1..=3 {
+            let issue = make_issue(&format!("TST-{i}"), "TST");
+            db.upsert_issue(&issue).unwrap();
+            if i <= 2 {
+                // Embed first 2
+                db.upsert_chunks(&issue.id, &[(0, "chunk".into(), fake_embedding(768))]).unwrap();
+            }
+        }
+        let other = make_issue("OTH-1", "OTH");
+        db.upsert_issue(&other).unwrap();
+
+        let teams = db.list_synced_teams().unwrap();
+        assert_eq!(teams.len(), 2);
+
+        // Sorted by team_key
+        let by_key: std::collections::HashMap<_, _> =
+            teams.iter().map(|t| (t.key.as_str(), t)).collect();
+
+        assert_eq!(by_key["TST"].issue_count, 3);
+        assert_eq!(by_key["TST"].embedded_count, 2);
+        assert_eq!(by_key["OTH"].issue_count, 1);
+        assert_eq!(by_key["OTH"].embedded_count, 0);
+    }
+
+    #[test]
+    fn list_synced_teams_multi_chunk_issue() {
+        let (db, _dir) = test_db();
+
+        let issue = make_issue("TST-1", "TST");
+        db.upsert_issue(&issue).unwrap();
+        // Insert multiple chunks for the same issue — count should still be 1
+        db.upsert_chunks(&issue.id, &[
+            (0, "chunk0".into(), fake_embedding(768)),
+            (1, "chunk1".into(), fake_embedding(768)),
+            (2, "chunk2".into(), fake_embedding(768)),
+        ]).unwrap();
+
+        let teams = db.list_synced_teams().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].issue_count, 1); // not 3
+        assert_eq!(teams[0].embedded_count, 1);
     }
 }

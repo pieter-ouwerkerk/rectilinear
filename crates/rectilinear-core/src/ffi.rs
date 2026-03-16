@@ -208,6 +208,23 @@ impl From<crate::db::IssueSummary> for RtIssueSummary {
     }
 }
 
+#[derive(uniffi::Record)]
+pub struct RtTeamSummary {
+    pub key: String,
+    pub issue_count: u64,
+    pub embedded_count: u64,
+}
+
+impl From<crate::db::TeamSummary> for RtTeamSummary {
+    fn from(t: crate::db::TeamSummary) -> Self {
+        Self {
+            key: t.key,
+            issue_count: t.issue_count as u64,
+            embedded_count: t.embedded_count as u64,
+        }
+    }
+}
+
 impl From<RtSearchMode> for search::SearchMode {
     fn from(mode: RtSearchMode) -> Self {
         match mode {
@@ -348,6 +365,16 @@ impl RectilinearEngine {
             offset as usize,
         )?;
         Ok(issues.into_iter().map(RtIssueSummary::from).collect())
+    }
+
+    /// List teams with synced issues and their embedding coverage. Local-only, no network.
+    pub fn list_synced_teams(&self) -> Result<Vec<RtTeamSummary>, RectilinearError> {
+        Ok(self
+            .db
+            .list_synced_teams()?
+            .into_iter()
+            .map(RtTeamSummary::from)
+            .collect())
     }
 
     /// Get enriched relations for an issue.
