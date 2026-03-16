@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "rectilinear-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2340,6 +2340,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
