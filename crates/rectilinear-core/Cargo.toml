@@ -49,3 +49,6 @@ uuid = { version = "1", features = ["v4"] }
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
+
+[dev-dependencies]
+tempfile = "3"

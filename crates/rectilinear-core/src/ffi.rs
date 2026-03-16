@@ -266,6 +266,11 @@ impl RectilinearEngine {
         Ok(self.db.count_issues(team.as_deref())? as u64)
     }
 
+    /// Count issues that have at least one embedding chunk.
+    pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
+        Ok(self.db.count_embedded_issues(team.as_deref())? as u64)
+    }
+
     /// Get enriched relations for an issue.
     pub fn get_relations(&self, issue_id: String) -> Result<Vec<RtRelation>, RectilinearError> {
         Ok(self
