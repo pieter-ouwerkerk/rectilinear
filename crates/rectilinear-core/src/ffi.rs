@@ -9,6 +9,7 @@ use crate::db::Database;
 use crate::linear::LinearClient;
 use crate::search;
 use std::path::Path;
+use std::sync::Mutex;
 use tokio::sync::OnceCell;
 
 // ── Error ────────────────────────────────────────────────────────────
@@ -219,6 +220,19 @@ pub struct RtTeamSummary {
     pub last_synced_at: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RtSyncPhase {
+    FetchingIssues,
+    GeneratingEmbeddings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RtSyncProgress {
+    pub phase: RtSyncPhase,
+    pub completed: u64,
+    pub total: Option<u64>,
+}
+
 impl From<crate::db::TeamSummary> for RtTeamSummary {
     fn from(t: crate::db::TeamSummary) -> Self {
         Self {
@@ -247,6 +261,7 @@ pub struct RectilinearEngine {
     db: Database,
     linear_api_key: String,
     gemini_api_key: Option<String>,
+    sync_progress: Mutex<Option<RtSyncProgress>>,
     /// Lazily initialized on first async call so it's created inside
     /// UniFFI's Tokio runtime, binding hyper's DNS resolver to a live reactor.
     http_client: OnceCell<reqwest::Client>,
@@ -285,6 +300,7 @@ impl RectilinearEngine {
             db,
             linear_api_key,
             gemini_api_key,
+            sync_progress: Mutex::new(None),
             http_client: OnceCell::new(),
         })
     }
@@ -337,6 +353,11 @@ impl RectilinearEngine {
     /// Count issues that have at least one embedding chunk.
     pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
         Ok(self.db.count_embedded_issues(team.as_deref())? as u64)
+    }
+
+    /// Return the current sync progress, if a sync or embedding pass is active.
+    pub fn get_sync_progress(&self) -> Option<RtSyncProgress> {
+        self.sync_progress.lock().unwrap().clone()
     }
 
     /// Get field completeness counts in a single query.
@@ -466,15 +487,30 @@ impl RectilinearEngine {
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
     pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
+        self.set_sync_progress(Some(RtSyncProgress {
+            phase: RtSyncPhase::FetchingIssues,
+            completed: 0,
+            total: None,
+        }));
+
         let client =
             LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
-        let count = client
-            .sync_team(&self.db, &team_key, full, false, None)
+        let progress_state = &self.sync_progress;
+        let progress = move |count: usize| {
+            *progress_state.lock().unwrap() = Some(RtSyncProgress {
+                phase: RtSyncPhase::FetchingIssues,
+                completed: count as u64,
+                total: None,
+            });
+        };
+        let result = client
+            .sync_team(&self.db, &team_key, full, false, Some(&progress))
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
-            })?;
-        Ok(count as u64)
+            });
+        self.set_sync_progress(None);
+        result.map(|count| count as u64)
     }
 
     /// Hybrid search (FTS + vector via RRF). Requires embedder for vector component.
@@ -671,13 +707,16 @@ impl RectilinearEngine {
         limit: u32,
     ) -> Result<u64, RectilinearError> {
         let config = Config::load().unwrap_or_default();
-        let embedder = self.make_embedder(&config).await?.ok_or_else(|| {
-            RectilinearError::Config {
+        let embedder =
+            self.make_embedder(&config)
+                .await?
+                .ok_or_else(|| {
+                    RectilinearError::Config {
                 message:
                     "No embedding backend available — set GEMINI_API_KEY or enable local embeddings"
                         .into(),
             }
-        })?;
+                })?;
 
         let model_name = embedder.backend_name().to_string();
         let issues = self
@@ -689,49 +728,73 @@ impl RectilinearEngine {
         } else {
             &issues
         };
+        let total = to_process.len() as u64;
 
-        let mut count = 0u64;
-        for issue in to_process {
-            // Skip if already embedded with the same model and content hasn't changed
-            if let Some(existing_model) = self.db.get_embedding_model(&issue.id)? {
-                if existing_model == model_name {
-                    continue;
+        self.set_sync_progress(Some(RtSyncProgress {
+            phase: RtSyncPhase::GeneratingEmbeddings,
+            completed: 0,
+            total: Some(total),
+        }));
+
+        let result: Result<u64, RectilinearError> = async {
+            let mut count = 0u64;
+            for issue in to_process {
+                // Skip if already embedded with the same model and content hasn't changed
+                if let Some(existing_model) = self.db.get_embedding_model(&issue.id)? {
+                    if existing_model == model_name {
+                        continue;
+                    }
                 }
+
+                let chunks = crate::embedding::chunk_text(
+                    &issue.title,
+                    issue.description.as_deref().unwrap_or(""),
+                    512,
+                    64,
+                );
+                let embeddings =
+                    embedder
+                        .embed_batch(&chunks)
+                        .await
+                        .map_err(|e| RectilinearError::Api {
+                            message: e.to_string(),
+                        })?;
+
+                let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
+                    .into_iter()
+                    .zip(embeddings.iter())
+                    .enumerate()
+                    .map(|(idx, (text, emb))| {
+                        (idx, text, crate::embedding::embedding_to_bytes(emb))
+                    })
+                    .collect();
+
+                self.db
+                    .upsert_chunks_with_model(&issue.id, &chunk_data, &model_name)?;
+                count += 1;
+                self.set_sync_progress(Some(RtSyncProgress {
+                    phase: RtSyncPhase::GeneratingEmbeddings,
+                    completed: count,
+                    total: Some(total),
+                }));
             }
 
-            let chunks = crate::embedding::chunk_text(
-                &issue.title,
-                issue.description.as_deref().unwrap_or(""),
-                512,
-                64,
-            );
-            let embeddings =
-                embedder
-                    .embed_batch(&chunks)
-                    .await
-                    .map_err(|e| RectilinearError::Api {
-                        message: e.to_string(),
-                    })?;
-
-            let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
-                .into_iter()
-                .zip(embeddings.iter())
-                .enumerate()
-                .map(|(idx, (text, emb))| (idx, text, crate::embedding::embedding_to_bytes(emb)))
-                .collect();
-
-            self.db
-                .upsert_chunks_with_model(&issue.id, &chunk_data, &model_name)?;
-            count += 1;
+            Ok(count)
         }
+        .await;
 
-        Ok(count)
+        self.set_sync_progress(None);
+        result
     }
 }
 
 // ── Private helpers ──────────────────────────────────────────────────
 
 impl RectilinearEngine {
+    fn set_sync_progress(&self, progress: Option<RtSyncProgress>) {
+        *self.sync_progress.lock().unwrap() = progress;
+    }
+
     async fn make_embedder(
         &self,
         config: &Config,
