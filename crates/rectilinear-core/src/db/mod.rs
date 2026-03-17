@@ -491,9 +491,8 @@ impl Database {
     /// Get the embedding model name for an issue's chunks, if any exist.
     pub fn get_embedding_model(&self, issue_id: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT model_name FROM chunks WHERE issue_id = ?1 LIMIT 1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT model_name FROM chunks WHERE issue_id = ?1 LIMIT 1")?;
             let mut rows = stmt.query(rusqlite::params![issue_id])?;
             if let Some(row) = rows.next()? {
                 let name: String = row.get(0)?;
