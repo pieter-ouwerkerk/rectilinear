@@ -65,6 +65,8 @@ struct LinearIssue {
     labels: LinearLabelConnection,
     #[serde(default)]
     relations: LinearRelationConnection,
+    #[serde(rename = "branchName")]
+    branch_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -344,7 +346,7 @@ impl LinearClient {
                     {}
                 ) {{
                     nodes {{
-                        id identifier url title description priority
+                        id identifier url title description priority branchName
                         createdAt updatedAt
                         state {{ name type }}
                         team {{ key }}
@@ -565,7 +567,7 @@ impl LinearClient {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
-                    id identifier url title description priority
+                    id identifier url title description priority branchName
                     createdAt updatedAt
                     state { name type }
                     team { key }
@@ -613,7 +615,7 @@ impl LinearClient {
                     first: 1
                 ) {{
                     nodes {{
-                        id identifier url title description priority
+                        id identifier url title description priority branchName
                         createdAt updatedAt
                         state {{ name type }}
                         team {{ key }}
@@ -667,6 +669,7 @@ impl LinearClient {
             updated_at: i.updated_at,
             content_hash,
             synced_at: None,
+            branch_name: i.branch_name,
         };
 
         (issue, relations)

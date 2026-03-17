@@ -51,6 +51,7 @@ pub struct RtIssue {
     pub created_at: String,
     pub updated_at: String,
     pub url: String,
+    pub branch_name: Option<String>,
 }
 
 impl From<crate::db::Issue> for RtIssue {
@@ -71,6 +72,7 @@ impl From<crate::db::Issue> for RtIssue {
             created_at: issue.created_at,
             updated_at: issue.updated_at,
             url: issue.url,
+            branch_name: issue.branch_name,
         }
     }
 }
@@ -145,6 +147,7 @@ pub struct RtIssueEnriched {
     pub created_at: String,
     pub updated_at: String,
     pub url: String,
+    pub branch_name: Option<String>,
     pub blocked_by: Vec<RtBlocker>,
 }
 
@@ -432,6 +435,7 @@ impl RectilinearEngine {
                     created_at: issue.created_at,
                     updated_at: issue.updated_at,
                     url: issue.url,
+                    branch_name: issue.branch_name,
                     blocked_by,
                 }
             })
@@ -580,6 +584,128 @@ impl RectilinearEngine {
         }
 
         Ok(())
+    }
+
+    /// Add a comment to a Linear issue.
+    pub async fn add_comment(
+        &self,
+        issue_id: String,
+        body: String,
+    ) -> Result<(), RectilinearError> {
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+        client
+            .add_comment(&issue_id, &body)
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })
+    }
+
+    /// Fetch a single issue live from Linear and upsert into local DB.
+    /// Accepts either a UUID or identifier (e.g. "CUT-123").
+    pub async fn refresh_issue(
+        &self,
+        id_or_identifier: String,
+    ) -> Result<Option<RtIssue>, RectilinearError> {
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+
+        let result = if id_or_identifier.contains('-')
+            && id_or_identifier
+                .chars()
+                .last()
+                .map_or(false, |c| c.is_ascii_digit())
+        {
+            client
+                .fetch_issue_by_identifier(&id_or_identifier)
+                .await
+                .map_err(|e| RectilinearError::Api {
+                    message: e.to_string(),
+                })?
+        } else {
+            Some(
+                client
+                    .fetch_single_issue(&id_or_identifier)
+                    .await
+                    .map_err(|e| RectilinearError::Api {
+                        message: e.to_string(),
+                    })?,
+            )
+        };
+
+        if let Some((issue, relations)) = result {
+            self.db.upsert_issue(&issue)?;
+            self.db.upsert_relations(&issue.id, &relations)?;
+            Ok(Some(RtIssue::from(issue)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Generate embeddings for issues that don't have them yet.
+    /// Returns the number of issues embedded.
+    pub async fn embed_issues(
+        &self,
+        team: Option<String>,
+        limit: u32,
+    ) -> Result<u64, RectilinearError> {
+        let config = Config::load().unwrap_or_default();
+        let embedder =
+            self.make_embedder(&config)
+                .await?
+                .ok_or_else(|| RectilinearError::Config {
+                    message: "No embedding backend available — set GEMINI_API_KEY or enable local embeddings".into(),
+                })?;
+
+        let model_name = embedder.backend_name().to_string();
+        let issues = self
+            .db
+            .get_issues_needing_embedding(team.as_deref(), false)?;
+
+        let to_process = if limit > 0 {
+            &issues[..std::cmp::min(issues.len(), limit as usize)]
+        } else {
+            &issues
+        };
+
+        let mut count = 0u64;
+        for issue in to_process {
+            // Skip if already embedded with the same model and content hasn't changed
+            if let Some(existing_model) = self.db.get_embedding_model(&issue.id)? {
+                if existing_model == model_name {
+                    continue;
+                }
+            }
+
+            let chunks = crate::embedding::chunk_text(
+                &issue.title,
+                issue.description.as_deref().unwrap_or(""),
+                512,
+                64,
+            );
+            let embeddings = embedder
+                .embed_batch(&chunks)
+                .await
+                .map_err(|e| RectilinearError::Api {
+                    message: e.to_string(),
+                })?;
+
+            let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
+                .into_iter()
+                .zip(embeddings.iter())
+                .enumerate()
+                .map(|(idx, (text, emb))| {
+                    (idx, text, crate::embedding::embedding_to_bytes(emb))
+                })
+                .collect();
+
+            self.db
+                .upsert_chunks_with_model(&issue.id, &chunk_data, &model_name)?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 }
 

@@ -54,19 +54,19 @@ impl Database {
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15)
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
                    labels_json=excluded.labels_json, updated_at=excluded.updated_at,
-                   content_hash=excluded.content_hash, url=excluded.url, synced_at=datetime('now')",
+                   content_hash=excluded.content_hash, url=excluded.url, branch_name=excluded.branch_name, synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
                     issue.state_name, issue.state_type, issue.priority, issue.assignee_name,
                     issue.project_name, issue.labels_json, issue.created_at, issue.updated_at,
-                    issue.content_hash, issue.url,
+                    issue.content_hash, issue.url, issue.branch_name,
                 ],
             )?;
             Ok(())
@@ -76,7 +76,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -102,7 +102,7 @@ impl Database {
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
                 (
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
                          FROM issues WHERE priority = 0{} AND team_key = ?1
                          ORDER BY created_at DESC", state_filter
                     ),
@@ -111,7 +111,7 @@ impl Database {
             } else {
                 (
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
                          FROM issues WHERE priority = 0{}
                          ORDER BY created_at DESC", state_filter
                     ),
@@ -142,7 +142,7 @@ impl Database {
             let sql = format!(
                 "SELECT id, identifier, team_key, title, description, state_name, state_type, \
                  priority, assignee_name, project_name, labels_json, created_at, updated_at, \
-                 content_hash, synced_at, url \
+                 content_hash, synced_at, url, branch_name \
                  FROM issues WHERE team_key = ?1 AND state_type IN ({placeholders}) \
                  ORDER BY priority ASC, created_at DESC"
             );
@@ -464,18 +464,43 @@ impl Database {
     // --- Chunks (embeddings) ---
 
     pub fn upsert_chunks(&self, issue_id: &str, chunks: &[(usize, String, Vec<u8>)]) -> Result<()> {
+        self.upsert_chunks_with_model(issue_id, chunks, "")
+    }
+
+    pub fn upsert_chunks_with_model(
+        &self,
+        issue_id: &str,
+        chunks: &[(usize, String, Vec<u8>)],
+        model_name: &str,
+    ) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
                 "DELETE FROM chunks WHERE issue_id = ?1",
                 rusqlite::params![issue_id],
             )?;
             let mut stmt = conn.prepare(
-                "INSERT INTO chunks (issue_id, chunk_index, chunk_text, embedding) VALUES (?1, ?2, ?3, ?4)"
+                "INSERT INTO chunks (issue_id, chunk_index, chunk_text, embedding, model_name) VALUES (?1, ?2, ?3, ?4, ?5)"
             )?;
             for (idx, text, embedding) in chunks {
-                stmt.execute(rusqlite::params![issue_id, idx, text, embedding])?;
+                stmt.execute(rusqlite::params![issue_id, idx, text, embedding, model_name])?;
             }
             Ok(())
+        })
+    }
+
+    /// Get the embedding model name for an issue's chunks, if any exist.
+    pub fn get_embedding_model(&self, issue_id: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT model_name FROM chunks WHERE issue_id = ?1 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![issue_id])?;
+            if let Some(row) = rows.next()? {
+                let name: String = row.get(0)?;
+                Ok(if name.is_empty() { None } else { Some(name) })
+            } else {
+                Ok(None)
+            }
         })
     }
 
@@ -538,11 +563,11 @@ impl Database {
             let sql = if force {
                 if let Some(team) = team_key {
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
                          FROM issues WHERE team_key = '{}'", team
                     )
                 } else {
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url
+                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
                      FROM issues".to_string()
                 }
             } else {
@@ -552,7 +577,7 @@ impl Database {
                     String::new()
                 };
                 format!(
-                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url
+                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url, i.branch_name
                      FROM issues i
                      LEFT JOIN (SELECT DISTINCT issue_id FROM chunks) c ON i.id = c.issue_id
                      WHERE c.issue_id IS NULL {}",
@@ -740,6 +765,7 @@ pub struct Issue {
     pub content_hash: String,
     pub synced_at: Option<String>,
     pub url: String,
+    pub branch_name: Option<String>,
 }
 
 impl Issue {
@@ -761,6 +787,7 @@ impl Issue {
             content_hash: row.get(13)?,
             synced_at: row.get(14)?,
             url: row.get(15)?,
+            branch_name: row.get(16).unwrap_or(None),
         })
     }
 
