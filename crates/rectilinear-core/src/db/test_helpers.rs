@@ -31,6 +31,7 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
         content_hash: "abc123".to_string(),
         synced_at: None,
         url: format!("https://linear.app/test/issue/{identifier}"),
+        branch_name: None,
     }
 }
 

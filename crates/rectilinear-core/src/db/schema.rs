@@ -41,8 +41,19 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (5)", [])?;
     }
 
+    if current_version < 6 {
+        conn.execute_batch(MIGRATION_6)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
+    }
+
     Ok(())
 }
+
+// Add branch_name to issues, model_name to chunks
+const MIGRATION_6: &str = "
+ALTER TABLE issues ADD COLUMN branch_name TEXT;
+ALTER TABLE chunks ADD COLUMN model_name TEXT NOT NULL DEFAULT '';
+";
 
 // Add last_synced_at to sync_state
 const MIGRATION_5: &str = "
