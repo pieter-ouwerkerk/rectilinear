@@ -602,6 +602,26 @@ impl RectilinearEngine {
             })
     }
 
+    /// Validate the configured Gemini API key without generating embeddings.
+    pub async fn test_gemini_api_key(&self) -> Result<(), RectilinearError> {
+        let api_key = self
+            .gemini_api_key
+            .as_deref()
+            .ok_or_else(|| RectilinearError::Config {
+                message: "Gemini API key not configured".into(),
+            })?;
+
+        crate::embedding::Embedder::new_api_with_http_client(self.client().await.clone(), api_key)
+            .map_err(|e| RectilinearError::Config {
+                message: e.to_string(),
+            })?
+            .test_api_key()
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })
+    }
+
     /// Fetch a single issue live from Linear and upsert into local DB.
     /// Accepts either a UUID or identifier (e.g. "CUT-123").
     pub async fn refresh_issue(
@@ -651,12 +671,13 @@ impl RectilinearEngine {
         limit: u32,
     ) -> Result<u64, RectilinearError> {
         let config = Config::load().unwrap_or_default();
-        let embedder =
-            self.make_embedder(&config)
-                .await?
-                .ok_or_else(|| RectilinearError::Config {
-                    message: "No embedding backend available — set GEMINI_API_KEY or enable local embeddings".into(),
-                })?;
+        let embedder = self.make_embedder(&config).await?.ok_or_else(|| {
+            RectilinearError::Config {
+                message:
+                    "No embedding backend available — set GEMINI_API_KEY or enable local embeddings"
+                        .into(),
+            }
+        })?;
 
         let model_name = embedder.backend_name().to_string();
         let issues = self
@@ -684,20 +705,19 @@ impl RectilinearEngine {
                 512,
                 64,
             );
-            let embeddings = embedder
-                .embed_batch(&chunks)
-                .await
-                .map_err(|e| RectilinearError::Api {
-                    message: e.to_string(),
-                })?;
+            let embeddings =
+                embedder
+                    .embed_batch(&chunks)
+                    .await
+                    .map_err(|e| RectilinearError::Api {
+                        message: e.to_string(),
+                    })?;
 
             let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
                 .into_iter()
                 .zip(embeddings.iter())
                 .enumerate()
-                .map(|(idx, (text, emb))| {
-                    (idx, text, crate::embedding::embedding_to_bytes(emb))
-                })
+                .map(|(idx, (text, emb))| (idx, text, crate::embedding::embedding_to_bytes(emb)))
                 .collect();
 
             self.db
