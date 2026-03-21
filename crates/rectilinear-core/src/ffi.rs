@@ -485,6 +485,26 @@ impl RectilinearEngine {
             .collect())
     }
 
+    /// Validate the configured Gemini API key without generating embeddings.
+    pub async fn test_gemini_api_key(&self) -> Result<(), RectilinearError> {
+        let api_key = self
+            .gemini_api_key
+            .as_deref()
+            .ok_or_else(|| RectilinearError::Config {
+                message: "Gemini API key not configured".into(),
+            })?;
+
+        crate::embedding::Embedder::new_api_with_http_client(self.client().await.clone(), api_key)
+            .map_err(|e| RectilinearError::Config {
+                message: e.to_string(),
+            })?
+            .test_api_key()
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })
+    }
+
     /// Sync issues from Linear for a team. Returns the number of issues synced.
     pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
         self.set_sync_progress(Some(RtSyncProgress {
@@ -569,13 +589,15 @@ impl RectilinearEngine {
         Ok(results.into_iter().map(RtSearchResult::from).collect())
     }
 
-    /// Update an issue in Linear (title, priority, state).
+    /// Update an issue in Linear (title, description, priority, state, labels).
     pub async fn save_issue(
         &self,
         issue_id: String,
         title: Option<String>,
+        description: Option<String>,
         priority: Option<i32>,
         state: Option<String>,
+        labels: Option<Vec<String>>,
     ) -> Result<(), RectilinearError> {
         let client =
             LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
@@ -602,7 +624,7 @@ impl RectilinearEngine {
             .update_issue(
                 &issue_id,
                 title.as_deref(),
-                None,
+                description.as_deref(),
                 priority,
                 state_id.as_deref(),
                 None,
