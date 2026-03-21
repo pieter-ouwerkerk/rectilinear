@@ -620,6 +620,19 @@ impl RectilinearEngine {
             None
         };
 
+        let label_ids = if let Some(ref label_names) = labels {
+            Some(
+                client
+                    .get_label_ids(label_names)
+                    .await
+                    .map_err(|e| RectilinearError::Api {
+                        message: e.to_string(),
+                    })?,
+            )
+        } else {
+            None
+        };
+
         client
             .update_issue(
                 &issue_id,
@@ -627,7 +640,7 @@ impl RectilinearEngine {
                 description.as_deref(),
                 priority,
                 state_id.as_deref(),
-                None,
+                label_ids.as_deref(),
                 None,
             )
             .await
@@ -654,26 +667,6 @@ impl RectilinearEngine {
             LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
         client
             .add_comment(&issue_id, &body)
-            .await
-            .map_err(|e| RectilinearError::Api {
-                message: e.to_string(),
-            })
-    }
-
-    /// Validate the configured Gemini API key without generating embeddings.
-    pub async fn test_gemini_api_key(&self) -> Result<(), RectilinearError> {
-        let api_key = self
-            .gemini_api_key
-            .as_deref()
-            .ok_or_else(|| RectilinearError::Config {
-                message: "Gemini API key not configured".into(),
-            })?;
-
-        crate::embedding::Embedder::new_api_with_http_client(self.client().await.clone(), api_key)
-            .map_err(|e| RectilinearError::Config {
-                message: e.to_string(),
-            })?
-            .test_api_key()
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
