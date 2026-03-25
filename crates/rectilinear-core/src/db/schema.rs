@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 INSERT OR IGNORE INTO workspaces (id) VALUES ('default');
 
 -- Add workspace_id to issues
-ALTER TABLE issues ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default' REFERENCES workspaces(id);
+ALTER TABLE issues ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
 
 -- Add workspace_id to sync_state (recreate since altering PK is not supported)
 CREATE TABLE sync_state_new (
@@ -84,7 +84,7 @@ DROP TABLE sync_state;
 ALTER TABLE sync_state_new RENAME TO sync_state;
 
 -- Add workspace_id to comments
-ALTER TABLE comments ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default' REFERENCES workspaces(id);
+ALTER TABLE comments ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
 
 -- New indices
 CREATE INDEX IF NOT EXISTS idx_issues_workspace ON issues(workspace_id);
