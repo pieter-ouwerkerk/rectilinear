@@ -419,7 +419,7 @@ impl RectilinearEngine {
         team: String,
         state_types: Vec<String>,
     ) -> Result<Vec<RtIssueEnriched>, RectilinearError> {
-        let issues = self.db.get_issues_by_state_types(&team, &state_types)?;
+        let issues = self.db.get_issues_by_state_types(&team, &state_types, "default")?;
         let issue_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
         let blockers = self.db.get_blockers_for_issues(&issue_ids)?;
 

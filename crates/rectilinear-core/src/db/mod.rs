@@ -197,24 +197,25 @@ impl Database {
         &self,
         team_key: &str,
         state_types: &[String],
+        workspace_id: &str,
     ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let placeholders: String = state_types
                 .iter()
                 .enumerate()
-                .map(|(i, _)| format!("?{}", i + 2))
+                .map(|(i, _)| format!("?{}", i + 3))
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
                 "SELECT id, identifier, team_key, title, description, state_name, state_type, \
                  priority, assignee_name, project_name, labels_json, created_at, updated_at, \
                  content_hash, synced_at, url, branch_name, workspace_id \
-                 FROM issues WHERE team_key = ?1 AND state_type IN ({placeholders}) \
+                 FROM issues WHERE team_key = ?1 AND workspace_id = ?2 AND state_type IN ({placeholders}) \
                  ORDER BY priority ASC, created_at DESC"
             );
             let mut stmt = conn.prepare(&sql)?;
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(team_key.to_string())];
+                vec![Box::new(team_key.to_string()), Box::new(workspace_id.to_string())];
             for st in state_types {
                 params.push(Box::new(st.clone()));
             }
