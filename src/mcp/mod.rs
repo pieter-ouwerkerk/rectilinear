@@ -110,7 +110,7 @@ fn extract_image_references(text: &str) -> Vec<&str> {
 }
 
 /// If `new_description` would drop image references present in `original`, append them.
-fn preserve_images(original: &str, new_description: &str) -> String {
+pub(crate) fn preserve_images(original: &str, new_description: &str) -> String {
     let original_images = extract_image_references(original);
     if original_images.is_empty() {
         return new_description.to_string();

@@ -6,4 +6,5 @@ pub mod search_cmd;
 pub mod show_cmd;
 pub mod sync_cmd;
 pub mod teams_cmd;
+pub mod mark_triaged_cmd;
 pub mod triage_cmd;

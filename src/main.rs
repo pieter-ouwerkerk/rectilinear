@@ -147,6 +147,35 @@ enum Commands {
         #[arg(long)]
         include_completed: bool,
     },
+    /// Mark an issue as triaged: set priority and optionally update fields
+    MarkTriaged {
+        /// Issue identifier (e.g., CUT-42)
+        id: String,
+        /// Priority (1=Urgent, 2=High, 3=Medium, 4=Low)
+        #[arg(short, long)]
+        priority: i32,
+        /// Improved title
+        #[arg(long)]
+        title: Option<String>,
+        /// Updated description
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Triage comment
+        #[arg(long)]
+        comment: Option<String>,
+        /// Set state (e.g., "Done", "Cancelled", "Duplicate")
+        #[arg(long)]
+        state: Option<String>,
+        /// Set labels (comma-separated, replaces existing)
+        #[arg(short, long, value_delimiter = ',')]
+        labels: Option<Vec<String>>,
+        /// Set project name (or "none" to remove)
+        #[arg(long)]
+        project: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List available Linear teams
     Teams,
     /// Start MCP server (stdio transport)
@@ -330,6 +359,32 @@ async fn main() -> Result<()> {
                         limit,
                         no_context,
                         include_completed,
+                    )
+                    .await?;
+                }
+                Commands::MarkTriaged {
+                    id,
+                    priority,
+                    title,
+                    description,
+                    comment,
+                    state,
+                    labels,
+                    project,
+                    json,
+                } => {
+                    cli::mark_triaged_cmd::handle_mark_triaged(
+                        &db,
+                        &config,
+                        &id,
+                        priority,
+                        title.as_deref(),
+                        description.as_deref(),
+                        comment.as_deref(),
+                        state.as_deref(),
+                        labels.as_deref(),
+                        project.as_deref(),
+                        json,
                     )
                     .await?;
                 }
