@@ -8,3 +8,4 @@ pub mod sync_cmd;
 pub mod teams_cmd;
 pub mod mark_triaged_cmd;
 pub mod triage_cmd;
+pub mod workspace_cmd;

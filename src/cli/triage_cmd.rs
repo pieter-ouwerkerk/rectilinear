@@ -281,19 +281,22 @@ pub async fn handle_triage(
     limit: Option<usize>,
     no_context: bool,
     include_completed: bool,
+    workspace: &str,
 ) -> Result<()> {
     let llm = LlmClient::new(config)?;
-    let linear = LinearClient::new(config)?;
+    let api_key = config.workspace_api_key(workspace)?;
+    let linear = LinearClient::with_api_key(&api_key);
 
+    let default_team = config.workspace_default_team(workspace)?;
     let team_key = team
-        .or(config.linear.default_team.as_deref())
+        .or(default_team.as_deref())
         .ok_or_else(|| {
             anyhow::anyhow!("No team specified. Use --team or set default-team in config")
         })?;
 
-    let issues = db.get_unprioritized_issues(Some(team_key), include_completed)?;
+    let issues = db.get_unprioritized_issues(Some(team_key), include_completed, workspace)?;
     if issues.is_empty() {
-        let total = db.count_issues(Some(team_key))?;
+        let total = db.count_issues(Some(team_key), workspace)?;
         if total == 0 {
             eprintln!(
                 "No issues found for team \"{}\". Have you run `rectilinear sync --team {}`?",

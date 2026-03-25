@@ -13,17 +13,23 @@ pub async fn handle_sync(
     full: bool,
     embed: bool,
     include_archived: bool,
+    workspace: &str,
 ) -> Result<()> {
-    let client = LinearClient::new(config)?;
+    let api_key = config.workspace_api_key(workspace)?;
+    let client = LinearClient::with_api_key(&api_key);
 
     let team_key = team
-        .or(config.linear.default_team.as_deref())
+        .or(config.workspace_default_team(workspace)?.as_deref())
         .ok_or_else(|| {
             anyhow::anyhow!("No team specified. Use --team or set default-team in config")
-        })?;
+        })?
+        .to_string();
+
+    // Ensure workspace row exists in DB
+    db.upsert_workspace(workspace, None, None)?;
 
     let sync_type = if full { "Full" } else { "Incremental" };
-    let is_first = !db.is_full_sync_done(team_key)?;
+    let is_first = !db.is_full_sync_done(workspace, &team_key)?;
 
     if is_first && !full {
         println!(
@@ -51,7 +57,7 @@ pub async fn handle_sync(
         pb.set_message(format!("{} issues synced", total));
     };
     let count = client
-        .sync_team(db, team_key, do_full, include_archived, Some(&progress_cb))
+        .sync_team(db, &team_key, do_full, include_archived, Some(&progress_cb))
         .await?;
 
     pb.finish_with_message(format!(
@@ -61,7 +67,7 @@ pub async fn handle_sync(
         team_key.bold()
     ));
 
-    let total = db.count_issues(Some(team_key))?;
+    let total = db.count_issues(Some(&team_key), workspace)?;
     println!(
         "Total issues in database for {}: {}",
         team_key.bold(),
@@ -82,7 +88,7 @@ pub async fn handle_sync(
 
     if embed {
         println!();
-        crate::cli::embed_cmd::handle_embed(db, config, Some(team_key), false).await?;
+        crate::cli::embed_cmd::handle_embed(db, config, Some(&team_key), false, workspace).await?;
     }
 
     Ok(())

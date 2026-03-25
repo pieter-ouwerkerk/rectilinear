@@ -15,6 +15,7 @@ pub async fn handle_search(
     mode: SearchMode,
     limit: usize,
     json: bool,
+    _workspace: &str,
 ) -> Result<()> {
     let embedder = if mode != SearchMode::Fts {
         match Embedder::new(config) {
@@ -106,6 +107,7 @@ pub async fn handle_find_similar(
     threshold: f32,
     limit: usize,
     json: bool,
+    _workspace: &str,
 ) -> Result<()> {
     let embedder = Embedder::new(config)?;
     let team_key = team.or(config.linear.default_team.as_deref());

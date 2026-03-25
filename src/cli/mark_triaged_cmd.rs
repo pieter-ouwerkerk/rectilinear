@@ -18,6 +18,7 @@ pub async fn handle_mark_triaged(
     labels: Option<&[String]>,
     project: Option<&str>,
     json_output: bool,
+    workspace: &str,
 ) -> Result<()> {
     if !(1..=4).contains(&priority) {
         bail!("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)");
@@ -28,7 +29,8 @@ pub async fn handle_mark_triaged(
         .get_issue(id)?
         .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found", id))?;
 
-    let client = LinearClient::new(config)?;
+    let api_key = config.workspace_api_key(workspace)?;
+    let client = LinearClient::with_api_key(&api_key);
 
     // Re-fetch from Linear (staleness check)
     let (issue, issue_relations) = client.fetch_single_issue(&local_issue.id).await?;

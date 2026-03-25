@@ -685,7 +685,7 @@ IMPORTANT — Before calling this tool, you MUST:
 
         let total = self
             .db
-            .count_issues(Some(&args.team))
+            .count_issues(Some(&args.team), &self.config.resolve_active_workspace().unwrap_or_else(|_| "default".to_string()))
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
@@ -769,7 +769,7 @@ IMPORTANT — Before calling this tool, you MUST:
 
         let all_issues = self
             .db
-            .get_unprioritized_issues(Some(&args.team), args.include_completed.unwrap_or(false))
+            .get_unprioritized_issues(Some(&args.team), args.include_completed.unwrap_or(false), &self.config.resolve_active_workspace().unwrap_or_else(|_| "default".to_string()))
             .map_err(|e| e.to_string())?;
 
         let exclude_set: std::collections::HashSet<&str> = args

@@ -1,9 +1,10 @@
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::config::Config;
 use crate::db::Database;
 
-pub fn handle_show(db: &Database, id: &str, json: bool, comments: bool) -> Result<()> {
+pub fn handle_show(db: &Database, _config: &Config, id: &str, json: bool, comments: bool, _workspace: &str) -> Result<()> {
     let issue = db.get_issue(id)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Issue '{}' not found in local database. Try syncing first.",
