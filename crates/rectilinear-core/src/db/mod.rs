@@ -629,9 +629,9 @@ impl Database {
     pub fn set_sync_cursor(&self, team_key: &str, last_updated_at: &str) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO sync_state (team_key, last_updated_at, full_sync_done, last_synced_at)
-                 VALUES (?1, ?2, 1, datetime('now'))
-                 ON CONFLICT(team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1, last_synced_at=datetime('now')",
+                "INSERT INTO sync_state (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
+                 VALUES ('default', ?1, ?2, 1, datetime('now'))
+                 ON CONFLICT(workspace_id, team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1, last_synced_at=datetime('now')",
                 rusqlite::params![team_key, last_updated_at],
             )?;
             Ok(())
