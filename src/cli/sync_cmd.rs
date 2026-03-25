@@ -18,12 +18,37 @@ pub async fn handle_sync(
     let api_key = config.workspace_api_key(workspace)?;
     let client = LinearClient::with_api_key(&api_key);
 
-    let team_key = team
-        .or(config.workspace_default_team(workspace)?.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!("No team specified. Use --team or set default-team in config")
-        })?
-        .to_string();
+    let team_key = match team.or(config.workspace_default_team(workspace)?.as_deref()) {
+        Some(t) => t.to_string(),
+        None => {
+            // No team specified — fetch available teams and let user pick
+            println!("Fetching teams from Linear...");
+            let teams = client.list_teams().await?;
+            if teams.is_empty() {
+                anyhow::bail!("No teams found in this workspace");
+            }
+            if teams.len() == 1 {
+                let key = teams[0].key.clone();
+                println!("Using team {} ({})", key.bold(), teams[0].name);
+                key
+            } else {
+                println!("{}", "Available teams:".bold());
+                for (i, t) in teams.iter().enumerate() {
+                    println!("  {} {} — {}", format!("[{}]", i + 1).dimmed(), t.key.bold(), t.name);
+                }
+                print!("\nSelect team (1-{}): ", teams.len());
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let idx: usize = input.trim().parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("Invalid selection"))?;
+                if idx < 1 || idx > teams.len() {
+                    anyhow::bail!("Selection out of range");
+                }
+                teams[idx - 1].key.clone()
+            }
+        }
+    };
 
     // Ensure workspace row exists in DB
     db.upsert_workspace(workspace, None, None)?;
