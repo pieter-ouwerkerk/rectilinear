@@ -358,7 +358,7 @@ pub async fn handle_triage(
     // Start first issue
     spawn_questions(&app, &llm, &tx);
     if !no_context {
-        spawn_similar(&app, db, &embedder, config, &tx);
+        spawn_similar(&app, db, &embedder, config, &tx, workspace);
     }
 
     loop {
@@ -369,6 +369,7 @@ pub async fn handle_triage(
                 AppEvent::Key(key) => {
                     handle_key(
                         &mut app, key, &llm, &linear, db, config, &embedder, no_context, &tx,
+                        workspace,
                     )
                     .await;
                 }
@@ -402,7 +403,7 @@ pub async fn handle_triage(
                     if !app.should_quit {
                         spawn_questions(&app, &llm, &tx);
                         if !no_context {
-                            spawn_similar(&app, db, &embedder, config, &tx);
+                            spawn_similar(&app, db, &embedder, config, &tx, workspace);
                         }
                     }
                 }
@@ -440,6 +441,7 @@ async fn handle_key(
     embedder: &Option<Arc<Embedder>>,
     no_context: bool,
     tx: &mpsc::UnboundedSender<AppEvent>,
+    workspace: &str,
 ) {
     // Global: Ctrl+C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -502,7 +504,7 @@ async fn handle_key(
                     if !app.should_quit {
                         spawn_questions(app, llm, tx);
                         if !no_context {
-                            spawn_similar(app, db, embedder, config, tx);
+                            spawn_similar(app, db, embedder, config, tx, workspace);
                         }
                     }
                 }
@@ -523,7 +525,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -557,7 +559,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -567,7 +569,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -650,6 +652,7 @@ fn spawn_similar(
     embedder: &Option<Arc<Embedder>>,
     config: &Config,
     tx: &mpsc::UnboundedSender<AppEvent>,
+    workspace: &str,
 ) {
     let Some(embedder) = embedder.clone() else {
         tx.send(AppEvent::SimilarReady(Vec::new())).ok();
@@ -666,6 +669,7 @@ fn spawn_similar(
 
     let db = db.clone();
     let tx = tx.clone();
+    let workspace = workspace.to_string();
 
     tokio::spawn(async move {
         let results = search::search(
@@ -677,6 +681,7 @@ fn spawn_similar(
             5,
             Some(&embedder),
             rrf_k,
+            &workspace,
         )
         .await;
 

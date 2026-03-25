@@ -50,19 +50,21 @@ pub async fn search(
     limit: usize,
     embedder: Option<&Embedder>,
     rrf_k: u32,
+    workspace_id: &str,
 ) -> Result<Vec<SearchResult>> {
     let results = match mode {
-        SearchMode::Fts => fts_search(db, query, limit * 2)?,
+        SearchMode::Fts => fts_search(db, query, limit * 2, workspace_id)?,
         SearchMode::Vector => {
             let embedder =
                 embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
-            vector_search(db, query, team_key, limit * 2, embedder).await?
+            vector_search(db, query, team_key, limit * 2, embedder, workspace_id).await?
         }
         SearchMode::Hybrid => {
-            let fts_results = fts_search(db, query, limit * 3)?;
+            let fts_results = fts_search(db, query, limit * 3, workspace_id)?;
 
             if let Some(embedder) = embedder {
-                let vec_results = vector_search(db, query, team_key, limit * 3, embedder).await?;
+                let vec_results =
+                    vector_search(db, query, team_key, limit * 3, embedder, workspace_id).await?;
                 reciprocal_rank_fusion(fts_results, vec_results, rrf_k, 0.3, 0.7)
             } else {
                 // Fall back to FTS-only if no embedder
@@ -96,10 +98,15 @@ pub async fn search(
     Ok(results)
 }
 
-fn fts_search(db: &Database, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+fn fts_search(
+    db: &Database,
+    query: &str,
+    limit: usize,
+    workspace_id: &str,
+) -> Result<Vec<SearchResult>> {
     // Escape FTS5 special characters and build query
     let fts_query = build_fts_query(query);
-    let fts_results = db.fts_search(&fts_query, limit, "default")?;
+    let fts_results = db.fts_search(&fts_query, limit, workspace_id)?;
 
     Ok(fts_results
         .into_iter()
@@ -124,13 +131,14 @@ async fn vector_search(
     team_key: Option<&str>,
     limit: usize,
     embedder: &Embedder,
+    workspace_id: &str,
 ) -> Result<Vec<SearchResult>> {
     let query_embedding = embedder.embed_single(query).await?;
 
     let chunks = if let Some(team) = team_key {
-        db.get_chunks_for_team(team, "default")?
+        db.get_chunks_for_team(team, workspace_id)?
     } else {
-        db.get_all_chunks("default")?
+        db.get_all_chunks(workspace_id)?
     };
 
     // Compute similarity for each chunk, take max per issue
@@ -227,6 +235,7 @@ pub async fn find_duplicates(
     limit: usize,
     embedder: &Embedder,
     rrf_k: u32,
+    workspace_id: &str,
 ) -> Result<Vec<SearchResult>> {
     let mut results = search(
         db,
@@ -237,11 +246,12 @@ pub async fn find_duplicates(
         limit,
         Some(embedder),
         rrf_k,
+        workspace_id,
     )
     .await?;
 
     // For duplicate finding, also do a pure vector search and merge
-    let _vec_results = vector_search(db, text, team_key, limit, embedder).await?;
+    let _vec_results = vector_search(db, text, team_key, limit, embedder, workspace_id).await?;
 
     // Keep results above threshold
     results.retain(|r| r.similarity.unwrap_or(0.0) >= threshold || r.score > 0.01);

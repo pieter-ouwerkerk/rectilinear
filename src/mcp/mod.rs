@@ -408,7 +408,7 @@ impl RectilinearMcp {
         description = "Search Linear issues using hybrid FTS + vector search. Supports filtering by team and state."
     )]
     async fn search_issues(&self, #[tool(aggr)] args: SearchArgs) -> Result<String, String> {
-        let _workspace = self.require_workspace(&args.workspace)?;
+        let workspace = self.require_workspace(&args.workspace)?;
         let mode: SearchMode = args
             .mode
             .as_deref()
@@ -433,6 +433,7 @@ impl RectilinearMcp {
             limit,
             embedder.as_ref(),
             self.config.search.rrf_k,
+            &workspace,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -448,7 +449,7 @@ impl RectilinearMcp {
         &self,
         #[tool(aggr)] args: FindDuplicatesArgs,
     ) -> Result<String, String> {
-        let _workspace = self.require_workspace(&args.workspace)?;
+        let workspace = self.require_workspace(&args.workspace)?;
         let embedder = Embedder::new(&self.config).map_err(|e| e.to_string())?;
 
         let search_text = if let Some(ref desc) = args.description {
@@ -470,6 +471,7 @@ impl RectilinearMcp {
             limit,
             &embedder,
             self.config.search.rrf_k,
+            &workspace,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -766,7 +768,7 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Get an issue along with its N most similar issues, useful for understanding context and related work."
     )]
     async fn issue_context(&self, #[tool(aggr)] args: IssueContextArgs) -> Result<String, String> {
-        let _workspace = self.require_workspace(&args.workspace)?;
+        let workspace = self.require_workspace(&args.workspace)?;
         let issue = self
             .db
             .get_issue(&args.id)
@@ -790,6 +792,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 similar_count + 1,
                 &embedder,
                 self.config.search.rrf_k,
+                &workspace,
             )
             .await
             .unwrap_or_default()
@@ -896,6 +899,7 @@ IMPORTANT — Before calling this tool, you MUST:
                     4,
                     embedder,
                     self.config.search.rrf_k,
+                    &workspace,
                 )
                 .await
                 .unwrap_or_default()

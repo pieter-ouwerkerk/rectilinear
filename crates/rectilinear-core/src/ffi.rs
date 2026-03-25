@@ -556,6 +556,7 @@ impl RectilinearEngine {
             limit as usize,
             embedder.as_ref(),
             config.search.rrf_k,
+            "default",
         )
         .await?;
 
@@ -587,6 +588,7 @@ impl RectilinearEngine {
             10,
             &embedder,
             config.search.rrf_k,
+            "default",
         )
         .await?;
 

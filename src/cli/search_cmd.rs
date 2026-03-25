@@ -15,7 +15,7 @@ pub async fn handle_search(
     mode: SearchMode,
     limit: usize,
     json: bool,
-    _workspace: &str,
+    workspace: &str,
 ) -> Result<()> {
     let embedder = if mode != SearchMode::Fts {
         match Embedder::new(config) {
@@ -31,7 +31,8 @@ pub async fn handle_search(
         None
     };
 
-    let team_key = team.or(config.linear.default_team.as_deref());
+    let default_team = config.workspace_default_team(workspace).ok().flatten();
+    let team_key = team.or(default_team.as_deref());
 
     let results = search::search(
         db,
@@ -42,6 +43,7 @@ pub async fn handle_search(
         limit,
         embedder.as_ref(),
         config.search.rrf_k,
+        workspace,
     )
     .await?;
 
@@ -107,10 +109,11 @@ pub async fn handle_find_similar(
     threshold: f32,
     limit: usize,
     json: bool,
-    _workspace: &str,
+    workspace: &str,
 ) -> Result<()> {
     let embedder = Embedder::new(config)?;
-    let team_key = team.or(config.linear.default_team.as_deref());
+    let default_team = config.workspace_default_team(workspace).ok().flatten();
+    let team_key = team.or(default_team.as_deref());
 
     let results = search::find_duplicates(
         db,
@@ -120,6 +123,7 @@ pub async fn handle_find_similar(
         limit,
         &embedder,
         config.search.rrf_k,
+        workspace,
     )
     .await?;
 
