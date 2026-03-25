@@ -397,12 +397,10 @@ mod tests {
         let config = Config::default();
         let result = config.workspace_config("nonexistent");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in config")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in config"));
     }
 
     #[test]

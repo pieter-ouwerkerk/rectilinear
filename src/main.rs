@@ -283,13 +283,13 @@ async fn main() -> Result<()> {
             Some(ConfigAction::Get { key }) => cli::config_cmd::handle_get(&key)?,
             Some(ConfigAction::Show) => cli::config_cmd::handle_show()?,
             Some(ConfigAction::AddWorkspace) => cli::config_cmd::handle_add_workspace()?,
-            Some(ConfigAction::RemoveWorkspace { name }) => cli::config_cmd::handle_remove_workspace(&name)?,
+            Some(ConfigAction::RemoveWorkspace { name }) => {
+                cli::config_cmd::handle_remove_workspace(&name)?
+            }
             None => cli::config_cmd::handle_interactive()?,
         },
         Commands::Workspace { action } => match action {
-            WorkspaceAction::Assume { name } => {
-                cli::workspace_cmd::handle_assume(&name, &config)?
-            }
+            WorkspaceAction::Assume { name } => cli::workspace_cmd::handle_assume(&name, &config)?,
             WorkspaceAction::List => cli::workspace_cmd::handle_list(&config)?,
             WorkspaceAction::Current => cli::workspace_cmd::handle_current(&config)?,
         },

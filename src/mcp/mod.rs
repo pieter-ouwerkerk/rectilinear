@@ -374,13 +374,19 @@ impl RectilinearMcp {
         name = "list_workspaces",
         description = "List all configured workspaces. Use this to discover available workspace names before calling other tools."
     )]
-    async fn list_workspaces(&self, #[tool(aggr)] _args: ListWorkspacesArgs) -> Result<String, String> {
+    async fn list_workspaces(
+        &self,
+        #[tool(aggr)] _args: ListWorkspacesArgs,
+    ) -> Result<String, String> {
         let names = self.config.workspace_names();
         let active = self.config.resolve_active_workspace().ok();
 
         let mut workspaces = Vec::new();
         for name in &names {
-            let ws = self.config.workspace_config(name).map_err(|e| e.to_string())?;
+            let ws = self
+                .config
+                .workspace_config(name)
+                .map_err(|e| e.to_string())?;
             let db_info = self.db.get_workspace(name).map_err(|e| e.to_string())?;
             workspaces.push(serde_json::json!({
                 "name": name,
@@ -393,7 +399,8 @@ impl RectilinearMcp {
         serde_json::to_string_pretty(&serde_json::json!({
             "workspaces": workspaces,
             "instruction": "Pass the workspace name to all other tools."
-        })).map_err(|e| e.to_string())
+        }))
+        .map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -829,7 +836,11 @@ IMPORTANT — Before calling this tool, you MUST:
 
         let all_issues = self
             .db
-            .get_unprioritized_issues(Some(&args.team), args.include_completed.unwrap_or(false), &workspace)
+            .get_unprioritized_issues(
+                Some(&args.team),
+                args.include_completed.unwrap_or(false),
+                &workspace,
+            )
             .map_err(|e| e.to_string())?;
 
         let exclude_set: std::collections::HashSet<&str> = args
@@ -1239,12 +1250,18 @@ impl RectilinearMcp {
                 }
                 Ok(ws.clone())
             }
-            _ => Err("workspace is required. Use list_workspaces to see available workspaces.".to_string()),
+            _ => Err(
+                "workspace is required. Use list_workspaces to see available workspaces."
+                    .to_string(),
+            ),
         }
     }
 
     fn client_for_workspace(&self, workspace: &str) -> Result<LinearClient, String> {
-        let api_key = self.config.workspace_api_key(workspace).map_err(|e| e.to_string())?;
+        let api_key = self
+            .config
+            .workspace_api_key(workspace)
+            .map_err(|e| e.to_string())?;
         Ok(LinearClient::with_api_key(&api_key))
     }
 

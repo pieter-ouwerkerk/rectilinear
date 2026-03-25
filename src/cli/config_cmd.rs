@@ -217,11 +217,7 @@ pub fn handle_add_workspace() -> Result<()> {
         match name {
             Some(n) if !n.is_empty() => {
                 if config.workspaces.contains_key(&n) {
-                    println!(
-                        "  {} Workspace '{}' already exists.",
-                        "Error:".red(),
-                        n
-                    );
+                    println!("  {} Workspace '{}' already exists.", "Error:".red(), n);
                     continue;
                 }
                 break n;
@@ -246,8 +242,7 @@ pub fn handle_add_workspace() -> Result<()> {
     };
 
     // 3. Prompt for default team (optional)
-    let default_team = prompt_string("  Default team (optional)", None)?
-        .filter(|t| !t.is_empty());
+    let default_team = prompt_string("  Default team (optional)", None)?.filter(|t| !t.is_empty());
 
     // 4. Ask if should be default workspace
     let set_default = prompt_string("  Set as default workspace? (y/N)", Some("N"))?
@@ -286,11 +281,7 @@ pub fn handle_add_workspace() -> Result<()> {
     config.save()?;
 
     println!();
-    println!(
-        "{} Workspace '{}' added.",
-        "Done!".green().bold(),
-        name
-    );
+    println!("{} Workspace '{}' added.", "Done!".green().bold(), name);
     if set_default {
         println!("  Set as default workspace.");
     }
@@ -311,11 +302,7 @@ pub fn handle_remove_workspace(name: &str) -> Result<()> {
     }
 
     // 2. Check if it's the active workspace
-    let is_active = config
-        .resolve_active_workspace()
-        .ok()
-        .as_deref()
-        == Some(name);
+    let is_active = config.resolve_active_workspace().ok().as_deref() == Some(name);
 
     if is_active {
         println!(
@@ -342,11 +329,7 @@ pub fn handle_remove_workspace(name: &str) -> Result<()> {
 
     config.save()?;
 
-    println!(
-        "{} Workspace '{}' removed.",
-        "Done!".green().bold(),
-        name
-    );
+    println!("{} Workspace '{}' removed.", "Done!".green().bold(), name);
 
     Ok(())
 }

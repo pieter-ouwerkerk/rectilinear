@@ -1255,7 +1255,8 @@ mod tests {
         assert!(ws.linear_org_id.is_none());
 
         // Update with org info
-        db.upsert_workspace("work", Some("org-123"), Some("Work Org")).unwrap();
+        db.upsert_workspace("work", Some("org-123"), Some("Work Org"))
+            .unwrap();
         let ws = db.get_workspace("work").unwrap().unwrap();
         assert_eq!(ws.linear_org_id.as_deref(), Some("org-123"));
         assert_eq!(ws.display_name.as_deref(), Some("Work Org"));
@@ -1310,8 +1311,10 @@ mod tests {
         db.upsert_workspace("work", None, None).unwrap();
 
         // Set cursor for same team in different workspaces
-        db.set_sync_cursor("default", "TST", "2024-01-01T00:00:00Z").unwrap();
-        db.set_sync_cursor("work", "TST", "2024-06-01T00:00:00Z").unwrap();
+        db.set_sync_cursor("default", "TST", "2024-01-01T00:00:00Z")
+            .unwrap();
+        db.set_sync_cursor("work", "TST", "2024-06-01T00:00:00Z")
+            .unwrap();
 
         assert_eq!(
             db.get_sync_cursor("default", "TST").unwrap().as_deref(),

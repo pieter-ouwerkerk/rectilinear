@@ -318,9 +318,9 @@ impl RectilinearEngine {
         team: Option<String>,
         include_completed: bool,
     ) -> Result<Vec<RtIssue>, RectilinearError> {
-        let issues = self
-            .db
-            .get_unprioritized_issues(team.as_deref(), include_completed, "default")?;
+        let issues =
+            self.db
+                .get_unprioritized_issues(team.as_deref(), include_completed, "default")?;
         Ok(issues.into_iter().map(RtIssue::from).collect())
     }
 
@@ -365,7 +365,8 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
-        let (total, desc, pri, labels, proj) = self.db.get_field_completeness(team.as_deref(), "default")?;
+        let (total, desc, pri, labels, proj) =
+            self.db.get_field_completeness(team.as_deref(), "default")?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,
@@ -419,7 +420,9 @@ impl RectilinearEngine {
         team: String,
         state_types: Vec<String>,
     ) -> Result<Vec<RtIssueEnriched>, RectilinearError> {
-        let issues = self.db.get_issues_by_state_types(&team, &state_types, "default")?;
+        let issues = self
+            .db
+            .get_issues_by_state_types(&team, &state_types, "default")?;
         let issue_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
         let blockers = self.db.get_blockers_for_issues(&issue_ids)?;
 
@@ -621,18 +624,16 @@ impl RectilinearEngine {
             None
         };
 
-        let label_ids = if let Some(ref label_names) = labels {
-            Some(
-                client
-                    .get_label_ids(label_names)
-                    .await
-                    .map_err(|e| RectilinearError::Api {
+        let label_ids =
+            if let Some(ref label_names) = labels {
+                Some(client.get_label_ids(label_names).await.map_err(|e| {
+                    RectilinearError::Api {
                         message: e.to_string(),
-                    })?,
-            )
-        } else {
-            None
-        };
+                    }
+                })?)
+            } else {
+                None
+            };
 
         client
             .update_issue(

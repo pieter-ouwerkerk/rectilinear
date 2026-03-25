@@ -288,11 +288,9 @@ pub async fn handle_triage(
     let linear = LinearClient::with_api_key(&api_key);
 
     let default_team = config.workspace_default_team(workspace)?;
-    let team_key = team
-        .or(default_team.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!("No team specified. Use --team or set default-team in config")
-        })?;
+    let team_key = team.or(default_team.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!("No team specified. Use --team or set default-team in config")
+    })?;
 
     let issues = db.get_unprioritized_issues(Some(team_key), include_completed, workspace)?;
     if issues.is_empty() {
