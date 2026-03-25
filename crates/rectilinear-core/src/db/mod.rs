@@ -108,7 +108,10 @@ impl Database {
 
     pub fn delete_workspace(&self, id: &str) -> Result<()> {
         self.with_conn(|conn| {
-            conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id])?;
+            conn.execute(
+                "DELETE FROM workspaces WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
             Ok(())
         })
     }
@@ -617,7 +620,11 @@ impl Database {
         })
     }
 
-    pub fn count_embedded_issues(&self, team_key: Option<&str>, workspace_id: &str) -> Result<usize> {
+    pub fn count_embedded_issues(
+        &self,
+        team_key: Option<&str>,
+        workspace_id: &str,
+    ) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {
                 conn.query_row(
@@ -701,8 +708,9 @@ impl Database {
 
     pub fn get_sync_cursor(&self, workspace_id: &str, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT last_updated_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut stmt = conn.prepare(
+                "SELECT last_updated_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2",
+            )?;
             let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(row.get(0)?))
@@ -712,7 +720,12 @@ impl Database {
         })
     }
 
-    pub fn set_sync_cursor(&self, workspace_id: &str, team_key: &str, last_updated_at: &str) -> Result<()> {
+    pub fn set_sync_cursor(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        last_updated_at: &str,
+    ) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO sync_state (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
@@ -726,8 +739,9 @@ impl Database {
 
     pub fn is_full_sync_done(&self, workspace_id: &str, team_key: &str) -> Result<bool> {
         self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT full_sync_done FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut stmt = conn.prepare(
+                "SELECT full_sync_done FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2",
+            )?;
             let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 let done: bool = row.get(0)?;
@@ -741,8 +755,9 @@ impl Database {
     /// Get the wall-clock time of the last sync for a team.
     pub fn get_last_synced_at(&self, workspace_id: &str, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT last_synced_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut stmt = conn.prepare(
+                "SELECT last_synced_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2",
+            )?;
             let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(row.get(0)?)
@@ -806,7 +821,12 @@ impl Database {
         })
     }
 
-    pub fn fts_search(&self, query: &str, limit: usize, workspace_id: &str) -> Result<Vec<FtsResult>> {
+    pub fn fts_search(
+        &self,
+        query: &str,
+        limit: usize,
+        workspace_id: &str,
+    ) -> Result<Vec<FtsResult>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, bm25(issues_fts) as rank
@@ -1010,7 +1030,10 @@ mod tests {
         // Team filter
         assert_eq!(db.count_embedded_issues(Some("TST"), "default").unwrap(), 1);
         assert_eq!(db.count_embedded_issues(Some("OTH"), "default").unwrap(), 1);
-        assert_eq!(db.count_embedded_issues(Some("NONE"), "default").unwrap(), 0);
+        assert_eq!(
+            db.count_embedded_issues(Some("NONE"), "default").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1061,7 +1084,8 @@ mod tests {
         assert_eq!(proj, 1); // full only
 
         // Team filter
-        let (total, desc, pri, labels, proj) = db.get_field_completeness(Some("TST"), "default").unwrap();
+        let (total, desc, pri, labels, proj) =
+            db.get_field_completeness(Some("TST"), "default").unwrap();
         assert_eq!(total, 2);
         assert_eq!(desc, 1);
         assert_eq!(pri, 1);
@@ -1097,11 +1121,15 @@ mod tests {
         assert_eq!(page3.len(), 0);
 
         // Team filter
-        let tst = db.list_all_issues(Some("TST"), None, 10, 0, "default").unwrap();
+        let tst = db
+            .list_all_issues(Some("TST"), None, 10, 0, "default")
+            .unwrap();
         assert_eq!(tst.len(), 5);
 
         // Text filter
-        let filtered = db.list_all_issues(None, Some("TST-3"), 10, 0, "default").unwrap();
+        let filtered = db
+            .list_all_issues(None, Some("TST-3"), 10, 0, "default")
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].identifier, "TST-3");
 
@@ -1183,7 +1211,8 @@ mod tests {
         assert!(teams[0].last_synced_at.is_none());
 
         // After setting sync cursor, last_synced_at should be set
-        db.set_sync_cursor("default", "TST", "2026-01-01T00:00:00Z").unwrap();
+        db.set_sync_cursor("default", "TST", "2026-01-01T00:00:00Z")
+            .unwrap();
         let teams = db.list_synced_teams("default").unwrap();
         assert!(teams[0].last_synced_at.is_some());
     }
@@ -1209,5 +1238,115 @@ mod tests {
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].issue_count, 1); // not 3
         assert_eq!(teams[0].embedded_count, 1);
+    }
+
+    #[test]
+    fn workspace_crud() {
+        let (db, _dir) = test_db();
+
+        // Default workspace exists from migration
+        let ws = db.get_workspace("default").unwrap();
+        assert!(ws.is_some());
+
+        // Upsert a new workspace
+        db.upsert_workspace("work", None, None).unwrap();
+        let ws = db.get_workspace("work").unwrap().unwrap();
+        assert_eq!(ws.id, "work");
+        assert!(ws.linear_org_id.is_none());
+
+        // Update with org info
+        db.upsert_workspace("work", Some("org-123"), Some("Work Org")).unwrap();
+        let ws = db.get_workspace("work").unwrap().unwrap();
+        assert_eq!(ws.linear_org_id.as_deref(), Some("org-123"));
+        assert_eq!(ws.display_name.as_deref(), Some("Work Org"));
+
+        // List all
+        let all = db.list_workspaces().unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Delete
+        db.delete_workspace("work").unwrap();
+        let ws = db.get_workspace("work").unwrap();
+        assert!(ws.is_none());
+    }
+
+    #[test]
+    fn issues_isolated_by_workspace() {
+        let (db, _dir) = test_db();
+
+        // Create second workspace
+        db.upsert_workspace("work", None, None).unwrap();
+
+        // Insert issue in default workspace
+        let mut issue1 = make_issue("TST-1", "TST");
+        issue1.workspace_id = "default".to_string();
+        issue1.priority = 0;
+        db.upsert_issue(&issue1).unwrap();
+
+        // Insert issue in work workspace
+        let mut issue2 = make_issue("TST-2", "TST");
+        issue2.id = "id-2".to_string();
+        issue2.workspace_id = "work".to_string();
+        issue2.priority = 0;
+        db.upsert_issue(&issue2).unwrap();
+
+        // Count scoped to each workspace
+        assert_eq!(db.count_issues(None, "default").unwrap(), 1);
+        assert_eq!(db.count_issues(None, "work").unwrap(), 1);
+
+        // Unprioritized scoped
+        let default_unpri = db.get_unprioritized_issues(None, false, "default").unwrap();
+        assert_eq!(default_unpri.len(), 1);
+        assert_eq!(default_unpri[0].identifier, "TST-1");
+
+        let work_unpri = db.get_unprioritized_issues(None, false, "work").unwrap();
+        assert_eq!(work_unpri.len(), 1);
+        assert_eq!(work_unpri[0].identifier, "TST-2");
+    }
+
+    #[test]
+    fn sync_state_isolated_by_workspace() {
+        let (db, _dir) = test_db();
+        db.upsert_workspace("work", None, None).unwrap();
+
+        // Set cursor for same team in different workspaces
+        db.set_sync_cursor("default", "TST", "2024-01-01T00:00:00Z").unwrap();
+        db.set_sync_cursor("work", "TST", "2024-06-01T00:00:00Z").unwrap();
+
+        assert_eq!(
+            db.get_sync_cursor("default", "TST").unwrap().as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            db.get_sync_cursor("work", "TST").unwrap().as_deref(),
+            Some("2024-06-01T00:00:00Z")
+        );
+
+        assert!(db.is_full_sync_done("default", "TST").unwrap());
+        assert!(db.is_full_sync_done("work", "TST").unwrap());
+        assert!(!db.is_full_sync_done("default", "OTHER").unwrap());
+    }
+
+    #[test]
+    fn list_synced_teams_workspace_scoped() {
+        let (db, _dir) = test_db();
+        db.upsert_workspace("work", None, None).unwrap();
+
+        let mut issue1 = make_issue("TST-1", "TST");
+        issue1.workspace_id = "default".to_string();
+        db.upsert_issue(&issue1).unwrap();
+
+        let mut issue2 = make_issue("WRK-1", "WRK");
+        issue2.id = "id-wrk".to_string();
+        issue2.workspace_id = "work".to_string();
+        db.upsert_issue(&issue2).unwrap();
+
+        let default_teams = db.list_synced_teams("default").unwrap();
+        assert_eq!(default_teams.len(), 1);
+        assert_eq!(default_teams[0].key, "TST");
+
+        let work_teams = db.list_synced_teams("work").unwrap();
+        assert_eq!(work_teams.len(), 1);
+        assert_eq!(work_teams[0].key, "WRK");
     }
 }
