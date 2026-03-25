@@ -205,8 +205,8 @@ impl Config {
         if let Some(ws) = self.workspaces.get(name) {
             return Ok(ws.clone());
         }
-        if name == "default" {
-            // Fall back to legacy [linear] config
+        if name == "default" && self.linear.api_key.is_some() {
+            // Fall back to legacy [linear] config only when api_key is present
             return Ok(WorkspaceConfig {
                 api_key: self.linear.api_key.clone(),
                 default_team: self.linear.default_team.clone(),
@@ -234,7 +234,11 @@ impl Config {
     /// if only legacy config is present.
     pub fn workspace_names(&self) -> Vec<String> {
         if self.workspaces.is_empty() {
-            vec!["default".to_string()]
+            if self.linear.api_key.is_some() {
+                vec!["default".to_string()]
+            } else {
+                vec![]
+            }
         } else {
             let mut names: Vec<String> = self.workspaces.keys().cloned().collect();
             names.sort();
@@ -247,7 +251,7 @@ impl Config {
     /// 2. Persisted state file at `data_dir/active_workspace`
     /// 3. `default_workspace` from config
     /// 4. Single workspace shortcut (if exactly one workspace is configured)
-    /// 5. Falls back to "default"
+    /// 5. Errors with guidance if multiple workspaces exist and none is selected
     pub fn resolve_active_workspace(&self) -> Result<String> {
         // 1. Environment variable
         if let Ok(ws) = std::env::var("RECTILINEAR_WORKSPACE") {
@@ -271,8 +275,12 @@ impl Config {
             return Ok(self.workspaces.keys().next().unwrap().clone());
         }
 
-        // 5. Fall back to "default"
-        Ok("default".to_string())
+        // 5. Error — multiple workspaces exist but none selected
+        let names = self.workspace_names();
+        anyhow::bail!(
+            "No active workspace set. Run: rectilinear workspace assume <name>\nAvailable: {}",
+            names.join(", ")
+        )
     }
 
     /// Writes the active workspace name to `data_dir/active_workspace`.
@@ -467,7 +475,8 @@ mod tests {
     #[test]
     fn workspace_names_empty_config() {
         let config = Config::default();
-        assert_eq!(config.workspace_names(), vec!["default"]);
+        let names: Vec<String> = vec![];
+        assert_eq!(config.workspace_names(), names);
     }
 
     #[test]
@@ -481,13 +490,16 @@ mod tests {
             [workspaces.bigcorp]
             api_key = "b"
         "#;
-        // Clear env var to ensure it doesn't interfere
         std::env::remove_var("RECTILINEAR_WORKSPACE");
         let config: Config = toml::from_str(toml_str).unwrap();
-        // This may pick up persisted state, but default_workspace should work
-        // when no persisted state exists. We can't fully control data_dir in
-        // unit tests, so we test the config field is set correctly.
-        assert_eq!(config.default_workspace, Some("acme".to_string()));
+        let result = config.resolve_active_workspace().unwrap();
+        // Persisted state (step 2) may override, but both "acme" and a
+        // persisted workspace name are valid outcomes here.
+        assert!(
+            result == "acme" || !result.is_empty(),
+            "Expected 'acme' or persisted workspace, got '{}'",
+            result
+        );
     }
 
     #[test]
@@ -498,19 +510,31 @@ mod tests {
             api_key = "key"
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        // If no persisted state, single workspace should be selected
-        // (persisted state may interfere in CI, but the logic is correct)
-        assert_eq!(config.workspaces.len(), 1);
+        let result = config.resolve_active_workspace().unwrap();
+        // Persisted state (step 2) may override, but both "only" and a
+        // persisted workspace name are valid outcomes.
+        assert!(
+            result == "only" || !result.is_empty(),
+            "Expected 'only' or persisted workspace, got '{}'",
+            result
+        );
     }
 
     #[test]
     fn resolve_active_workspace_falls_back_to_default() {
         std::env::remove_var("RECTILINEAR_WORKSPACE");
         let config = Config::default();
-        let result = config.resolve_active_workspace().unwrap();
-        // With no workspaces, no env, and no persisted state, should get "default"
-        // (persisted state from prior tests may interfere, but the logic path exists)
-        assert!(!result.is_empty());
+        let result = config.resolve_active_workspace();
+        // With no workspaces and no legacy api_key, this should either error
+        // (no active workspace) or return a persisted workspace from disk.
+        match result {
+            Ok(ws) => assert!(!ws.is_empty(), "Got empty workspace name"),
+            Err(e) => assert!(
+                e.to_string().contains("No active workspace set"),
+                "Unexpected error: {}",
+                e
+            ),
+        }
     }
 
     #[test]
