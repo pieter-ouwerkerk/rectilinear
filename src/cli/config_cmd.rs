@@ -96,30 +96,65 @@ pub fn handle_show() -> Result<()> {
     println!("{} {}", "Database:".bold(), Config::db_path()?.display());
     println!();
 
-    println!("{}", "[linear]".bold());
-    println!(
-        "  api-key: {}",
-        config
-            .linear
-            .api_key
-            .as_ref()
-            .map(|k| if k.len() > 8 {
-                format!("{}...{}", &k[..4], &k[k.len() - 4..])
+    // Display workspaces if any are configured
+    let workspace_names = config.workspace_names();
+    if !workspace_names.is_empty() {
+        let active = config.resolve_active_workspace().ok();
+        println!("{}", "[workspaces]".bold());
+        for name in &workspace_names {
+            let ws = config.workspace_config(name).ok();
+            let is_active = active.as_deref() == Some(name.as_str());
+            let marker = if is_active {
+                " *".green().bold().to_string()
             } else {
-                "****".to_string()
-            })
-            .unwrap_or_else(|| "(not set)".dimmed().to_string())
-    );
-    println!(
-        "  default-team: {}",
-        config
-            .linear
-            .default_team
-            .as_deref()
-            .unwrap_or(&"(not set)".dimmed().to_string())
-    );
+                String::new()
+            };
+            println!("  {}{}", name.bold(), marker);
+            if let Some(ws) = ws {
+                println!(
+                    "    api-key: {}",
+                    ws.api_key
+                        .as_ref()
+                        .map(|k| mask_key(k))
+                        .unwrap_or_else(|| "(not set)".dimmed().to_string())
+                );
+                println!(
+                    "    default-team: {}",
+                    ws.default_team
+                        .as_deref()
+                        .unwrap_or(&"(not set)".dimmed().to_string())
+                );
+            }
+        }
+        if let Some(ref dw) = config.default_workspace {
+            println!("  default-workspace: {}", dw);
+        }
+        println!();
+    }
 
-    println!();
+    // Show legacy [linear] section if it has values and no workspaces are configured
+    if config.workspaces.is_empty() {
+        println!("{}", "[linear]".bold());
+        println!(
+            "  api-key: {}",
+            config
+                .linear
+                .api_key
+                .as_ref()
+                .map(|k| mask_key(k))
+                .unwrap_or_else(|| "(not set)".dimmed().to_string())
+        );
+        println!(
+            "  default-team: {}",
+            config
+                .linear
+                .default_team
+                .as_deref()
+                .unwrap_or(&"(not set)".dimmed().to_string())
+        );
+        println!();
+    }
+
     println!("{}", "[anthropic]".bold());
     println!(
         "  api-key: {}",
@@ -127,11 +162,7 @@ pub fn handle_show() -> Result<()> {
             .anthropic
             .api_key
             .as_ref()
-            .map(|k| if k.len() > 8 {
-                format!("{}...{}", &k[..4], &k[k.len() - 4..])
-            } else {
-                "****".to_string()
-            })
+            .map(|k| mask_key(k))
             .unwrap_or_else(|| "(not set)".dimmed().to_string())
     );
 
@@ -147,11 +178,7 @@ pub fn handle_show() -> Result<()> {
             .embedding
             .gemini_api_key
             .as_ref()
-            .map(|k| if k.len() > 8 {
-                format!("{}...{}", &k[..4], &k[k.len() - 4..])
-            } else {
-                "****".to_string()
-            })
+            .map(|k| mask_key(k))
             .unwrap_or_else(|| "(not set)".dimmed().to_string())
     );
 
@@ -166,6 +193,160 @@ pub fn handle_show() -> Result<()> {
     println!();
     println!("{}", "[triage]".bold());
     println!("  mode: {}", config.triage.mode);
+
+    Ok(())
+}
+
+fn mask_key(k: &str) -> String {
+    if k.len() > 8 {
+        format!("{}...{}", &k[..4], &k[k.len() - 4..])
+    } else {
+        "****".to_string()
+    }
+}
+
+pub fn handle_add_workspace() -> Result<()> {
+    let mut config = Config::load()?;
+
+    println!("{}", "Add a new workspace".bold());
+    println!();
+
+    // 1. Prompt for workspace name
+    let name = loop {
+        let name = prompt_string("  Workspace name", None)?;
+        match name {
+            Some(n) if !n.is_empty() => {
+                if config.workspaces.contains_key(&n) {
+                    println!(
+                        "  {} Workspace '{}' already exists.",
+                        "Error:".red(),
+                        n
+                    );
+                    continue;
+                }
+                break n;
+            }
+            _ => {
+                println!("  {} Workspace name is required.", "Error:".red());
+                continue;
+            }
+        }
+    };
+
+    // 2. Prompt for API key
+    let api_key = loop {
+        let key = prompt_secret("  Linear API key", None)?;
+        match key {
+            Some(k) if !k.is_empty() => break k,
+            _ => {
+                println!("  {} API key is required.", "Error:".red());
+                continue;
+            }
+        }
+    };
+
+    // 3. Prompt for default team (optional)
+    let default_team = prompt_string("  Default team (optional)", None)?
+        .filter(|t| !t.is_empty());
+
+    // 4. Ask if should be default workspace
+    let set_default = prompt_string("  Set as default workspace? (y/N)", Some("N"))?
+        .map(|v| v.to_lowercase().starts_with('y'))
+        .unwrap_or(false);
+
+    // 5. If legacy [linear] exists and no workspaces yet, migrate it
+    if config.workspaces.is_empty() && config.linear.api_key.is_some() {
+        println!();
+        println!(
+            "  {} Migrating existing [linear] config to workspace 'default'.",
+            "Note:".cyan()
+        );
+        config.workspaces.insert(
+            "default".to_string(),
+            crate::config::WorkspaceConfig {
+                api_key: config.linear.api_key.clone(),
+                default_team: config.linear.default_team.clone(),
+            },
+        );
+    }
+
+    // 6. Save the new workspace
+    config.workspaces.insert(
+        name.clone(),
+        crate::config::WorkspaceConfig {
+            api_key: Some(api_key),
+            default_team,
+        },
+    );
+
+    if set_default {
+        config.default_workspace = Some(name.clone());
+    }
+
+    config.save()?;
+
+    println!();
+    println!(
+        "{} Workspace '{}' added.",
+        "Done!".green().bold(),
+        name
+    );
+    if set_default {
+        println!("  Set as default workspace.");
+    }
+    println!(
+        "  Run {} to sync issues.",
+        format!("rectilinear sync --workspace {}", name).cyan()
+    );
+
+    Ok(())
+}
+
+pub fn handle_remove_workspace(name: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    // 1. Validate workspace exists
+    if !config.workspaces.contains_key(name) {
+        anyhow::bail!("Workspace '{}' not found in config.", name);
+    }
+
+    // 2. Check if it's the active workspace
+    let is_active = config
+        .resolve_active_workspace()
+        .ok()
+        .as_deref()
+        == Some(name);
+
+    if is_active {
+        println!(
+            "  {} '{}' is the currently active workspace.",
+            "Warning:".yellow().bold(),
+            name
+        );
+        let confirm = prompt_string("  Remove it anyway? (y/N)", Some("N"))?
+            .map(|v| v.to_lowercase().starts_with('y'))
+            .unwrap_or(false);
+        if !confirm {
+            println!("  Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // 3. Remove workspace
+    config.workspaces.remove(name);
+
+    // 4. Clear default_workspace if it was the removed one
+    if config.default_workspace.as_deref() == Some(name) {
+        config.default_workspace = None;
+    }
+
+    config.save()?;
+
+    println!(
+        "{} Workspace '{}' removed.",
+        "Done!".green().bold(),
+        name
+    );
 
     Ok(())
 }

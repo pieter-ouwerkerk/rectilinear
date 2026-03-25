@@ -207,6 +207,13 @@ enum ConfigAction {
     },
     /// Show all config
     Show,
+    /// Add a new workspace
+    AddWorkspace,
+    /// Remove a workspace
+    RemoveWorkspace {
+        /// Workspace name to remove
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -275,6 +282,8 @@ async fn main() -> Result<()> {
             Some(ConfigAction::Set { key, value }) => cli::config_cmd::handle_set(&key, &value)?,
             Some(ConfigAction::Get { key }) => cli::config_cmd::handle_get(&key)?,
             Some(ConfigAction::Show) => cli::config_cmd::handle_show()?,
+            Some(ConfigAction::AddWorkspace) => cli::config_cmd::handle_add_workspace()?,
+            Some(ConfigAction::RemoveWorkspace { name }) => cli::config_cmd::handle_remove_workspace(&name)?,
             None => cli::config_cmd::handle_interactive()?,
         },
         Commands::Workspace { action } => match action {
