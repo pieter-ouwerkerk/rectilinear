@@ -42,7 +42,11 @@ pub async fn handle_mark_triaged(
             "url": issue.url,
             "status": "already_triaged",
             "current_priority": issue.priority,
-            "message": format!("{} was already prioritized — skipping", issue.identifier),
+            "current_priority_label": issue.priority_label(),
+            "message": format!(
+                "{} was already prioritized as {} — skipping",
+                issue.identifier, issue.priority_label()
+            ),
         });
         if json_output {
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -57,11 +61,41 @@ pub async fn handle_mark_triaged(
 
     // Modified since queued?
     if issue.content_hash != local_issue.content_hash {
+        let mut changes = Vec::new();
+        if issue.title != local_issue.title {
+            changes.push(format!(
+                "title changed: \"{}\" → \"{}\"",
+                local_issue.title, issue.title
+            ));
+        }
+        if issue.description != local_issue.description {
+            changes.push("description was updated".to_string());
+        }
+        if issue.state_name != local_issue.state_name {
+            changes.push(format!(
+                "state changed: {} → {}",
+                local_issue.state_name, issue.state_name
+            ));
+        }
+        if issue.assignee_name != local_issue.assignee_name {
+            changes.push(format!(
+                "assignee changed: {} → {}",
+                local_issue.assignee_name.as_deref().unwrap_or("unassigned"),
+                issue.assignee_name.as_deref().unwrap_or("unassigned")
+            ));
+        }
         let result = json!({
             "identifier": issue.identifier,
             "url": issue.url,
             "status": "modified_since_queued",
-            "message": format!("{} was modified since last sync — review before triaging", issue.identifier),
+            "changes": changes,
+            "current_title": issue.title,
+            "current_description": issue.description,
+            "current_state": issue.state_name,
+            "message": format!(
+                "{} was modified since the queue was fetched — review the latest version before triaging",
+                issue.identifier
+            ),
         });
         if json_output {
             println!("{}", serde_json::to_string_pretty(&result)?);
