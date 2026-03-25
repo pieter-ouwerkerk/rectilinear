@@ -381,6 +381,7 @@ impl LinearClient {
         &self,
         db: &Database,
         team_key: &str,
+        workspace_id: &str,
         full: bool,
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
@@ -388,7 +389,7 @@ impl LinearClient {
         let updated_after = if full {
             None
         } else {
-            db.get_sync_cursor("default", team_key)?
+            db.get_sync_cursor(workspace_id, team_key)?
         };
 
         let mut total = 0;
@@ -406,12 +407,13 @@ impl LinearClient {
                 .await?;
 
             let count = issues.len();
-            for (issue, relations) in &issues {
+            for (mut issue, relations) in issues {
+                issue.workspace_id = workspace_id.to_string();
                 if max_updated.is_none() || Some(&issue.updated_at) > max_updated.as_ref() {
                     max_updated = Some(issue.updated_at.clone());
                 }
-                db.upsert_issue(issue)?;
-                db.upsert_relations(&issue.id, relations)?;
+                db.upsert_issue(&issue)?;
+                db.upsert_relations(&issue.id, &relations)?;
             }
             total += count;
 
@@ -426,7 +428,7 @@ impl LinearClient {
         }
 
         if let Some(max) = max_updated {
-            db.set_sync_cursor("default", team_key, &max)?;
+            db.set_sync_cursor(workspace_id, team_key, &max)?;
         }
 
         Ok(total)

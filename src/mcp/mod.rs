@@ -744,7 +744,7 @@ IMPORTANT — Before calling this tool, you MUST:
         let full = args.full.unwrap_or(false);
 
         let count = client
-            .sync_team(&self.db, &args.team, full, false, None)
+            .sync_team(&self.db, &args.team, &workspace, full, false, None)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -830,7 +830,7 @@ IMPORTANT — Before calling this tool, you MUST:
         // Incremental sync to pick up changes made by other users
         if let Ok(client) = self.client_for_workspace(&workspace) {
             let _ = client
-                .sync_team(&self.db, &args.team, false, false, None)
+                .sync_team(&self.db, &args.team, &workspace, false, false, None)
                 .await;
         }
 

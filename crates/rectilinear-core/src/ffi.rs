@@ -528,7 +528,7 @@ impl RectilinearEngine {
             });
         };
         let result = client
-            .sync_team(&self.db, &team_key, full, false, Some(&progress))
+            .sync_team(&self.db, &team_key, "default", full, false, Some(&progress))
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),

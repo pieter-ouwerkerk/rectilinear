@@ -82,7 +82,7 @@ pub async fn handle_sync(
         pb.set_message(format!("{} issues synced", total));
     };
     let count = client
-        .sync_team(db, &team_key, do_full, include_archived, Some(&progress_cb))
+        .sync_team(db, &team_key, workspace, do_full, include_archived, Some(&progress_cb))
         .await?;
 
     pb.finish_with_message(format!(
