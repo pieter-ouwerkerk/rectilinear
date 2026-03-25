@@ -320,7 +320,7 @@ impl RectilinearEngine {
     ) -> Result<Vec<RtIssue>, RectilinearError> {
         let issues = self
             .db
-            .get_unprioritized_issues(team.as_deref(), include_completed)?;
+            .get_unprioritized_issues(team.as_deref(), include_completed, "default")?;
         Ok(issues.into_iter().map(RtIssue::from).collect())
     }
 
@@ -330,7 +330,7 @@ impl RectilinearEngine {
         query: String,
         limit: u32,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
-        let results = self.db.fts_search(&query, limit as usize)?;
+        let results = self.db.fts_search(&query, limit as usize, "default")?;
         Ok(results
             .into_iter()
             .map(|fts| RtSearchResult {
@@ -347,12 +347,12 @@ impl RectilinearEngine {
 
     /// Count issues in the local database.
     pub fn count_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_issues(team.as_deref())? as u64)
+        Ok(self.db.count_issues(team.as_deref(), "default")? as u64)
     }
 
     /// Count issues that have at least one embedding chunk.
     pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_embedded_issues(team.as_deref())? as u64)
+        Ok(self.db.count_embedded_issues(team.as_deref(), "default")? as u64)
     }
 
     /// Return the current sync progress, if a sync or embedding pass is active.
@@ -365,7 +365,7 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
-        let (total, desc, pri, labels, proj) = self.db.get_field_completeness(team.as_deref())?;
+        let (total, desc, pri, labels, proj) = self.db.get_field_completeness(team.as_deref(), "default")?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,
@@ -388,6 +388,7 @@ impl RectilinearEngine {
             filter.as_deref(),
             limit as usize,
             offset as usize,
+            "default",
         )?;
         Ok(issues.into_iter().map(RtIssueSummary::from).collect())
     }
@@ -396,7 +397,7 @@ impl RectilinearEngine {
     pub fn list_synced_teams(&self) -> Result<Vec<RtTeamSummary>, RectilinearError> {
         Ok(self
             .db
-            .list_synced_teams()?
+            .list_synced_teams("default")?
             .into_iter()
             .map(RtTeamSummary::from)
             .collect())
@@ -736,7 +737,7 @@ impl RectilinearEngine {
         let model_name = embedder.backend_name().to_string();
         let issues = self
             .db
-            .get_issues_needing_embedding(team.as_deref(), false)?;
+            .get_issues_needing_embedding(team.as_deref(), false, "default")?;
 
         let to_process = if limit > 0 {
             &issues[..std::cmp::min(issues.len(), limit as usize)]

@@ -388,7 +388,7 @@ impl LinearClient {
         let updated_after = if full {
             None
         } else {
-            db.get_sync_cursor(team_key)?
+            db.get_sync_cursor("default", team_key)?
         };
 
         let mut total = 0;
@@ -426,7 +426,7 @@ impl LinearClient {
         }
 
         if let Some(max) = max_updated {
-            db.set_sync_cursor(team_key, &max)?;
+            db.set_sync_cursor("default", team_key, &max)?;
         }
 
         Ok(total)
@@ -670,6 +670,7 @@ impl LinearClient {
             content_hash,
             synced_at: None,
             branch_name: i.branch_name,
+            workspace_id: "default".to_string(),
         };
 
         (issue, relations)

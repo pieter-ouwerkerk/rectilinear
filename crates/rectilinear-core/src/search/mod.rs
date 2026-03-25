@@ -99,7 +99,7 @@ pub async fn search(
 fn fts_search(db: &Database, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     // Escape FTS5 special characters and build query
     let fts_query = build_fts_query(query);
-    let fts_results = db.fts_search(&fts_query, limit)?;
+    let fts_results = db.fts_search(&fts_query, limit, "default")?;
 
     Ok(fts_results
         .into_iter()
@@ -128,9 +128,9 @@ async fn vector_search(
     let query_embedding = embedder.embed_single(query).await?;
 
     let chunks = if let Some(team) = team_key {
-        db.get_chunks_for_team(team)?
+        db.get_chunks_for_team(team, "default")?
     } else {
-        db.get_all_chunks()?
+        db.get_all_chunks("default")?
     };
 
     // Compute similarity for each chunk, take max per issue

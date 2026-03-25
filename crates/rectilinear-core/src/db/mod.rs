@@ -49,24 +49,89 @@ impl Database {
         f(&conn)
     }
 
+    // --- Workspace CRUD ---
+
+    pub fn upsert_workspace(
+        &self,
+        id: &str,
+        linear_org_id: Option<&str>,
+        display_name: Option<&str>,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workspaces (id, linear_org_id, display_name)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET
+                   linear_org_id=excluded.linear_org_id,
+                   display_name=excluded.display_name",
+                rusqlite::params![id, linear_org_id, display_name],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_workspace(&self, id: &str) -> Result<Option<WorkspaceRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, linear_org_id, display_name, created_at FROM workspaces WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(WorkspaceRow {
+                    id: row.get(0)?,
+                    linear_org_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    created_at: row.get(3)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<WorkspaceRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, linear_org_id, display_name, created_at FROM workspaces ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(WorkspaceRow {
+                    id: row.get(0)?,
+                    linear_org_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_workspace(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![id])?;
+            Ok(())
+        })
+    }
+
     // --- Issue CRUD ---
 
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16)
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
                    labels_json=excluded.labels_json, updated_at=excluded.updated_at,
-                   content_hash=excluded.content_hash, url=excluded.url, branch_name=excluded.branch_name, synced_at=datetime('now')",
+                   content_hash=excluded.content_hash, url=excluded.url, branch_name=excluded.branch_name,
+                   workspace_id=excluded.workspace_id, synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
                     issue.state_name, issue.state_type, issue.priority, issue.assignee_name,
                     issue.project_name, issue.labels_json, issue.created_at, issue.updated_at,
-                    issue.content_hash, issue.url, issue.branch_name,
+                    issue.content_hash, issue.url, issue.branch_name, issue.workspace_id,
                 ],
             )?;
             Ok(())
@@ -76,7 +141,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -92,6 +157,7 @@ impl Database {
         &self,
         team_key: Option<&str>,
         include_completed: bool,
+        workspace_id: &str,
     ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let state_filter = if include_completed {
@@ -102,20 +168,20 @@ impl Database {
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
                 (
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
-                         FROM issues WHERE priority = 0{} AND team_key = ?1
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                         FROM issues WHERE priority = 0{} AND team_key = ?1 AND workspace_id = ?2
                          ORDER BY created_at DESC", state_filter
                     ),
-                    vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                    vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>, Box::new(workspace_id.to_string())],
                 )
             } else {
                 (
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
-                         FROM issues WHERE priority = 0{}
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                         FROM issues WHERE priority = 0{} AND workspace_id = ?1
                          ORDER BY created_at DESC", state_filter
                     ),
-                    vec![],
+                    vec![Box::new(workspace_id.to_string()) as Box<dyn rusqlite::types::ToSql>],
                 )
             };
             let mut stmt = conn.prepare(&sql)?;
@@ -142,7 +208,7 @@ impl Database {
             let sql = format!(
                 "SELECT id, identifier, team_key, title, description, state_name, state_type, \
                  priority, assignee_name, project_name, labels_json, created_at, updated_at, \
-                 content_hash, synced_at, url, branch_name \
+                 content_hash, synced_at, url, branch_name, workspace_id \
                  FROM issues WHERE team_key = ?1 AND state_type IN ({placeholders}) \
                  ORDER BY priority ASC, created_at DESC"
             );
@@ -219,16 +285,20 @@ impl Database {
         })
     }
 
-    pub fn count_issues(&self, team_key: Option<&str>) -> Result<usize> {
+    pub fn count_issues(&self, team_key: Option<&str>, workspace_id: &str) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM issues WHERE team_key = ?1",
-                    rusqlite::params![team],
+                    "SELECT COUNT(*) FROM issues WHERE team_key = ?1 AND workspace_id = ?2",
+                    rusqlite::params![team, workspace_id],
                     |row| row.get(0),
                 )?
             } else {
-                conn.query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))?
+                conn.query_row(
+                    "SELECT COUNT(*) FROM issues WHERE workspace_id = ?1",
+                    rusqlite::params![workspace_id],
+                    |row| row.get(0),
+                )?
             };
             Ok(count)
         })
@@ -238,6 +308,7 @@ impl Database {
     pub fn get_field_completeness(
         &self,
         team_key: Option<&str>,
+        workspace_id: &str,
     ) -> Result<(usize, usize, usize, usize, usize)> {
         self.with_conn(|conn| {
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
@@ -248,9 +319,9 @@ impl Database {
                                 SUM(CASE WHEN priority > 0 THEN 1 ELSE 0 END),
                                 SUM(CASE WHEN labels_json != '[]' THEN 1 ELSE 0 END),
                                 SUM(CASE WHEN project_name IS NOT NULL AND project_name != '' THEN 1 ELSE 0 END)
-                         FROM issues WHERE team_key = ?1"
+                         FROM issues WHERE team_key = ?1 AND workspace_id = ?2"
                             .to_string(),
-                        vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>],
+                        vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>, Box::new(workspace_id.to_string())],
                     )
                 } else {
                     (
@@ -259,9 +330,9 @@ impl Database {
                                 SUM(CASE WHEN priority > 0 THEN 1 ELSE 0 END),
                                 SUM(CASE WHEN labels_json != '[]' THEN 1 ELSE 0 END),
                                 SUM(CASE WHEN project_name IS NOT NULL AND project_name != '' THEN 1 ELSE 0 END)
-                         FROM issues"
+                         FROM issues WHERE workspace_id = ?1"
                             .to_string(),
-                        vec![],
+                        vec![Box::new(workspace_id.to_string()) as Box<dyn rusqlite::types::ToSql>],
                     )
                 };
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -288,11 +359,17 @@ impl Database {
         filter: Option<&str>,
         limit: usize,
         offset: usize,
+        workspace_id: &str,
     ) -> Result<Vec<IssueSummary>> {
         self.with_conn(|conn| {
             let mut conditions = Vec::new();
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut param_idx = 1;
+
+            // Always filter by workspace
+            conditions.push(format!("i.workspace_id = ?{param_idx}"));
+            params.push(Box::new(workspace_id.to_string()));
+            param_idx += 1;
 
             if let Some(team) = team_key {
                 conditions.push(format!("i.team_key = ?{param_idx}"));
@@ -503,31 +580,14 @@ impl Database {
         })
     }
 
-    pub fn get_all_chunks(&self) -> Result<Vec<Chunk>> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT c.issue_id, c.embedding, i.identifier
-                 FROM chunks c JOIN issues i ON c.issue_id = i.id",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(Chunk {
-                    issue_id: row.get(0)?,
-                    embedding: row.get(1)?,
-                    identifier: row.get(2)?,
-                })
-            })?;
-            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-        })
-    }
-
-    pub fn get_chunks_for_team(&self, team_key: &str) -> Result<Vec<Chunk>> {
+    pub fn get_all_chunks(&self, workspace_id: &str) -> Result<Vec<Chunk>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT c.issue_id, c.embedding, i.identifier
                  FROM chunks c JOIN issues i ON c.issue_id = i.id
-                 WHERE i.team_key = ?1",
+                 WHERE i.workspace_id = ?1",
             )?;
-            let rows = stmt.query_map(rusqlite::params![team_key], |row| {
+            let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
                 Ok(Chunk {
                     issue_id: row.get(0)?,
                     embedding: row.get(1)?,
@@ -538,16 +598,38 @@ impl Database {
         })
     }
 
-    pub fn count_embedded_issues(&self, team_key: Option<&str>) -> Result<usize> {
+    pub fn get_chunks_for_team(&self, team_key: &str, workspace_id: &str) -> Result<Vec<Chunk>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT c.issue_id, c.embedding, i.identifier
+                 FROM chunks c JOIN issues i ON c.issue_id = i.id
+                 WHERE i.team_key = ?1 AND i.workspace_id = ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![team_key, workspace_id], |row| {
+                Ok(Chunk {
+                    issue_id: row.get(0)?,
+                    embedding: row.get(1)?,
+                    identifier: row.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn count_embedded_issues(&self, team_key: Option<&str>, workspace_id: &str) -> Result<usize> {
         self.with_conn(|conn| {
             let count: usize = if let Some(team) = team_key {
                 conn.query_row(
-                    "SELECT COUNT(DISTINCT c.issue_id) FROM chunks c JOIN issues i ON c.issue_id = i.id WHERE i.team_key = ?1",
-                    rusqlite::params![team],
+                    "SELECT COUNT(DISTINCT c.issue_id) FROM chunks c JOIN issues i ON c.issue_id = i.id WHERE i.team_key = ?1 AND i.workspace_id = ?2",
+                    rusqlite::params![team, workspace_id],
                     |row| row.get(0),
                 )?
             } else {
-                conn.query_row("SELECT COUNT(DISTINCT issue_id) FROM chunks", [], |row| row.get(0))?
+                conn.query_row(
+                    "SELECT COUNT(DISTINCT c.issue_id) FROM chunks c JOIN issues i ON c.issue_id = i.id WHERE i.workspace_id = ?1",
+                    rusqlite::params![workspace_id],
+                    |row| row.get(0),
+                )?
             };
             Ok(count)
         })
@@ -557,17 +639,20 @@ impl Database {
         &self,
         team_key: Option<&str>,
         force: bool,
+        workspace_id: &str,
     ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let sql = if force {
                 if let Some(team) = team_key {
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
-                         FROM issues WHERE team_key = '{}'", team
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                         FROM issues WHERE team_key = '{}' AND workspace_id = '{}'", team, workspace_id
                     )
                 } else {
-                    "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name
-                     FROM issues".to_string()
+                    format!(
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                         FROM issues WHERE workspace_id = '{}'", workspace_id
+                    )
                 }
             } else {
                 let team_filter = if let Some(team) = team_key {
@@ -576,11 +661,11 @@ impl Database {
                     String::new()
                 };
                 format!(
-                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url, i.branch_name
+                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url, i.branch_name, i.workspace_id
                      FROM issues i
                      LEFT JOIN (SELECT DISTINCT issue_id FROM chunks) c ON i.id = c.issue_id
-                     WHERE c.issue_id IS NULL {}",
-                    team_filter
+                     WHERE c.issue_id IS NULL AND i.workspace_id = '{}' {}",
+                    workspace_id, team_filter
                 )
             };
             let mut stmt = conn.prepare(&sql)?;
@@ -613,11 +698,11 @@ impl Database {
 
     // --- Sync state ---
 
-    pub fn get_sync_cursor(&self, team_key: &str) -> Result<Option<String>> {
+    pub fn get_sync_cursor(&self, workspace_id: &str, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare("SELECT last_updated_at FROM sync_state WHERE team_key = ?1")?;
-            let mut rows = stmt.query(rusqlite::params![team_key])?;
+                conn.prepare("SELECT last_updated_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(Some(row.get(0)?))
             } else {
@@ -626,23 +711,23 @@ impl Database {
         })
     }
 
-    pub fn set_sync_cursor(&self, team_key: &str, last_updated_at: &str) -> Result<()> {
+    pub fn set_sync_cursor(&self, workspace_id: &str, team_key: &str, last_updated_at: &str) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO sync_state (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
-                 VALUES ('default', ?1, ?2, 1, datetime('now'))
+                 VALUES (?1, ?2, ?3, 1, datetime('now'))
                  ON CONFLICT(workspace_id, team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1, last_synced_at=datetime('now')",
-                rusqlite::params![team_key, last_updated_at],
+                rusqlite::params![workspace_id, team_key, last_updated_at],
             )?;
             Ok(())
         })
     }
 
-    pub fn is_full_sync_done(&self, team_key: &str) -> Result<bool> {
+    pub fn is_full_sync_done(&self, workspace_id: &str, team_key: &str) -> Result<bool> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare("SELECT full_sync_done FROM sync_state WHERE team_key = ?1")?;
-            let mut rows = stmt.query(rusqlite::params![team_key])?;
+                conn.prepare("SELECT full_sync_done FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 let done: bool = row.get(0)?;
                 Ok(done)
@@ -653,11 +738,11 @@ impl Database {
     }
 
     /// Get the wall-clock time of the last sync for a team.
-    pub fn get_last_synced_at(&self, team_key: &str) -> Result<Option<String>> {
+    pub fn get_last_synced_at(&self, workspace_id: &str, team_key: &str) -> Result<Option<String>> {
         self.with_conn(|conn| {
             let mut stmt =
-                conn.prepare("SELECT last_synced_at FROM sync_state WHERE team_key = ?1")?;
-            let mut rows = stmt.query(rusqlite::params![team_key])?;
+                conn.prepare("SELECT last_synced_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2")?;
+            let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
                 Ok(row.get(0)?)
             } else {
@@ -694,7 +779,7 @@ impl Database {
 
     /// List teams that have synced issues, with issue and embedding counts.
     /// Local-only query — no network required.
-    pub fn list_synced_teams(&self) -> Result<Vec<TeamSummary>> {
+    pub fn list_synced_teams(&self, workspace_id: &str) -> Result<Vec<TeamSummary>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT i.team_key,
@@ -703,11 +788,12 @@ impl Database {
                         s.last_synced_at
                  FROM issues i
                  LEFT JOIN chunks c ON i.id = c.issue_id
-                 LEFT JOIN sync_state s ON i.team_key = s.team_key
+                 LEFT JOIN sync_state s ON i.team_key = s.team_key AND s.workspace_id = ?1
+                 WHERE i.workspace_id = ?1
                  GROUP BY i.team_key
                  ORDER BY i.team_key",
             )?;
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
                 Ok(TeamSummary {
                     key: row.get(0)?,
                     issue_count: row.get(1)?,
@@ -719,17 +805,17 @@ impl Database {
         })
     }
 
-    pub fn fts_search(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>> {
+    pub fn fts_search(&self, query: &str, limit: usize, workspace_id: &str) -> Result<Vec<FtsResult>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, bm25(issues_fts) as rank
                  FROM issues_fts f
                  JOIN issues i ON f.rowid = i.rowid
-                 WHERE issues_fts MATCH ?1
+                 WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3
                  ORDER BY rank
                  LIMIT ?2"
             )?;
-            let rows = stmt.query_map(rusqlite::params![query, limit], |row| {
+            let rows = stmt.query_map(rusqlite::params![query, limit, workspace_id], |row| {
                 Ok(FtsResult {
                     issue_id: row.get(0)?,
                     identifier: row.get(1)?,
@@ -745,6 +831,10 @@ impl Database {
 }
 
 // --- Data types ---
+
+fn default_workspace_id() -> String {
+    "default".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
@@ -765,6 +855,8 @@ pub struct Issue {
     pub synced_at: Option<String>,
     pub url: String,
     pub branch_name: Option<String>,
+    #[serde(default = "default_workspace_id")]
+    pub workspace_id: String,
 }
 
 impl Issue {
@@ -787,6 +879,7 @@ impl Issue {
             synced_at: row.get(14)?,
             url: row.get(15)?,
             branch_name: row.get(16).unwrap_or(None),
+            workspace_id: row.get(17).unwrap_or_else(|_| "default".to_string()),
         })
     }
 
@@ -876,6 +969,14 @@ pub struct TeamSummary {
     pub last_synced_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRow {
+    pub id: String,
+    pub linear_org_id: Option<String>,
+    pub display_name: Option<String>,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_helpers::*;
@@ -883,7 +984,7 @@ mod tests {
     #[test]
     fn count_embedded_issues_empty_db() {
         let (db, _dir) = test_db();
-        assert_eq!(db.count_embedded_issues(None).unwrap(), 0);
+        assert_eq!(db.count_embedded_issues(None, "default").unwrap(), 0);
     }
 
     #[test]
@@ -904,17 +1005,17 @@ mod tests {
             .unwrap();
 
         // Global count
-        assert_eq!(db.count_embedded_issues(None).unwrap(), 2);
+        assert_eq!(db.count_embedded_issues(None, "default").unwrap(), 2);
         // Team filter
-        assert_eq!(db.count_embedded_issues(Some("TST")).unwrap(), 1);
-        assert_eq!(db.count_embedded_issues(Some("OTH")).unwrap(), 1);
-        assert_eq!(db.count_embedded_issues(Some("NONE")).unwrap(), 0);
+        assert_eq!(db.count_embedded_issues(Some("TST"), "default").unwrap(), 1);
+        assert_eq!(db.count_embedded_issues(Some("OTH"), "default").unwrap(), 1);
+        assert_eq!(db.count_embedded_issues(Some("NONE"), "default").unwrap(), 0);
     }
 
     #[test]
     fn get_field_completeness_empty_db() {
         let (db, _dir) = test_db();
-        let (total, desc, pri, labels, proj) = db.get_field_completeness(None).unwrap();
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(None, "default").unwrap();
         assert_eq!(total, 0);
         assert_eq!(desc, 0);
         assert_eq!(pri, 0);
@@ -951,7 +1052,7 @@ mod tests {
         db.upsert_issue(&other).unwrap();
 
         // Global
-        let (total, desc, pri, labels, proj) = db.get_field_completeness(None).unwrap();
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(None, "default").unwrap();
         assert_eq!(total, 3);
         assert_eq!(desc, 2); // full + other
         assert_eq!(pri, 1); // full only
@@ -959,7 +1060,7 @@ mod tests {
         assert_eq!(proj, 1); // full only
 
         // Team filter
-        let (total, desc, pri, labels, proj) = db.get_field_completeness(Some("TST")).unwrap();
+        let (total, desc, pri, labels, proj) = db.get_field_completeness(Some("TST"), "default").unwrap();
         assert_eq!(total, 2);
         assert_eq!(desc, 1);
         assert_eq!(pri, 1);
@@ -981,31 +1082,31 @@ mod tests {
         db.upsert_issue(&other).unwrap();
 
         // All issues, first page
-        let page1 = db.list_all_issues(None, None, 3, 0).unwrap();
+        let page1 = db.list_all_issues(None, None, 3, 0, "default").unwrap();
         assert_eq!(page1.len(), 3);
         // Ordered by updated_at DESC — OTH-1 is newest
         assert_eq!(page1[0].identifier, "OTH-1");
 
         // Second page
-        let page2 = db.list_all_issues(None, None, 3, 3).unwrap();
+        let page2 = db.list_all_issues(None, None, 3, 3, "default").unwrap();
         assert_eq!(page2.len(), 3);
 
         // Third page (empty)
-        let page3 = db.list_all_issues(None, None, 3, 6).unwrap();
+        let page3 = db.list_all_issues(None, None, 3, 6, "default").unwrap();
         assert_eq!(page3.len(), 0);
 
         // Team filter
-        let tst = db.list_all_issues(Some("TST"), None, 10, 0).unwrap();
+        let tst = db.list_all_issues(Some("TST"), None, 10, 0, "default").unwrap();
         assert_eq!(tst.len(), 5);
 
         // Text filter
-        let filtered = db.list_all_issues(None, Some("TST-3"), 10, 0).unwrap();
+        let filtered = db.list_all_issues(None, Some("TST-3"), 10, 0, "default").unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].identifier, "TST-3");
 
         // Title filter
         let title_match = db
-            .list_all_issues(None, Some("Test issue OTH"), 10, 0)
+            .list_all_issues(None, Some("Test issue OTH"), 10, 0, "default")
             .unwrap();
         assert_eq!(title_match.len(), 1);
     }
@@ -1023,7 +1124,7 @@ mod tests {
         db.upsert_chunks(&issue1.id, &[(0, "chunk".into(), fake_embedding(768))])
             .unwrap();
 
-        let issues = db.list_all_issues(None, None, 10, 0).unwrap();
+        let issues = db.list_all_issues(None, None, 10, 0, "default").unwrap();
         let by_id: std::collections::HashMap<_, _> =
             issues.iter().map(|i| (i.identifier.as_str(), i)).collect();
 
@@ -1034,7 +1135,7 @@ mod tests {
     #[test]
     fn list_synced_teams_empty_db() {
         let (db, _dir) = test_db();
-        let teams = db.list_synced_teams().unwrap();
+        let teams = db.list_synced_teams("default").unwrap();
         assert!(teams.is_empty());
     }
 
@@ -1055,7 +1156,7 @@ mod tests {
         let other = make_issue("OTH-1", "OTH");
         db.upsert_issue(&other).unwrap();
 
-        let teams = db.list_synced_teams().unwrap();
+        let teams = db.list_synced_teams("default").unwrap();
         assert_eq!(teams.len(), 2);
 
         // Sorted by team_key
@@ -1076,13 +1177,13 @@ mod tests {
         db.upsert_issue(&issue).unwrap();
 
         // Before any sync, last_synced_at should be None
-        let teams = db.list_synced_teams().unwrap();
+        let teams = db.list_synced_teams("default").unwrap();
         assert_eq!(teams.len(), 1);
         assert!(teams[0].last_synced_at.is_none());
 
         // After setting sync cursor, last_synced_at should be set
-        db.set_sync_cursor("TST", "2026-01-01T00:00:00Z").unwrap();
-        let teams = db.list_synced_teams().unwrap();
+        db.set_sync_cursor("default", "TST", "2026-01-01T00:00:00Z").unwrap();
+        let teams = db.list_synced_teams("default").unwrap();
         assert!(teams[0].last_synced_at.is_some());
     }
 
@@ -1103,7 +1204,7 @@ mod tests {
         )
         .unwrap();
 
-        let teams = db.list_synced_teams().unwrap();
+        let teams = db.list_synced_teams("default").unwrap();
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].issue_count, 1); // not 3
         assert_eq!(teams[0].embedded_count, 1);
