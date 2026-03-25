@@ -293,7 +293,7 @@ pub fn handle_add_workspace() -> Result<()> {
     Ok(())
 }
 
-pub fn handle_remove_workspace(name: &str) -> Result<()> {
+pub fn handle_remove_workspace(name: &str, db: &crate::db::Database) -> Result<()> {
     let mut config = Config::load()?;
 
     // 1. Validate workspace exists
@@ -310,19 +310,29 @@ pub fn handle_remove_workspace(name: &str) -> Result<()> {
             "Warning:".yellow().bold(),
             name
         );
-        let confirm = prompt_string("  Remove it anyway? (y/N)", Some("N"))?
-            .map(|v| v.to_lowercase().starts_with('y'))
-            .unwrap_or(false);
-        if !confirm {
-            println!("  Cancelled.");
-            return Ok(());
-        }
     }
 
-    // 3. Remove workspace
+    // 3. Show what will be deleted and confirm
+    let issue_count = db.count_issues(None::<&str>, name).unwrap_or(0);
+    println!(
+        "  This will remove {} synced issues and all associated data.",
+        issue_count.to_string().bold()
+    );
+    let confirm = prompt_string("  Are you sure? (y/N)", Some("N"))?
+        .map(|v| v.to_lowercase().starts_with('y'))
+        .unwrap_or(false);
+    if !confirm {
+        println!("  Cancelled.");
+        return Ok(());
+    }
+
+    // 4. Purge database data
+    let deleted = db.delete_workspace(name)?;
+    println!("  Deleted {} issues from database.", deleted);
+
+    // 5. Remove from config
     config.workspaces.remove(name);
 
-    // 4. Clear default_workspace if it was the removed one
     if config.default_workspace.as_deref() == Some(name) {
         config.default_workspace = None;
     }

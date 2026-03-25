@@ -284,7 +284,8 @@ async fn main() -> Result<()> {
             Some(ConfigAction::Show) => cli::config_cmd::handle_show()?,
             Some(ConfigAction::AddWorkspace) => cli::config_cmd::handle_add_workspace()?,
             Some(ConfigAction::RemoveWorkspace { name }) => {
-                cli::config_cmd::handle_remove_workspace(&name)?
+                let db = db::Database::open(&config::Config::db_path()?)?;
+                cli::config_cmd::handle_remove_workspace(&name, &db)?
             }
             None => cli::config_cmd::handle_interactive()?,
         },

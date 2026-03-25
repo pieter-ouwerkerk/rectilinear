@@ -106,13 +106,32 @@ impl Database {
         })
     }
 
-    pub fn delete_workspace(&self, id: &str) -> Result<()> {
+    /// Delete a workspace and all its associated data (issues, chunks, comments, sync state).
+    pub fn delete_workspace(&self, id: &str) -> Result<usize> {
         self.with_conn(|conn| {
+            // Chunks and issue_relations cascade from issues via ON DELETE CASCADE
+            let issue_count: usize = conn.query_row(
+                "SELECT COUNT(*) FROM issues WHERE workspace_id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "DELETE FROM issues WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM comments WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM sync_state WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
             conn.execute(
                 "DELETE FROM workspaces WHERE id = ?1",
                 rusqlite::params![id],
             )?;
-            Ok(())
+            Ok(issue_count)
         })
     }
 
