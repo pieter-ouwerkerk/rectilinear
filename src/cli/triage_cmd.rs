@@ -281,19 +281,20 @@ pub async fn handle_triage(
     limit: Option<usize>,
     no_context: bool,
     include_completed: bool,
+    workspace: &str,
 ) -> Result<()> {
     let llm = LlmClient::new(config)?;
-    let linear = LinearClient::new(config)?;
+    let api_key = config.workspace_api_key(workspace)?;
+    let linear = LinearClient::with_api_key(&api_key);
 
-    let team_key = team
-        .or(config.linear.default_team.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!("No team specified. Use --team or set default-team in config")
-        })?;
+    let default_team = config.workspace_default_team(workspace)?;
+    let team_key = team.or(default_team.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!("No team specified. Use --team or set default-team in config")
+    })?;
 
-    let issues = db.get_unprioritized_issues(Some(team_key), include_completed)?;
+    let issues = db.get_unprioritized_issues(Some(team_key), include_completed, workspace)?;
     if issues.is_empty() {
-        let total = db.count_issues(Some(team_key))?;
+        let total = db.count_issues(Some(team_key), workspace)?;
         if total == 0 {
             eprintln!(
                 "No issues found for team \"{}\". Have you run `rectilinear sync --team {}`?",
@@ -357,7 +358,7 @@ pub async fn handle_triage(
     // Start first issue
     spawn_questions(&app, &llm, &tx);
     if !no_context {
-        spawn_similar(&app, db, &embedder, config, &tx);
+        spawn_similar(&app, db, &embedder, config, &tx, workspace);
     }
 
     loop {
@@ -368,6 +369,7 @@ pub async fn handle_triage(
                 AppEvent::Key(key) => {
                     handle_key(
                         &mut app, key, &llm, &linear, db, config, &embedder, no_context, &tx,
+                        workspace,
                     )
                     .await;
                 }
@@ -401,7 +403,7 @@ pub async fn handle_triage(
                     if !app.should_quit {
                         spawn_questions(&app, &llm, &tx);
                         if !no_context {
-                            spawn_similar(&app, db, &embedder, config, &tx);
+                            spawn_similar(&app, db, &embedder, config, &tx, workspace);
                         }
                     }
                 }
@@ -439,6 +441,7 @@ async fn handle_key(
     embedder: &Option<Arc<Embedder>>,
     no_context: bool,
     tx: &mpsc::UnboundedSender<AppEvent>,
+    workspace: &str,
 ) {
     // Global: Ctrl+C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -501,7 +504,7 @@ async fn handle_key(
                     if !app.should_quit {
                         spawn_questions(app, llm, tx);
                         if !no_context {
-                            spawn_similar(app, db, embedder, config, tx);
+                            spawn_similar(app, db, embedder, config, tx, workspace);
                         }
                     }
                 }
@@ -522,7 +525,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -556,7 +559,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -566,7 +569,7 @@ async fn handle_key(
                 if !app.should_quit {
                     spawn_questions(app, llm, tx);
                     if !no_context {
-                        spawn_similar(app, db, embedder, config, tx);
+                        spawn_similar(app, db, embedder, config, tx, workspace);
                     }
                 }
             }
@@ -649,6 +652,7 @@ fn spawn_similar(
     embedder: &Option<Arc<Embedder>>,
     config: &Config,
     tx: &mpsc::UnboundedSender<AppEvent>,
+    workspace: &str,
 ) {
     let Some(embedder) = embedder.clone() else {
         tx.send(AppEvent::SimilarReady(Vec::new())).ok();
@@ -665,6 +669,7 @@ fn spawn_similar(
 
     let db = db.clone();
     let tx = tx.clone();
+    let workspace = workspace.to_string();
 
     tokio::spawn(async move {
         let results = search::search(
@@ -676,6 +681,7 @@ fn spawn_similar(
             5,
             Some(&embedder),
             rrf_k,
+            &workspace,
         )
         .await;
 

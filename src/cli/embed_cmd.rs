@@ -29,6 +29,7 @@ pub async fn handle_embed(
     config: &Config,
     team: Option<&str>,
     force: bool,
+    workspace: &str,
 ) -> Result<()> {
     let embedder = Embedder::new(config)?;
     let team_key = team.or(config.linear.default_team.as_deref());
@@ -53,7 +54,7 @@ pub async fn handle_embed(
         }
     }
 
-    let issues = db.get_issues_needing_embedding(team_key, force)?;
+    let issues = db.get_issues_needing_embedding(team_key, force, workspace)?;
 
     if issues.is_empty() {
         println!("{}", "All issues already have embeddings.".dimmed());
@@ -244,8 +245,8 @@ pub async fn handle_embed(
         total_chunks
     ));
 
-    let total_embedded = db.count_embedded_issues(team_key)?;
-    let total_issues = db.count_issues(team_key)?;
+    let total_embedded = db.count_embedded_issues(team_key, workspace)?;
+    let total_issues = db.count_issues(team_key, workspace)?;
     println!("Embedded: {}/{} issues", total_embedded, total_issues);
 
     Ok(())

@@ -200,7 +200,12 @@ pub struct RectilinearMcp {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ListWorkspacesArgs {}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SearchArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Search query text
     query: String,
     /// Filter by team key (e.g., "ENG")
@@ -215,6 +220,8 @@ struct SearchArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct FindDuplicatesArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Title of the potential new issue
     title: String,
     /// Description of the potential new issue
@@ -229,6 +236,8 @@ struct FindDuplicatesArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct GetIssueArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Issue ID or identifier (e.g., "ENG-123")
     id: String,
     /// Whether to include comments
@@ -237,6 +246,8 @@ struct GetIssueArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct CreateIssueArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Team key (e.g., "ENG")
     team: String,
     /// Issue title
@@ -251,6 +262,8 @@ struct CreateIssueArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct UpdateIssueArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Issue ID or identifier
     id: String,
     /// New title
@@ -269,6 +282,8 @@ struct UpdateIssueArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct AppendArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Issue ID or identifier
     id: String,
     /// Comment text to add
@@ -279,6 +294,8 @@ struct AppendArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SyncTeamArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Team key to sync
     team: String,
     /// Whether to do a full re-sync
@@ -287,6 +304,8 @@ struct SyncTeamArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct IssueContextArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Issue ID or identifier
     id: String,
     /// Number of similar issues to return
@@ -295,6 +314,8 @@ struct IssueContextArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct GetTriageQueueArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Team key (e.g., "CUT")
     team: String,
     /// Max issues to return (default 10)
@@ -309,6 +330,8 @@ struct GetTriageQueueArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct MarkTriagedArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Issue identifier (e.g., "CUT-42")
     id: String,
     /// New priority (1=Urgent, 2=High, 3=Medium, 4=Low)
@@ -329,6 +352,8 @@ struct MarkTriagedArgs {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct ManageRelationArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
     /// Action: "add" or "remove"
     action: String,
     /// Source issue identifier (e.g., "CUT-42")
@@ -346,10 +371,44 @@ impl RectilinearMcp {
     }
 
     #[tool(
+        name = "list_workspaces",
+        description = "List all configured workspaces. Use this to discover available workspace names before calling other tools."
+    )]
+    async fn list_workspaces(
+        &self,
+        #[tool(aggr)] _args: ListWorkspacesArgs,
+    ) -> Result<String, String> {
+        let names = self.config.workspace_names();
+        let active = self.config.resolve_active_workspace().ok();
+
+        let mut workspaces = Vec::new();
+        for name in &names {
+            let ws = self
+                .config
+                .workspace_config(name)
+                .map_err(|e| e.to_string())?;
+            let db_info = self.db.get_workspace(name).map_err(|e| e.to_string())?;
+            workspaces.push(serde_json::json!({
+                "name": name,
+                "active": active.as_deref() == Some(name.as_str()),
+                "default_team": ws.default_team,
+                "org_name": db_info.as_ref().and_then(|w| w.display_name.clone()),
+            }));
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "workspaces": workspaces,
+            "instruction": "Pass the workspace name to all other tools."
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
         name = "search_issues",
         description = "Search Linear issues using hybrid FTS + vector search. Supports filtering by team and state."
     )]
     async fn search_issues(&self, #[tool(aggr)] args: SearchArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let mode: SearchMode = args
             .mode
             .as_deref()
@@ -374,6 +433,7 @@ impl RectilinearMcp {
             limit,
             embedder.as_ref(),
             self.config.search.rrf_k,
+            &workspace,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -389,6 +449,7 @@ impl RectilinearMcp {
         &self,
         #[tool(aggr)] args: FindDuplicatesArgs,
     ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let embedder = Embedder::new(&self.config).map_err(|e| e.to_string())?;
 
         let search_text = if let Some(ref desc) = args.description {
@@ -410,6 +471,7 @@ impl RectilinearMcp {
             limit,
             &embedder,
             self.config.search.rrf_k,
+            &workspace,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -422,11 +484,12 @@ impl RectilinearMcp {
         description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments. Falls back to fetching from Linear API if not found locally."
     )]
     async fn get_issue(&self, #[tool(aggr)] args: GetIssueArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let issue = match self.db.get_issue(&args.id).map_err(|e| e.to_string())? {
             Some(issue) => issue,
             None => {
                 // Not found locally — try fetching from Linear API by identifier
-                let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+                let client = self.client_for_workspace(&workspace)?;
                 let result = client
                     .fetch_issue_by_identifier(&args.id)
                     .await
@@ -476,7 +539,8 @@ IMPORTANT — Before calling this tool, you MUST:
 3. **Write a clear title and description.** The title should be imperative and specific (e.g. 'Add rate limiting to /api/upload endpoint' not 'rate limiting'). The description should include: what the desired behavior is, why it matters, and any constraints or acceptance criteria surfaced during disambiguation."
     )]
     async fn create_issue(&self, #[tool(aggr)] args: CreateIssueArgs) -> Result<String, String> {
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
 
         let team_id = client
             .get_team_id(&args.team)
@@ -529,13 +593,14 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update. Prefer append_to_issue for adding context. Image references in the original description are automatically preserved when updating."
     )]
     async fn update_issue(&self, #[tool(aggr)] args: UpdateIssueArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let issue = self
             .db
             .get_issue(&args.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
 
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let client = self.client_for_workspace(&workspace)?;
 
         let state_id = if let Some(ref state_name) = args.state {
             Some(
@@ -625,13 +690,14 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Add a comment to an issue or append text to its description."
     )]
     async fn append_to_issue(&self, #[tool(aggr)] args: AppendArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let issue = self
             .db
             .get_issue(&args.id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
 
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let client = self.client_for_workspace(&workspace)?;
         let mut actions: Vec<&str> = Vec::new();
 
         if let Some(ref comment_text) = args.comment {
@@ -675,17 +741,18 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync."
     )]
     async fn sync_team(&self, #[tool(aggr)] args: SyncTeamArgs) -> Result<String, String> {
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
         let full = args.full.unwrap_or(false);
 
         let count = client
-            .sync_team(&self.db, &args.team, full, false, None)
+            .sync_team(&self.db, &args.team, &workspace, full, false, None)
             .await
             .map_err(|e| e.to_string())?;
 
         let total = self
             .db
-            .count_issues(Some(&args.team))
+            .count_issues(Some(&args.team), &workspace)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
@@ -701,6 +768,7 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Get an issue along with its N most similar issues, useful for understanding context and related work."
     )]
     async fn issue_context(&self, #[tool(aggr)] args: IssueContextArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let issue = self
             .db
             .get_issue(&args.id)
@@ -724,6 +792,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 similar_count + 1,
                 &embedder,
                 self.config.search.rrf_k,
+                &workspace,
             )
             .await
             .unwrap_or_default()
@@ -760,16 +829,21 @@ IMPORTANT — Before calling this tool, you MUST:
         &self,
         #[tool(aggr)] args: GetTriageQueueArgs,
     ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         // Incremental sync to pick up changes made by other users
-        if let Ok(client) = LinearClient::new(&self.config) {
+        if let Ok(client) = self.client_for_workspace(&workspace) {
             let _ = client
-                .sync_team(&self.db, &args.team, false, false, None)
+                .sync_team(&self.db, &args.team, &workspace, false, false, None)
                 .await;
         }
 
         let all_issues = self
             .db
-            .get_unprioritized_issues(Some(&args.team), args.include_completed.unwrap_or(false))
+            .get_unprioritized_issues(
+                Some(&args.team),
+                args.include_completed.unwrap_or(false),
+                &workspace,
+            )
             .map_err(|e| e.to_string())?;
 
         let exclude_set: std::collections::HashSet<&str> = args
@@ -825,6 +899,7 @@ IMPORTANT — Before calling this tool, you MUST:
                     4,
                     embedder,
                     self.config.search.rrf_k,
+                    &workspace,
                 )
                 .await
                 .unwrap_or_default()
@@ -877,6 +952,7 @@ IMPORTANT — Before calling this tool, you MUST:
         description = "Mark an issue as triaged by setting priority and optionally updating title, description, and adding a triage comment. Combines update + comment into one call. Prefer using the comment field over description for adding context — description updates risk losing formatting. Image references in the original description are automatically preserved."
     )]
     async fn mark_triaged(&self, #[tool(aggr)] args: MarkTriagedArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         if args.priority < 1 || args.priority > 4 {
             return Err("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)".into());
         }
@@ -888,7 +964,7 @@ IMPORTANT — Before calling this tool, you MUST:
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.id))?;
 
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let client = self.client_for_workspace(&workspace)?;
 
         // Re-fetch from Linear to get the latest version
         let (issue, issue_relations) = client
@@ -1069,6 +1145,7 @@ IMPORTANT — Before calling this tool, you MUST:
         &self,
         #[tool(aggr)] args: ManageRelationArgs,
     ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
         let valid_types = ["blocks", "blocked_by", "related", "duplicate"];
         if !valid_types.contains(&args.relation_type.as_str()) {
             return Err(format!(
@@ -1089,7 +1166,7 @@ IMPORTANT — Before calling this tool, you MUST:
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.related_issue))?;
 
-        let client = LinearClient::new(&self.config).map_err(|e| e.to_string())?;
+        let client = self.client_for_workspace(&workspace)?;
 
         match args.action.as_str() {
             "add" => {
@@ -1165,6 +1242,33 @@ IMPORTANT — Before calling this tool, you MUST:
 }
 
 impl RectilinearMcp {
+    fn require_workspace(&self, workspace: &Option<String>) -> Result<String, String> {
+        match workspace {
+            Some(ws) if !ws.is_empty() => {
+                let names = self.config.workspace_names();
+                if !names.contains(ws) {
+                    return Err(format!(
+                        "Workspace '{}' not found. Use list_workspaces to see available workspaces. Available: {}",
+                        ws, names.join(", ")
+                    ));
+                }
+                Ok(ws.clone())
+            }
+            _ => Err(
+                "workspace is required. Use list_workspaces to see available workspaces."
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn client_for_workspace(&self, workspace: &str) -> Result<LinearClient, String> {
+        let api_key = self
+            .config
+            .workspace_api_key(workspace)
+            .map_err(|e| e.to_string())?;
+        Ok(LinearClient::with_api_key(&api_key))
+    }
+
     /// Re-chunk and re-embed a single issue. Best-effort — failures are silently ignored.
     async fn reembed_issue(&self, issue: &crate::db::Issue) {
         let Ok(embedder) = Embedder::new(&self.config) else {
@@ -1204,7 +1308,9 @@ impl ServerHandler for RectilinearMcp {
                 version: env!("CARGO_PKG_VERSION").into(),
             },
             instructions: Some(
-                "Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
+                "## Workspace Selection\n\
+                 All tools (except list_workspaces) require a `workspace` parameter. Call list_workspaces first to discover available workspaces.\n\n\
+                 Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
                  ## Triage Workflow\n\
                  IMPORTANT: Present exactly ONE issue at a time. Wait for the user's response and call mark_triaged before presenting the next issue. \
                  Never batch multiple issues into a single message.\n\n\

@@ -16,7 +16,7 @@ local-embeddings = ["rectilinear-core/local-embeddings"]
 
 [dependencies]
 # Core library
-rectilinear-core = { version = "0.1.7", path = "crates/rectilinear-core" }
+rectilinear-core = { version = "0.2.0", path = "crates/rectilinear-core" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

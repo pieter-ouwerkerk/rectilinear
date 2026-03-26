@@ -318,9 +318,9 @@ impl RectilinearEngine {
         team: Option<String>,
         include_completed: bool,
     ) -> Result<Vec<RtIssue>, RectilinearError> {
-        let issues = self
-            .db
-            .get_unprioritized_issues(team.as_deref(), include_completed)?;
+        let issues =
+            self.db
+                .get_unprioritized_issues(team.as_deref(), include_completed, "default")?;
         Ok(issues.into_iter().map(RtIssue::from).collect())
     }
 
@@ -330,7 +330,7 @@ impl RectilinearEngine {
         query: String,
         limit: u32,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
-        let results = self.db.fts_search(&query, limit as usize)?;
+        let results = self.db.fts_search(&query, limit as usize, "default")?;
         Ok(results
             .into_iter()
             .map(|fts| RtSearchResult {
@@ -347,12 +347,12 @@ impl RectilinearEngine {
 
     /// Count issues in the local database.
     pub fn count_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_issues(team.as_deref())? as u64)
+        Ok(self.db.count_issues(team.as_deref(), "default")? as u64)
     }
 
     /// Count issues that have at least one embedding chunk.
     pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_embedded_issues(team.as_deref())? as u64)
+        Ok(self.db.count_embedded_issues(team.as_deref(), "default")? as u64)
     }
 
     /// Return the current sync progress, if a sync or embedding pass is active.
@@ -365,7 +365,8 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
-        let (total, desc, pri, labels, proj) = self.db.get_field_completeness(team.as_deref())?;
+        let (total, desc, pri, labels, proj) =
+            self.db.get_field_completeness(team.as_deref(), "default")?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,
@@ -388,6 +389,7 @@ impl RectilinearEngine {
             filter.as_deref(),
             limit as usize,
             offset as usize,
+            "default",
         )?;
         Ok(issues.into_iter().map(RtIssueSummary::from).collect())
     }
@@ -396,7 +398,7 @@ impl RectilinearEngine {
     pub fn list_synced_teams(&self) -> Result<Vec<RtTeamSummary>, RectilinearError> {
         Ok(self
             .db
-            .list_synced_teams()?
+            .list_synced_teams("default")?
             .into_iter()
             .map(RtTeamSummary::from)
             .collect())
@@ -418,7 +420,9 @@ impl RectilinearEngine {
         team: String,
         state_types: Vec<String>,
     ) -> Result<Vec<RtIssueEnriched>, RectilinearError> {
-        let issues = self.db.get_issues_by_state_types(&team, &state_types)?;
+        let issues = self
+            .db
+            .get_issues_by_state_types(&team, &state_types, "default")?;
         let issue_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
         let blockers = self.db.get_blockers_for_issues(&issue_ids)?;
 
@@ -524,7 +528,7 @@ impl RectilinearEngine {
             });
         };
         let result = client
-            .sync_team(&self.db, &team_key, full, false, Some(&progress))
+            .sync_team(&self.db, &team_key, "default", full, false, Some(&progress))
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
@@ -552,6 +556,7 @@ impl RectilinearEngine {
             limit as usize,
             embedder.as_ref(),
             config.search.rrf_k,
+            "default",
         )
         .await?;
 
@@ -583,6 +588,7 @@ impl RectilinearEngine {
             10,
             &embedder,
             config.search.rrf_k,
+            "default",
         )
         .await?;
 
@@ -620,18 +626,16 @@ impl RectilinearEngine {
             None
         };
 
-        let label_ids = if let Some(ref label_names) = labels {
-            Some(
-                client
-                    .get_label_ids(label_names)
-                    .await
-                    .map_err(|e| RectilinearError::Api {
+        let label_ids =
+            if let Some(ref label_names) = labels {
+                Some(client.get_label_ids(label_names).await.map_err(|e| {
+                    RectilinearError::Api {
                         message: e.to_string(),
-                    })?,
-            )
-        } else {
-            None
-        };
+                    }
+                })?)
+            } else {
+                None
+            };
 
         client
             .update_issue(
@@ -736,7 +740,7 @@ impl RectilinearEngine {
         let model_name = embedder.backend_name().to_string();
         let issues = self
             .db
-            .get_issues_needing_embedding(team.as_deref(), false)?;
+            .get_issues_needing_embedding(team.as_deref(), false, "default")?;
 
         let to_process = if limit > 0 {
             &issues[..std::cmp::min(issues.len(), limit as usize)]

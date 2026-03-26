@@ -32,6 +32,7 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
         synced_at: None,
         url: format!("https://linear.app/test/issue/{identifier}"),
         branch_name: None,
+        workspace_id: "default".to_string(),
     }
 }
 

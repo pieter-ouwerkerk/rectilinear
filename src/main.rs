@@ -21,6 +21,10 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Override the active workspace
+    #[arg(long, global = true)]
+    workspace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -29,6 +33,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         action: Option<ConfigAction>,
+    },
+    /// Manage workspaces
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
     /// Sync issues from Linear
     Sync {
@@ -198,6 +207,39 @@ enum ConfigAction {
     },
     /// Show all config
     Show,
+    /// Add a new workspace
+    AddWorkspace,
+    /// Remove a workspace
+    RemoveWorkspace {
+        /// Workspace name to remove
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    /// Set the active workspace
+    Assume {
+        /// Workspace name
+        name: String,
+    },
+    /// List configured workspaces
+    List,
+    /// Show the current active workspace
+    Current,
+}
+
+/// Resolve which workspace to use: CLI flag > config resolution
+fn resolve_workspace(cli_flag: Option<&str>, config: &config::Config) -> Result<String> {
+    if let Some(name) = cli_flag {
+        // Validate workspace exists
+        if !config.workspaces.contains_key(name) {
+            anyhow::bail!("Workspace '{}' not found in config", name);
+        }
+        Ok(name.to_string())
+    } else {
+        config.resolve_active_workspace()
+    }
 }
 
 #[tokio::main]
@@ -240,15 +282,26 @@ async fn main() -> Result<()> {
             Some(ConfigAction::Set { key, value }) => cli::config_cmd::handle_set(&key, &value)?,
             Some(ConfigAction::Get { key }) => cli::config_cmd::handle_get(&key)?,
             Some(ConfigAction::Show) => cli::config_cmd::handle_show()?,
+            Some(ConfigAction::AddWorkspace) => cli::config_cmd::handle_add_workspace()?,
+            Some(ConfigAction::RemoveWorkspace { name }) => {
+                let db = db::Database::open(&config::Config::db_path()?)?;
+                cli::config_cmd::handle_remove_workspace(&name, &db)?
+            }
             None => cli::config_cmd::handle_interactive()?,
+        },
+        Commands::Workspace { action } => match action {
+            WorkspaceAction::Assume { name } => cli::workspace_cmd::handle_assume(&name, &config)?,
+            WorkspaceAction::List => cli::workspace_cmd::handle_list(&config)?,
+            WorkspaceAction::Current => cli::workspace_cmd::handle_current(&config)?,
         },
         Commands::Serve => {
             let db = db::Database::open(&config::Config::db_path()?)?;
             mcp::serve(db, config).await?;
         }
         _ => {
-            // All other commands need the database
+            // All other commands need the database and workspace
             let db = db::Database::open(&config::Config::db_path()?)?;
+            let workspace = resolve_workspace(cli.workspace.as_deref(), &config)?;
 
             match cli.command {
                 Commands::Sync {
@@ -264,6 +317,7 @@ async fn main() -> Result<()> {
                         full,
                         embed,
                         include_archived,
+                        &workspace,
                     )
                     .await?;
                 }
@@ -286,6 +340,7 @@ async fn main() -> Result<()> {
                         mode,
                         limit,
                         json,
+                        &workspace,
                     )
                     .await?;
                 }
@@ -305,11 +360,12 @@ async fn main() -> Result<()> {
                         threshold,
                         limit,
                         json,
+                        &workspace,
                     )
                     .await?;
                 }
                 Commands::Show { id, json, comments } => {
-                    cli::show_cmd::handle_show(&db, &id, json, comments)?;
+                    cli::show_cmd::handle_show(&db, &config, &id, json, comments, &workspace)?;
                 }
                 Commands::Create {
                     team,
@@ -326,6 +382,7 @@ async fn main() -> Result<()> {
                         description.as_deref(),
                         priority,
                         &labels,
+                        &workspace,
                     )
                     .await?;
                 }
@@ -340,11 +397,13 @@ async fn main() -> Result<()> {
                         &id,
                         comment.as_deref(),
                         description.as_deref(),
+                        &workspace,
                     )
                     .await?;
                 }
                 Commands::Embed { team, force } => {
-                    cli::embed_cmd::handle_embed(&db, &config, team.as_deref(), force).await?;
+                    cli::embed_cmd::handle_embed(&db, &config, team.as_deref(), force, &workspace)
+                        .await?;
                 }
                 Commands::Triage {
                     team,
@@ -359,6 +418,7 @@ async fn main() -> Result<()> {
                         limit,
                         no_context,
                         include_completed,
+                        &workspace,
                     )
                     .await?;
                 }
@@ -385,13 +445,16 @@ async fn main() -> Result<()> {
                         labels.as_deref(),
                         project.as_deref(),
                         json,
+                        &workspace,
                     )
                     .await?;
                 }
                 Commands::Teams => {
-                    cli::teams_cmd::handle_teams(&config).await?;
+                    cli::teams_cmd::handle_teams(&config, &workspace).await?;
                 }
-                Commands::Config { .. } | Commands::Serve => unreachable!(),
+                Commands::Config { .. } | Commands::Workspace { .. } | Commands::Serve => {
+                    unreachable!()
+                }
             }
         }
     }

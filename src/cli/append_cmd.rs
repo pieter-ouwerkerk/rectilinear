@@ -11,12 +11,14 @@ pub async fn handle_append(
     id: &str,
     comment: Option<&str>,
     description: Option<&str>,
+    workspace: &str,
 ) -> Result<()> {
     let issue = db
         .get_issue(id)?
         .ok_or_else(|| anyhow::anyhow!("Issue '{}' not found locally. Try syncing first.", id))?;
 
-    let client = LinearClient::new(config)?;
+    let api_key = config.workspace_api_key(workspace)?;
+    let client = LinearClient::with_api_key(&api_key);
 
     if let Some(comment_text) = comment {
         println!(

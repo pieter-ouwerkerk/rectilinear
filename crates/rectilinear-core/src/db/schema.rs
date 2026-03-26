@@ -46,8 +46,51 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (6)", [])?;
     }
 
+    if current_version < 7 {
+        conn.execute_batch(MIGRATION_7)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (7)", [])?;
+    }
+
     Ok(())
 }
+
+const MIGRATION_7: &str = "
+-- Workspace registry
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    linear_org_id TEXT,
+    display_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Seed the default workspace for existing data
+INSERT OR IGNORE INTO workspaces (id) VALUES ('default');
+
+-- Add workspace_id to issues
+ALTER TABLE issues ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
+
+-- Add workspace_id to sync_state (recreate since altering PK is not supported)
+CREATE TABLE sync_state_new (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    team_key TEXT NOT NULL,
+    last_updated_at TEXT NOT NULL,
+    full_sync_done INTEGER NOT NULL DEFAULT 0,
+    last_synced_at TEXT,
+    PRIMARY KEY (workspace_id, team_key)
+);
+INSERT INTO sync_state_new (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
+    SELECT 'default', team_key, last_updated_at, full_sync_done, last_synced_at FROM sync_state;
+DROP TABLE sync_state;
+ALTER TABLE sync_state_new RENAME TO sync_state;
+
+-- Add workspace_id to comments
+ALTER TABLE comments ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
+
+-- New indices
+CREATE INDEX IF NOT EXISTS idx_issues_workspace ON issues(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_issues_workspace_team ON issues(workspace_id, team_key);
+CREATE INDEX IF NOT EXISTS idx_comments_workspace ON comments(workspace_id);
+";
 
 // Add branch_name to issues, model_name to chunks
 const MIGRATION_6: &str = "
