@@ -259,7 +259,6 @@ impl From<RtSearchMode> for search::SearchMode {
 #[derive(uniffi::Object)]
 pub struct RectilinearEngine {
     db: Database,
-    linear_api_key: String,
     gemini_api_key: Option<String>,
     sync_progress: Mutex<Option<RtSyncProgress>>,
     /// Lazily initialized on first async call so it's created inside
@@ -280,11 +279,11 @@ impl RectilinearEngine {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl RectilinearEngine {
-    /// Create a new engine with an explicit database path and API keys.
+    /// Create a new engine with an explicit database path and optional Gemini API key.
+    /// Linear API keys are resolved per-workspace from config.
     #[uniffi::constructor]
     pub fn new(
         db_path: String,
-        linear_api_key: String,
         gemini_api_key: Option<String>,
     ) -> Result<Self, RectilinearError> {
         let path = Path::new(&db_path);
@@ -298,11 +297,45 @@ impl RectilinearEngine {
 
         Ok(Self {
             db,
-            linear_api_key,
             gemini_api_key,
             sync_progress: Mutex::new(None),
             http_client: OnceCell::new(),
         })
+    }
+
+    /// Resolve the Linear API key for a given workspace from config.
+    pub fn linear_api_key_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<String, RectilinearError> {
+        let config = Config::load().map_err(|e| RectilinearError::Config {
+            message: e.to_string(),
+        })?;
+        config
+            .workspace_api_key(workspace_id)
+            .map_err(|e| RectilinearError::Config {
+                message: e.to_string(),
+            })
+    }
+
+    /// List all configured workspace names.
+    pub fn list_workspaces(&self) -> Result<Vec<String>, RectilinearError> {
+        let config = Config::load().map_err(|e| RectilinearError::Config {
+            message: e.to_string(),
+        })?;
+        Ok(config.workspace_names())
+    }
+
+    /// Get the active workspace name.
+    pub fn get_active_workspace(&self) -> Result<String, RectilinearError> {
+        let config = Config::load().map_err(|e| RectilinearError::Config {
+            message: e.to_string(),
+        })?;
+        config
+            .resolve_active_workspace()
+            .map_err(|e| RectilinearError::Config {
+                message: e.to_string(),
+            })
     }
 
     // ── Sync methods (database reads, fast) ──────────────────────
@@ -317,10 +350,11 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
         include_completed: bool,
+        workspace_id: String,
     ) -> Result<Vec<RtIssue>, RectilinearError> {
         let issues =
             self.db
-                .get_unprioritized_issues(team.as_deref(), include_completed, "default")?;
+                .get_unprioritized_issues(team.as_deref(), include_completed, &workspace_id)?;
         Ok(issues.into_iter().map(RtIssue::from).collect())
     }
 
@@ -329,8 +363,9 @@ impl RectilinearEngine {
         &self,
         query: String,
         limit: u32,
+        workspace_id: String,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
-        let results = self.db.fts_search(&query, limit as usize, "default")?;
+        let results = self.db.fts_search(&query, limit as usize, &workspace_id)?;
         Ok(results
             .into_iter()
             .map(|fts| RtSearchResult {
@@ -346,13 +381,13 @@ impl RectilinearEngine {
     }
 
     /// Count issues in the local database.
-    pub fn count_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_issues(team.as_deref(), "default")? as u64)
+    pub fn count_issues(&self, team: Option<String>, workspace_id: String) -> Result<u64, RectilinearError> {
+        Ok(self.db.count_issues(team.as_deref(), &workspace_id)? as u64)
     }
 
     /// Count issues that have at least one embedding chunk.
-    pub fn count_embedded_issues(&self, team: Option<String>) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_embedded_issues(team.as_deref(), "default")? as u64)
+    pub fn count_embedded_issues(&self, team: Option<String>, workspace_id: String) -> Result<u64, RectilinearError> {
+        Ok(self.db.count_embedded_issues(team.as_deref(), &workspace_id)? as u64)
     }
 
     /// Return the current sync progress, if a sync or embedding pass is active.
@@ -364,9 +399,10 @@ impl RectilinearEngine {
     pub fn get_field_completeness(
         &self,
         team: Option<String>,
+        workspace_id: String,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
         let (total, desc, pri, labels, proj) =
-            self.db.get_field_completeness(team.as_deref(), "default")?;
+            self.db.get_field_completeness(team.as_deref(), &workspace_id)?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,
@@ -383,22 +419,23 @@ impl RectilinearEngine {
         filter: Option<String>,
         limit: u32,
         offset: u32,
+        workspace_id: String,
     ) -> Result<Vec<RtIssueSummary>, RectilinearError> {
         let issues = self.db.list_all_issues(
             team.as_deref(),
             filter.as_deref(),
             limit as usize,
             offset as usize,
-            "default",
+            &workspace_id,
         )?;
         Ok(issues.into_iter().map(RtIssueSummary::from).collect())
     }
 
     /// List teams with synced issues and their embedding coverage. Local-only, no network.
-    pub fn list_synced_teams(&self) -> Result<Vec<RtTeamSummary>, RectilinearError> {
+    pub fn list_synced_teams(&self, workspace_id: String) -> Result<Vec<RtTeamSummary>, RectilinearError> {
         Ok(self
             .db
-            .list_synced_teams("default")?
+            .list_synced_teams(&workspace_id)?
             .into_iter()
             .map(RtTeamSummary::from)
             .collect())
@@ -419,10 +456,11 @@ impl RectilinearEngine {
         &self,
         team: String,
         state_types: Vec<String>,
+        workspace_id: String,
     ) -> Result<Vec<RtIssueEnriched>, RectilinearError> {
         let issues = self
             .db
-            .get_issues_by_state_types(&team, &state_types, "default")?;
+            .get_issues_by_state_types(&team, &state_types, &workspace_id)?;
         let issue_ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
         let blockers = self.db.get_blockers_for_issues(&issue_ids)?;
 
@@ -470,9 +508,10 @@ impl RectilinearEngine {
     // ── Async methods (network I/O) ─────────────────────────────
 
     /// List all teams from Linear.
-    pub async fn list_teams(&self) -> Result<Vec<RtTeam>, RectilinearError> {
+    pub async fn list_teams(&self, workspace_id: String) -> Result<Vec<RtTeam>, RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client =
-            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
         let teams = client
             .list_teams()
             .await
@@ -510,15 +549,16 @@ impl RectilinearEngine {
     }
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
-    pub async fn sync_team(&self, team_key: String, full: bool) -> Result<u64, RectilinearError> {
+    pub async fn sync_team(&self, team_key: String, full: bool, workspace_id: String) -> Result<u64, RectilinearError> {
         self.set_sync_progress(Some(RtSyncProgress {
             phase: RtSyncPhase::FetchingIssues,
             completed: 0,
             total: None,
         }));
 
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client =
-            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
         let progress_state = &self.sync_progress;
         let progress = move |count: usize| {
             *progress_state.lock().unwrap() = Some(RtSyncProgress {
@@ -528,7 +568,7 @@ impl RectilinearEngine {
             });
         };
         let result = client
-            .sync_team(&self.db, &team_key, "default", full, false, Some(&progress))
+            .sync_team(&self.db, &team_key, &workspace_id, full, false, Some(&progress))
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
@@ -543,20 +583,23 @@ impl RectilinearEngine {
         query: String,
         team: Option<String>,
         limit: u32,
+        workspace_id: String,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
         let config = Config::load().unwrap_or_default();
         let embedder = self.make_embedder(&config).await?;
 
         let results = search::search(
             &self.db,
-            &query,
-            search::SearchMode::Hybrid,
-            team.as_deref(),
-            None,
-            limit as usize,
-            embedder.as_ref(),
-            config.search.rrf_k,
-            "default",
+            search::SearchParams {
+                query: &query,
+                mode: search::SearchMode::Hybrid,
+                team_key: team.as_deref(),
+                state_filter: None,
+                limit: limit as usize,
+                embedder: embedder.as_ref(),
+                rrf_k: config.search.rrf_k,
+                workspace_id: &workspace_id,
+            },
         )
         .await?;
 
@@ -569,6 +612,7 @@ impl RectilinearEngine {
         text: String,
         team: Option<String>,
         threshold: f32,
+        workspace_id: String,
     ) -> Result<Vec<RtSearchResult>, RectilinearError> {
         let config = Config::load().unwrap_or_default();
         let embedder =
@@ -588,7 +632,7 @@ impl RectilinearEngine {
             10,
             &embedder,
             config.search.rrf_k,
-            "default",
+            &workspace_id,
         )
         .await?;
 
@@ -604,9 +648,11 @@ impl RectilinearEngine {
         priority: Option<i32>,
         state: Option<String>,
         labels: Option<Vec<String>>,
+        workspace_id: String,
     ) -> Result<(), RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client =
-            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
         let state_id = if let Some(ref state_name) = state {
             // Need to resolve state name → ID. Get team from issue first.
@@ -666,9 +712,11 @@ impl RectilinearEngine {
         &self,
         issue_id: String,
         body: String,
+        workspace_id: String,
     ) -> Result<(), RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client =
-            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
         client
             .add_comment(&issue_id, &body)
             .await
@@ -682,9 +730,11 @@ impl RectilinearEngine {
     pub async fn refresh_issue(
         &self,
         id_or_identifier: String,
+        workspace_id: String,
     ) -> Result<Option<RtIssue>, RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client =
-            LinearClient::with_http_client(self.client().await.clone(), &self.linear_api_key);
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
         let result = if id_or_identifier.contains('-')
             && id_or_identifier
@@ -724,6 +774,7 @@ impl RectilinearEngine {
         &self,
         team: Option<String>,
         limit: u32,
+        workspace_id: String,
     ) -> Result<u64, RectilinearError> {
         let config = Config::load().unwrap_or_default();
         let embedder =
@@ -740,7 +791,7 @@ impl RectilinearEngine {
         let model_name = embedder.backend_name().to_string();
         let issues = self
             .db
-            .get_issues_needing_embedding(team.as_deref(), false, "default")?;
+            .get_issues_needing_embedding(team.as_deref(), false, &workspace_id)?;
 
         let to_process = if limit > 0 {
             &issues[..std::cmp::min(issues.len(), limit as usize)]

@@ -40,18 +40,29 @@ pub struct SearchResult {
     pub similarity: Option<f32>,
 }
 
+pub struct SearchParams<'a> {
+    pub query: &'a str,
+    pub mode: SearchMode,
+    pub team_key: Option<&'a str>,
+    pub state_filter: Option<&'a str>,
+    pub limit: usize,
+    pub embedder: Option<&'a Embedder>,
+    pub rrf_k: u32,
+    pub workspace_id: &'a str,
+}
+
 /// Perform a search using the specified mode
-pub async fn search(
-    db: &Database,
-    query: &str,
-    mode: SearchMode,
-    team_key: Option<&str>,
-    state_filter: Option<&str>,
-    limit: usize,
-    embedder: Option<&Embedder>,
-    rrf_k: u32,
-    workspace_id: &str,
-) -> Result<Vec<SearchResult>> {
+pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<SearchResult>> {
+    let SearchParams {
+        query,
+        mode,
+        team_key,
+        state_filter,
+        limit,
+        embedder,
+        rrf_k,
+        workspace_id,
+    } = params;
     let results = match mode {
         SearchMode::Fts => fts_search(db, query, limit * 2, workspace_id)?,
         SearchMode::Vector => {
@@ -239,14 +250,16 @@ pub async fn find_duplicates(
 ) -> Result<Vec<SearchResult>> {
     let mut results = search(
         db,
-        text,
-        SearchMode::Hybrid,
-        team_key,
-        None,
-        limit,
-        Some(embedder),
-        rrf_k,
-        workspace_id,
+        SearchParams {
+            query: text,
+            mode: SearchMode::Hybrid,
+            team_key,
+            state_filter: None,
+            limit,
+            embedder: Some(embedder),
+            rrf_k,
+            workspace_id,
+        },
     )
     .await?;
 
