@@ -426,14 +426,16 @@ impl RectilinearMcp {
 
         let results = search::search(
             &self.db,
-            &args.query,
-            mode,
-            args.team.as_deref(),
-            args.state.as_deref(),
-            limit,
-            embedder.as_ref(),
-            self.config.search.rrf_k,
-            &workspace,
+            search::SearchParams {
+                query: &args.query,
+                mode,
+                team_key: args.team.as_deref(),
+                state_filter: args.state.as_deref(),
+                limit,
+                embedder: embedder.as_ref(),
+                rrf_k: self.config.search.rrf_k,
+                workspace_id: &workspace,
+            },
         )
         .await
         .map_err(|e| e.to_string())?;

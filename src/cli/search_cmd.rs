@@ -4,19 +4,32 @@ use colored::Colorize;
 use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::Embedder;
-use crate::search::{self, SearchMode};
+use crate::search::{self, SearchMode, SearchParams};
+
+pub struct HandleSearchParams<'a> {
+    pub query: &'a str,
+    pub team: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub mode: SearchMode,
+    pub limit: usize,
+    pub json: bool,
+    pub workspace: &'a str,
+}
 
 pub async fn handle_search(
     db: &Database,
     config: &Config,
-    query: &str,
-    team: Option<&str>,
-    state: Option<&str>,
-    mode: SearchMode,
-    limit: usize,
-    json: bool,
-    workspace: &str,
+    params: HandleSearchParams<'_>,
 ) -> Result<()> {
+    let HandleSearchParams {
+        query,
+        team,
+        state,
+        mode,
+        limit,
+        json,
+        workspace,
+    } = params;
     let embedder = if mode != SearchMode::Fts {
         match Embedder::new(config) {
             Ok(e) => Some(e),
@@ -36,14 +49,16 @@ pub async fn handle_search(
 
     let results = search::search(
         db,
-        query,
-        mode,
-        team_key,
-        state,
-        limit,
-        embedder.as_ref(),
-        config.search.rrf_k,
-        workspace,
+        SearchParams {
+            query,
+            mode,
+            team_key,
+            state_filter: state,
+            limit,
+            embedder: embedder.as_ref(),
+            rrf_k: config.search.rrf_k,
+            workspace_id: workspace,
+        },
     )
     .await?;
 

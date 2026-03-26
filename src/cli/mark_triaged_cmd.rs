@@ -6,20 +6,36 @@ use crate::db::Database;
 use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 
+pub struct MarkTriagedParams<'a> {
+    pub id: &'a str,
+    pub priority: i32,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub labels: Option<&'a [String]>,
+    pub project: Option<&'a str>,
+    pub json_output: bool,
+    pub workspace: &'a str,
+}
+
 pub async fn handle_mark_triaged(
     db: &Database,
     config: &Config,
-    id: &str,
-    priority: i32,
-    title: Option<&str>,
-    description: Option<&str>,
-    comment: Option<&str>,
-    state: Option<&str>,
-    labels: Option<&[String]>,
-    project: Option<&str>,
-    json_output: bool,
-    workspace: &str,
+    params: MarkTriagedParams<'_>,
 ) -> Result<()> {
+    let MarkTriagedParams {
+        id,
+        priority,
+        title,
+        description,
+        comment,
+        state,
+        labels,
+        project,
+        json_output,
+        workspace,
+    } = params;
     if !(1..=4).contains(&priority) {
         bail!("Priority must be 1 (Urgent), 2 (High), 3 (Medium), or 4 (Low)");
     }

@@ -334,13 +334,15 @@ async fn main() -> Result<()> {
                     cli::search_cmd::handle_search(
                         &db,
                         &config,
-                        &query,
-                        team.as_deref(),
-                        state.as_deref(),
-                        mode,
-                        limit,
-                        json,
-                        &workspace,
+                        cli::search_cmd::HandleSearchParams {
+                            query: &query,
+                            team: team.as_deref(),
+                            state: state.as_deref(),
+                            mode,
+                            limit,
+                            json,
+                            workspace: &workspace,
+                        },
                     )
                     .await?;
                 }
@@ -436,16 +438,18 @@ async fn main() -> Result<()> {
                     cli::mark_triaged_cmd::handle_mark_triaged(
                         &db,
                         &config,
-                        &id,
-                        priority,
-                        title.as_deref(),
-                        description.as_deref(),
-                        comment.as_deref(),
-                        state.as_deref(),
-                        labels.as_deref(),
-                        project.as_deref(),
-                        json,
-                        &workspace,
+                        cli::mark_triaged_cmd::MarkTriagedParams {
+                            id: &id,
+                            priority,
+                            title: title.as_deref(),
+                            description: description.as_deref(),
+                            comment: comment.as_deref(),
+                            state: state.as_deref(),
+                            labels: labels.as_deref(),
+                            project: project.as_deref(),
+                            json_output: json,
+                            workspace: &workspace,
+                        },
                     )
                     .await?;
                 }

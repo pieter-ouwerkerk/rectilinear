@@ -674,14 +674,16 @@ fn spawn_similar(
     tokio::spawn(async move {
         let results = search::search(
             &db,
-            &query_text,
-            SearchMode::Vector,
-            Some(&team_key),
-            None,
-            5,
-            Some(&embedder),
-            rrf_k,
-            &workspace,
+            search::SearchParams {
+                query: &query_text,
+                mode: SearchMode::Vector,
+                team_key: Some(&team_key),
+                state_filter: None,
+                limit: 5,
+                embedder: Some(&embedder),
+                rrf_k,
+                workspace_id: &workspace,
+            },
         )
         .await;
 
