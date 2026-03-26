@@ -806,41 +806,79 @@ impl RectilinearEngine {
             total: Some(total),
         }));
 
-        let result: Result<u64, RectilinearError> = async {
-            let mut count = 0u64;
-            for issue in to_process {
-                // Skip if already embedded with the same model and content hasn't changed
-                if let Some(existing_model) = self.db.get_embedding_model(&issue.id)? {
-                    if existing_model == model_name {
-                        continue;
-                    }
-                }
+        // Collect chunks from multiple issues into batches to reduce API round-trips.
+        // Each Gemini batchEmbedContents call handles up to 100 texts, so we fill
+        // batches across issue boundaries rather than making one call per issue.
+        const BATCH_SIZE: usize = 100;
 
-                let chunks = crate::embedding::chunk_text(
-                    &issue.title,
-                    issue.description.as_deref().unwrap_or(""),
-                    512,
-                    64,
-                );
-                let embeddings =
+        // Pre-chunk all issues, skipping those already embedded with the current model.
+        struct IssueChunks {
+            issue_id: String,
+            chunks: Vec<String>,
+        }
+        let mut pending: Vec<IssueChunks> = Vec::new();
+        for issue in to_process {
+            if let Some(existing_model) = self.db.get_embedding_model(&issue.id)? {
+                if existing_model == model_name {
+                    continue;
+                }
+            }
+            let chunks = crate::embedding::chunk_text(
+                &issue.title,
+                issue.description.as_deref().unwrap_or(""),
+                512,
+                64,
+            );
+            pending.push(IssueChunks {
+                issue_id: issue.id.clone(),
+                chunks,
+            });
+        }
+
+        let result: Result<u64, RectilinearError> = async {
+            // Flatten all chunks into a single list with back-references to their issue.
+            // Each entry: (index into `pending`, chunk_index_within_issue, chunk_text)
+            let mut flat_chunks: Vec<(usize, usize, String)> = Vec::new();
+            for (issue_idx, ic) in pending.iter().enumerate() {
+                for (chunk_idx, text) in ic.chunks.iter().enumerate() {
+                    flat_chunks.push((issue_idx, chunk_idx, text.clone()));
+                }
+            }
+
+            // Embed in batches of BATCH_SIZE across issue boundaries.
+            let mut embeddings_flat: Vec<Vec<f32>> = Vec::with_capacity(flat_chunks.len());
+            for batch in flat_chunks.chunks(BATCH_SIZE) {
+                let texts: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
+                let batch_embeddings =
                     embedder
-                        .embed_batch(&chunks)
+                        .embed_batch(&texts)
                         .await
                         .map_err(|e| RectilinearError::Api {
                             message: e.to_string(),
                         })?;
+                embeddings_flat.extend(batch_embeddings);
+            }
 
-                let chunk_data: Vec<(usize, String, Vec<u8>)> = chunks
-                    .into_iter()
-                    .zip(embeddings.iter())
+            // Re-group embeddings back to their issues and persist.
+            let mut emb_offset = 0usize;
+            let mut count = 0u64;
+            for ic in &pending {
+                let n = ic.chunks.len();
+                let issue_embeddings = &embeddings_flat[emb_offset..emb_offset + n];
+
+                let chunk_data: Vec<(usize, String, Vec<u8>)> = ic
+                    .chunks
+                    .iter()
+                    .zip(issue_embeddings.iter())
                     .enumerate()
                     .map(|(idx, (text, emb))| {
-                        (idx, text, crate::embedding::embedding_to_bytes(emb))
+                        (idx, text.clone(), crate::embedding::embedding_to_bytes(emb))
                     })
                     .collect();
 
                 self.db
-                    .upsert_chunks_with_model(&issue.id, &chunk_data, &model_name)?;
+                    .upsert_chunks_with_model(&ic.issue_id, &chunk_data, &model_name)?;
+                emb_offset += n;
                 count += 1;
                 self.set_sync_progress(Some(RtSyncProgress {
                     phase: RtSyncPhase::GeneratingEmbeddings,
