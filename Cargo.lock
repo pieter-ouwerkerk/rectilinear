@@ -2296,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "rectilinear"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "rectilinear-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
