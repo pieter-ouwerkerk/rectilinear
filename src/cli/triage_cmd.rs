@@ -6,6 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use serde::Deserialize;
+use serde_json::json;
 use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -1338,4 +1339,169 @@ fn default_questions() -> Vec<Question> {
             suggested_answer: None,
         })
         .collect()
+}
+
+/// Non-interactive JSON output of the triage queue, suitable for piping to
+/// agents (Claude Code, Codex) that cannot drive a TUI.
+pub async fn handle_triage_json(
+    db: &Database,
+    config: &Config,
+    team: Option<&str>,
+    limit: Option<usize>,
+    no_context: bool,
+    include_completed: bool,
+    workspace: &str,
+) -> Result<()> {
+    let default_team = config.workspace_default_team(workspace)?;
+    let team_key = team.or(default_team.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!("No team specified. Use --team or set default-team in config")
+    })?;
+
+    let issues = db.get_unprioritized_issues(Some(team_key), include_completed, workspace)?;
+    if issues.is_empty() {
+        let total = db.count_issues(Some(team_key), workspace)?;
+        if total == 0 {
+            println!(
+                "{}",
+                json!({
+                    "queue": [],
+                    "total_remaining": 0,
+                    "team": team_key,
+                    "error": format!("No issues found for team \"{}\". Have you run `rectilinear sync --team {}`?", team_key, team_key)
+                })
+            );
+        } else {
+            println!(
+                "{}",
+                json!({ "queue": [], "total_remaining": 0, "team": team_key })
+            );
+        }
+        return Ok(());
+    }
+
+    let limit = limit.unwrap_or(20);
+    let batch: Vec<&Issue> = issues.iter().take(limit).collect();
+    let total_remaining = issues.len();
+
+    let embedder = if no_context {
+        None
+    } else {
+        Embedder::new(config).ok()
+    };
+
+    let mut enriched = Vec::new();
+    for issue in &batch {
+        let description = issue.description.as_deref().map(|d| {
+            if d.len() > 2000 {
+                let mut end = 2000;
+                while end > 0 && !d.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &d[..end]
+            } else {
+                d
+            }
+        });
+
+        let similar = if let Some(ref emb) = embedder {
+            let search_text = format!("{}\n\n{}", issue.title, description.unwrap_or(""));
+            search::find_duplicates(
+                db,
+                &search_text,
+                Some(team_key),
+                0.3,
+                4,
+                emb,
+                config.search.rrf_k,
+                workspace,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.issue_id != issue.id)
+            .take(3)
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let relations = db.get_relations_enriched(&issue.id).unwrap_or_default();
+        let code_search_hints =
+            extract_code_hints(&issue.title, description.unwrap_or(""), &issue.labels());
+
+        enriched.push(json!({
+            "identifier": issue.identifier,
+            "url": issue.url,
+            "title": issue.title,
+            "description": description,
+            "state_name": issue.state_name,
+            "assignee_name": issue.assignee_name,
+            "project_name": issue.project_name,
+            "labels": issue.labels(),
+            "created_at": issue.created_at,
+            "similar_issues": similar,
+            "relations": relations,
+            "code_search_hints": code_search_hints,
+        }));
+    }
+
+    let result = json!({
+        "queue": enriched,
+        "total_remaining": total_remaining,
+        "team": team_key,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    let combined = format!("{} {}", title, description);
+
+    for word in combined.split_whitespace() {
+        let word = word.trim_matches(|c: char| {
+            !c.is_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-'
+        });
+        if (word.contains('/') && word.contains('.'))
+            || word.ends_with(".rs")
+            || word.ends_with(".ts")
+            || word.ends_with(".swift")
+        {
+            hints.push(word.to_string());
+        }
+    }
+
+    for cap in combined.split('`').collect::<Vec<_>>().chunks(2) {
+        if cap.len() == 2 && !cap[1].is_empty() && cap[1].len() < 80 {
+            hints.push(cap[1].trim().to_string());
+        }
+    }
+
+    for word in title.split_whitespace() {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        let upper_count = word.chars().filter(|c| c.is_uppercase()).count();
+        if upper_count >= 2
+            && word.len() >= 4
+            && word.chars().next().is_some_and(|c| c.is_uppercase())
+        {
+            hints.push(word.to_string());
+        }
+        if word.contains('_')
+            && word.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && word.len() >= 4
+        {
+            hints.push(word.to_string());
+        }
+    }
+
+    for label in labels {
+        if !label.is_empty() {
+            hints.push(label.clone());
+        }
+    }
+
+    hints.sort();
+    hints.dedup();
+    hints
 }

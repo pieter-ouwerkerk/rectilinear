@@ -155,6 +155,9 @@ enum Commands {
         /// Include completed/canceled issues (for archival prioritization)
         #[arg(long)]
         include_completed: bool,
+        /// Output queue as JSON instead of launching the TUI
+        #[arg(long)]
+        json: bool,
     },
     /// Mark an issue as triaged: set priority and optionally update fields
     MarkTriaged {
@@ -412,17 +415,31 @@ async fn main() -> Result<()> {
                     limit,
                     no_context,
                     include_completed,
+                    json,
                 } => {
-                    cli::triage_cmd::handle_triage(
-                        &db,
-                        &config,
-                        team.as_deref(),
-                        limit,
-                        no_context,
-                        include_completed,
-                        &workspace,
-                    )
-                    .await?;
+                    if json {
+                        cli::triage_cmd::handle_triage_json(
+                            &db,
+                            &config,
+                            team.as_deref(),
+                            limit,
+                            no_context,
+                            include_completed,
+                            &workspace,
+                        )
+                        .await?;
+                    } else {
+                        cli::triage_cmd::handle_triage(
+                            &db,
+                            &config,
+                            team.as_deref(),
+                            limit,
+                            no_context,
+                            include_completed,
+                            &workspace,
+                        )
+                        .await?;
+                    }
                 }
                 Commands::MarkTriaged {
                     id,
