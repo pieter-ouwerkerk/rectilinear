@@ -220,6 +220,12 @@ pub struct RtTeamSummary {
     pub last_synced_at: Option<String>,
 }
 
+#[derive(uniffi::Record)]
+pub struct RtCreateIssueResult {
+    pub id: String,
+    pub identifier: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum RtSyncPhase {
     FetchingIssues,
@@ -705,6 +711,45 @@ impl RectilinearEngine {
         }
 
         Ok(())
+    }
+
+    /// Create a new issue in Linear and return its (id, identifier).
+    pub async fn create_issue(
+        &self,
+        team_key: String,
+        title: String,
+        description: Option<String>,
+        priority: Option<i32>,
+        label_ids: Vec<String>,
+        parent_id: Option<String>,
+        workspace_id: String,
+    ) -> Result<RtCreateIssueResult, RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
+        let client =
+            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+
+        let team_id = client
+            .get_team_id(&team_key)
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })?;
+
+        let (id, identifier) = client
+            .create_issue(
+                &team_id,
+                &title,
+                description.as_deref(),
+                priority,
+                &label_ids,
+                parent_id.as_deref(),
+            )
+            .await
+            .map_err(|e| RectilinearError::Api {
+                message: e.to_string(),
+            })?;
+
+        Ok(RtCreateIssueResult { id, identifier })
     }
 
     /// Add a comment to a Linear issue.
