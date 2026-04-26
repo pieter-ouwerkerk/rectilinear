@@ -84,25 +84,53 @@ cp target/release/rectilinear ~/.local/bin/
 
 ### Configure
 
+#### Connect a Linear workspace
+
+Rectilinear is multi-tenant: you connect one or more Linear orgs as named *workspaces*, and pass the workspace name on each MCP call (or set a default). The interactive flow keeps the API key out of shell history:
+
 ```sh
-# Required: Linear API key
-rectilinear config set linear-api-key lin_api_XXXX
+rectilinear config add-workspace
+```
 
-# Recommended: set a default team so you don't have to pass --team every time
-rectilinear config set default-team ENG
+You'll be prompted for:
 
-# Optional: Gemini API key for semantic search / embeddings
+- **Workspace name** — a short label you'll reference later, e.g. `home`, `work`, `oss`. Agents pass this as `workspace` in MCP calls.
+- **Linear API key** — get one at https://linear.app/settings/api. Linear API keys are *org-scoped*, so one key covers every team in that org. If your new workspace is in a Linear org you've already connected, you can reuse the existing key.
+- **Default team** — the team prefix (e.g. `ENG`, `SFO`) Rectilinear should use when you don't pass `--team` explicitly.
+- **Set as default workspace?** — `Y` if this is your primary; `N` otherwise.
+
+The config is written to `~/.config/rectilinear/config.toml` with mode `0600` (owner read/write only).
+
+Useful follow-ups:
+
+```sh
+rectilinear workspace list      # show configured workspaces
+rectilinear workspace current   # show the active default
+rectilinear workspace assume X  # switch the active default to workspace X
+rectilinear config show         # full config dump (keys masked)
+```
+
+#### Optional: Gemini API key for embeddings
+
+Embeddings power vector / hybrid search and duplicate detection. Configure once:
+
+```sh
 rectilinear config set embedding.gemini-api-key AIza...
 rectilinear config set embedding.backend api
 ```
 
-Environment variables `LINEAR_API_KEY` and `GEMINI_API_KEY` also work and override config values.
+Or set `GEMINI_API_KEY` in your environment — it overrides the config value.
 
-View your config:
+#### Single-workspace shortcut (legacy)
+
+If you only ever work with one Linear org, the older single-tenant flow still works and skips the workspace concept entirely:
 
 ```sh
-rectilinear config show
+rectilinear config set linear-api-key lin_api_XXXX
+rectilinear config set default-team ENG
 ```
+
+`LINEAR_API_KEY` env var works too. New users should prefer `config add-workspace`.
 
 ### Sync issues
 
@@ -183,15 +211,25 @@ rectilinear append ENG-123 --comment "Reproduced on Safari 17.4"
 rectilinear append ENG-123 --description "Also affects Safari 17.3"
 ```
 
-### MCP server (Claude Code integration)
+### Use with AI agents (MCP)
 
-Start the MCP server for use with Claude Code:
+Rectilinear ships an MCP server (`rectilinear serve`, stdio transport) that any MCP-aware agent can connect to. Register it once at user scope and every project on your machine gets access — there's nothing per-repo to configure for the server itself, only for *which workspace* a given repo should use (see [Per-project guidance](#per-project-guidance) below).
+
+#### Claude Code
+
+User-scope (recommended — available in every project automatically):
 
 ```sh
-rectilinear serve
+claude mcp add rectilinear -s user -- rectilinear serve
 ```
 
-Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or project `.mcp.json`):
+Verify it's connected:
+
+```sh
+claude mcp list  # should show: rectilinear: ... ✓ Connected
+```
+
+Per-project alternative — add to the project's `.mcp.json`:
 
 ```json
 {
@@ -204,7 +242,36 @@ Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or pr
 }
 ```
 
-This exposes 10 tools to Claude Code:
+#### Codex CLI
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.rectilinear]
+command = "rectilinear"
+args = ["serve"]
+enabled = true
+```
+
+(Use an absolute path to the binary if `rectilinear` isn't on your `$PATH` when Codex spawns the server.)
+
+#### Per-project guidance
+
+The server exposes the same tools to every repo on your machine, so agents need a hint to pick the right workspace. Drop a short section in the repo's `AGENTS.md` (read by Codex, Cursor, and Claude Code) or `CLAUDE.md`:
+
+```markdown
+## Linear / Rectilinear
+
+Issues for this repo live in Linear team `SFO`. Use the Rectilinear MCP
+with workspace `home` — it's already configured with `SFO` as the default
+team, so you don't need to pass `team` explicitly.
+```
+
+Without this hint, agents have to call `list_workspaces` and guess; with it, they go straight to the right one.
+
+#### Tools exposed
+
+This exposes 10 tools to MCP clients:
 
 | Tool | Purpose |
 |---|---|
