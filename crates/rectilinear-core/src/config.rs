@@ -153,6 +153,20 @@ impl Config {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
+        // Self-heal loose permissions on configs predating chmod-on-save.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    let _ = std::fs::set_permissions(
+                        &path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+        }
         let mut config: Config = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config from {}", path.display()))?;
 
@@ -183,6 +197,13 @@ impl Config {
         let path = Self::config_path()?;
         let contents = toml::to_string_pretty(self)?;
         std::fs::write(&path, contents)?;
+        // The config file holds API keys; restrict to owner read/write.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+        }
         Ok(())
     }
 
