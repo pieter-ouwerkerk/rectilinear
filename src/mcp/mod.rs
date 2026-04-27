@@ -1359,7 +1359,15 @@ impl ServerHandler for RectilinearMcp {
                  Format as [IDENTIFIER](url) so the user can click through to Linear directly. \
                  Do this for the main issue being discussed AND for any related, blocking, or similar issues referenced. \
                  Tool responses include a `referenced_issues` field that maps any issue identifiers found in descriptions/comments \
-                 to their URLs and titles — use these to render all mentioned issues as clickable links."
+                 to their URLs and titles — use these to render all mentioned issues as clickable links.\n\n\
+                 ## Progress Tracking\n\
+                 Use TodoWrite to make progress visible to the user:\n\
+                 - When triaging multiple issues from a get_triage_queue batch, create a TodoWrite list with one item per issue \
+                 (e.g. \"Triage ENG-123: <title>\"). Mark each in_progress when you present it, completed after mark_triaged succeeds. \
+                 This gives the user a visible remaining-work indicator across a long batch.\n\
+                 - When a single issue needs multiple clarifying questions or decisions (refinement, priority, tradeoffs, \
+                 related issues, label/project assignment), enumerate them as TodoWrite items before asking. Update the list as you go.\n\
+                 - Skip TodoWrite for trivial one-shot interactions (a single search, a single create_issue with no ambiguity)."
                     .into(),
             ),
         }
