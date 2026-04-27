@@ -12,6 +12,8 @@ Linear teams accumulate hundreds of issues. Duplicate detection is hard, search 
 
 Linear remains the source of truth. The local database is a read-optimized cache. Writes go to Linear first, then sync back.
 
+> Just want to wire this up to Claude Code and start filing/triaging issues by voice? See [QUICKSTART.md](QUICKSTART.md).
+
 ## Architecture
 
 ```
