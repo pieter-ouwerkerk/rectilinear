@@ -207,6 +207,50 @@ impl Database {
         })
     }
 
+    // --- Issue-Label Join CRUD ---
+
+    /// Replace the label set for an issue. Atomic via transaction.
+    /// Skips any label_ids not present in the `labels` table (logged at warn level via eprintln).
+    pub fn replace_issue_labels(&self, issue_id: &str, label_ids: &[String]) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM issue_labels WHERE issue_id = ?1",
+                rusqlite::params![issue_id],
+            )?;
+            for lid in label_ids {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM labels WHERE id = ?1",
+                    rusqlite::params![lid],
+                    |r| r.get(0),
+                )?;
+                if exists == 0 {
+                    eprintln!(
+                        "warning: skipping unknown label id '{}' for issue '{}'",
+                        lid, issue_id
+                    );
+                    continue;
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?1, ?2)",
+                    rusqlite::params![issue_id, lid],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn get_issue_label_ids(&self, issue_id: &str) -> Result<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT label_id FROM issue_labels WHERE issue_id = ?1 ORDER BY label_id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![issue_id], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // --- Issue CRUD ---
 
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
@@ -1580,5 +1624,61 @@ mod tests {
         let listed = db.list_labels("default").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "Keep");
+    }
+
+    #[test]
+    fn replace_issue_labels_overwrites_existing() {
+        use super::test_helpers::{test_db, make_issue, make_label};
+        let (db, _dir) = test_db();
+
+        let issue = make_issue("ENG-1", "ENG");
+        db.upsert_issue(&issue).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
+        db.upsert_label(&make_label("l2", "UI", "default")).unwrap();
+        db.upsert_label(&make_label("l3", "Backend", "default")).unwrap();
+
+        db.replace_issue_labels(&issue.id, &["l1".to_string(), "l2".to_string()]).unwrap();
+        let labels = db.get_issue_label_ids(&issue.id).unwrap();
+        assert_eq!(labels, vec!["l1".to_string(), "l2".to_string()]);
+
+        // Replace overwrites
+        db.replace_issue_labels(&issue.id, &["l3".to_string()]).unwrap();
+        let labels = db.get_issue_label_ids(&issue.id).unwrap();
+        assert_eq!(labels, vec!["l3".to_string()]);
+    }
+
+    #[test]
+    fn deleting_issue_cascades_to_issue_labels() {
+        use super::test_helpers::{test_db, make_issue, make_label};
+        let (db, _dir) = test_db();
+
+        let issue = make_issue("ENG-2", "ENG");
+        db.upsert_issue(&issue).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
+        db.replace_issue_labels(&issue.id, &["l1".to_string()]).unwrap();
+
+        db.with_conn(|conn| {
+            conn.execute("DELETE FROM issues WHERE id = ?1", rusqlite::params![&issue.id])?;
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM issue_labels WHERE issue_id = ?1",
+                rusqlite::params![&issue.id], |r| r.get(0))?;
+            assert_eq!(n, 0);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn deleting_label_cascades_to_issue_labels() {
+        use super::test_helpers::{test_db, make_issue, make_label};
+        let (db, _dir) = test_db();
+
+        let issue = make_issue("ENG-3", "ENG");
+        db.upsert_issue(&issue).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
+        db.replace_issue_labels(&issue.id, &["l1".to_string()]).unwrap();
+
+        db.delete_labels_for_workspace_not_in("default", &[]).unwrap();
+        let labels = db.get_issue_label_ids(&issue.id).unwrap();
+        assert!(labels.is_empty());
     }
 }
