@@ -40,3 +40,16 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
 pub fn fake_embedding(dimensions: usize) -> Vec<u8> {
     vec![0u8; dimensions * 4] // f32 = 4 bytes each
 }
+
+use super::Label;
+
+/// Create a minimal test label.
+pub fn make_label(id: &str, name: &str, workspace_id: &str) -> Label {
+    Label {
+        id: id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        color: Some("#abcdef".to_string()),
+        parent_id: None,
+    }
+}

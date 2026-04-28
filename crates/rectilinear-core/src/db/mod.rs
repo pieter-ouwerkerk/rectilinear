@@ -135,6 +135,78 @@ impl Database {
         })
     }
 
+    // --- Label CRUD ---
+
+    pub fn upsert_label(&self, label: &Label) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO labels (id, workspace_id, name, color, parent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                   workspace_id=excluded.workspace_id,
+                   name=excluded.name,
+                   color=excluded.color,
+                   parent_id=excluded.parent_id",
+                rusqlite::params![label.id, label.workspace_id, label.name, label.color, label.parent_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_labels(&self, workspace_id: &str) -> Result<Vec<Label>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, workspace_id, name, color, parent_id
+                 FROM labels WHERE workspace_id = ?1
+                 ORDER BY name COLLATE NOCASE ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![workspace_id], |row| {
+                Ok(Label {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    name: row.get(2)?,
+                    color: row.get(3)?,
+                    parent_id: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Delete labels in `workspace_id` whose id is NOT in `keep_ids`.
+    /// Returns the number of rows deleted. Cascades to `issue_labels`.
+    pub fn delete_labels_for_workspace_not_in(
+        &self,
+        workspace_id: &str,
+        keep_ids: &[String],
+    ) -> Result<usize> {
+        self.with_conn(|conn| {
+            if keep_ids.is_empty() {
+                let n = conn.execute(
+                    "DELETE FROM labels WHERE workspace_id = ?1",
+                    rusqlite::params![workspace_id],
+                )?;
+                return Ok(n);
+            }
+            let placeholders = (0..keep_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "DELETE FROM labels WHERE workspace_id = ?1 AND id NOT IN ({placeholders})"
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(workspace_id.to_string())];
+            for id in keep_ids {
+                params.push(Box::new(id.clone()));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let n = conn.execute(&sql, param_refs.as_slice())?;
+            Ok(n)
+        })
+    }
+
     // --- Issue CRUD ---
 
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
@@ -1017,6 +1089,15 @@ pub struct WorkspaceRow {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Label {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub parent_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::test_helpers::*;
@@ -1444,5 +1525,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(last_updated, "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn upsert_label_inserts_and_renames_in_place() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+
+        let mut l = make_label("lbl_1", "Vanta", "default");
+        db.upsert_label(&l).unwrap();
+
+        let listed = db.list_labels("default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Vanta");
+
+        // Rename — same id, new name
+        l.name = "Compliance".to_string();
+        db.upsert_label(&l).unwrap();
+
+        let listed = db.list_labels("default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Compliance");
+    }
+
+    #[test]
+    fn list_labels_is_workspace_scoped_and_sorted() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+        db.upsert_workspace("work", None, None).unwrap();
+
+        db.upsert_label(&make_label("a", "Zebra", "default")).unwrap();
+        db.upsert_label(&make_label("b", "Apple", "default")).unwrap();
+        db.upsert_label(&make_label("c", "OnlyInWork", "work")).unwrap();
+
+        let default_labels = db.list_labels("default").unwrap();
+        assert_eq!(default_labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+                   vec!["Apple", "Zebra"]);
+        let work_labels = db.list_labels("work").unwrap();
+        assert_eq!(work_labels.len(), 1);
+        assert_eq!(work_labels[0].name, "OnlyInWork");
+    }
+
+    #[test]
+    fn delete_labels_for_workspace_not_in_removes_orphans() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+
+        db.upsert_label(&make_label("keep", "Keep", "default")).unwrap();
+        db.upsert_label(&make_label("drop", "Drop", "default")).unwrap();
+
+        let kept = db.delete_labels_for_workspace_not_in("default", &["keep".to_string()]).unwrap();
+        assert_eq!(kept, 1, "should report 1 deleted");
+
+        let listed = db.list_labels("default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Keep");
     }
 }
