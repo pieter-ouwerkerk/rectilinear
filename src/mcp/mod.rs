@@ -302,6 +302,8 @@ struct UpdateIssueArgs {
     labels: Option<Vec<String>>,
     /// Set project by name (or "none" to remove from project)
     project: Option<String>,
+    /// Assignee. Pass "me" for self-assign, "none" to clear, or a name (case-insensitive).
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -717,6 +719,12 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
+        let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
+            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
         // If updating description, re-fetch from Linear to preserve any image references
         let safe_description = if args.description.is_some() {
             let (latest, _, _) = client
@@ -742,7 +750,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 state_id.as_deref(),
                 label_ids.as_deref(),
                 project_id.as_deref(),
-                None, // assignee_id (wired in Task 13)
+                assignee_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
