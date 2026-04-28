@@ -374,6 +374,8 @@ struct MarkTriagedArgs {
     labels: Option<Vec<String>>,
     /// Set project by name (or "none" to remove from project)
     project: Option<String>,
+    /// Assignee. Pass "me" for self-assign, "none" to clear, or a name (case-insensitive).
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1171,6 +1173,12 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
+        let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
+            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
         // Preserve any image references from the original description
         let safe_description = args
             .description
@@ -1189,7 +1197,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 state_id.as_deref(),
                 label_ids.as_deref(),
                 project_id.as_deref(),
-                None, // assignee_id (wired in Task 14)
+                assignee_id.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?;
