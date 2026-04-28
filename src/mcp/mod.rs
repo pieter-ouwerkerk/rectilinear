@@ -431,6 +431,7 @@ impl RectilinearMcp {
                 mode,
                 team_key: args.team.as_deref(),
                 state_filter: args.state.as_deref(),
+                label_ids: None,
                 limit,
                 embedder: embedder.as_ref(),
                 rrf_k: self.config.search.rrf_k,

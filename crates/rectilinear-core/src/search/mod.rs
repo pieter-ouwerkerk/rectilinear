@@ -45,6 +45,7 @@ pub struct SearchParams<'a> {
     pub mode: SearchMode,
     pub team_key: Option<&'a str>,
     pub state_filter: Option<&'a str>,
+    pub label_ids: Option<&'a [String]>,
     pub limit: usize,
     pub embedder: Option<&'a Embedder>,
     pub rrf_k: u32,
@@ -58,24 +59,25 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
         mode,
         team_key,
         state_filter,
+        label_ids,
         limit,
         embedder,
         rrf_k,
         workspace_id,
     } = params;
     let results = match mode {
-        SearchMode::Fts => fts_search(db, query, limit * 2, workspace_id)?,
+        SearchMode::Fts => fts_search(db, query, limit * 2, workspace_id, label_ids)?,
         SearchMode::Vector => {
             let embedder =
                 embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
-            vector_search(db, query, team_key, limit * 2, embedder, workspace_id).await?
+            vector_search(db, query, team_key, limit * 2, embedder, workspace_id, label_ids).await?
         }
         SearchMode::Hybrid => {
-            let fts_results = fts_search(db, query, limit * 3, workspace_id)?;
+            let fts_results = fts_search(db, query, limit * 3, workspace_id, label_ids)?;
 
             if let Some(embedder) = embedder {
                 let vec_results =
-                    vector_search(db, query, team_key, limit * 3, embedder, workspace_id).await?;
+                    vector_search(db, query, team_key, limit * 3, embedder, workspace_id, label_ids).await?;
                 reciprocal_rank_fusion(fts_results, vec_results, rrf_k, 0.3, 0.7)
             } else {
                 // Fall back to FTS-only if no embedder
@@ -114,10 +116,10 @@ fn fts_search(
     query: &str,
     limit: usize,
     workspace_id: &str,
+    label_ids: Option<&[String]>,
 ) -> Result<Vec<SearchResult>> {
-    // Escape FTS5 special characters and build query
     let fts_query = build_fts_query(query);
-    let fts_results = db.fts_search(&fts_query, limit, workspace_id)?;
+    let fts_results = db.fts_search_filtered(&fts_query, limit, workspace_id, label_ids)?;
 
     Ok(fts_results
         .into_iter()
@@ -143,6 +145,7 @@ async fn vector_search(
     limit: usize,
     embedder: &Embedder,
     workspace_id: &str,
+    label_ids: Option<&[String]>,
 ) -> Result<Vec<SearchResult>> {
     let query_embedding = embedder.embed_single(query).await?;
 
@@ -191,6 +194,19 @@ async fn vector_search(
             })
         })
         .collect();
+
+    // Post-filter by label_ids: keep only issues that have ALL required labels
+    let results = if let Some(required_ids) = label_ids.filter(|ids| !ids.is_empty()) {
+        results
+            .into_iter()
+            .filter(|r| {
+                let issue_labels = db.get_issue_label_ids(&r.issue_id).unwrap_or_default();
+                required_ids.iter().all(|req| issue_labels.contains(req))
+            })
+            .collect()
+    } else {
+        results
+    };
 
     Ok(results)
 }
@@ -255,6 +271,7 @@ pub async fn find_duplicates(
             mode: SearchMode::Hybrid,
             team_key,
             state_filter: None,
+            label_ids: None,
             limit,
             embedder: Some(embedder),
             rrf_k,
@@ -264,7 +281,7 @@ pub async fn find_duplicates(
     .await?;
 
     // For duplicate finding, also do a pure vector search and merge
-    let _vec_results = vector_search(db, text, team_key, limit, embedder, workspace_id).await?;
+    let _vec_results = vector_search(db, text, team_key, limit, embedder, workspace_id, None).await?;
 
     // Keep results above threshold
     results.retain(|r| r.similarity.unwrap_or(0.0) >= threshold || r.score > 0.01);

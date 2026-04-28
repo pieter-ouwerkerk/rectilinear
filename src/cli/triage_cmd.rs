@@ -680,6 +680,7 @@ fn spawn_similar(
                 mode: SearchMode::Vector,
                 team_key: Some(&team_key),
                 state_filter: None,
+                label_ids: None,
                 limit: 5,
                 embedder: Some(&embedder),
                 rrf_k,

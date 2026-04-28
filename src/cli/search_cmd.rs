@@ -54,6 +54,7 @@ pub async fn handle_search(
             mode,
             team_key,
             state_filter: state,
+            label_ids: None,
             limit,
             embedder: embedder.as_ref(),
             rrf_k: config.search.rrf_k,

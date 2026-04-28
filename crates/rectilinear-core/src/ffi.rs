@@ -601,6 +601,7 @@ impl RectilinearEngine {
                 mode: search::SearchMode::Hybrid,
                 team_key: team.as_deref(),
                 state_filter: None,
+                label_ids: None,
                 limit: limit as usize,
                 embedder: embedder.as_ref(),
                 rrf_k: config.search.rrf_k,
