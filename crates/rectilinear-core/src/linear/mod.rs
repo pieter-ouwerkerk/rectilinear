@@ -458,6 +458,7 @@ impl LinearClient {
         description: Option<&str>,
         priority: Option<i32>,
         label_ids: &[String],
+        assignee_id: Option<&str>,
         parent_id: Option<&str>,
     ) -> Result<(String, String)> {
         let mut input = serde_json::json!({
@@ -473,6 +474,9 @@ impl LinearClient {
         }
         if !label_ids.is_empty() {
             input["labelIds"] = serde_json::json!(label_ids);
+        }
+        if let Some(aid) = assignee_id {
+            input["assigneeId"] = serde_json::Value::String(aid.to_string());
         }
         if let Some(pid) = parent_id {
             input["parentId"] = serde_json::Value::String(pid.to_string());
@@ -533,6 +537,7 @@ impl LinearClient {
         state_id: Option<&str>,
         label_ids: Option<&[String]>,
         project_id: Option<&str>,
+        assignee_id: Option<&str>,
     ) -> Result<()> {
         let mut input = serde_json::Map::new();
         if let Some(t) = title {
@@ -558,6 +563,10 @@ impl LinearClient {
                 "projectId".into(),
                 serde_json::Value::String(pid.to_string()),
             );
+        }
+        if let Some(aid) = assignee_id {
+            // Empty string clears the field (matches existing project_id convention).
+            input.insert("assigneeId".into(), serde_json::Value::String(aid.to_string()));
         }
 
         let query = r#"

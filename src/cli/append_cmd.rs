@@ -42,7 +42,7 @@ pub async fn handle_append(
             issue.identifier.bold()
         );
         client
-            .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None)
+            .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None, None)
             .await?;
         println!("{} Description updated", "✓".green().bold());
     }

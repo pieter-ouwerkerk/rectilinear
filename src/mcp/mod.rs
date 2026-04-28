@@ -570,6 +570,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 args.description.as_deref(),
                 args.priority,
                 &[],
+                None,                  // assignee_id (wired in Task 12)
                 parent_id.as_deref(),
             )
             .await
@@ -672,6 +673,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 state_id.as_deref(),
                 label_ids.as_deref(),
                 project_id.as_deref(),
+                None, // assignee_id (wired in Task 13)
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -725,7 +727,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 None => desc_text.clone(),
             };
             client
-                .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None)
+                .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None, None)
                 .await
                 .map_err(|e| e.to_string())?;
             actions.push("description_updated");
@@ -1110,6 +1112,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 state_id.as_deref(),
                 label_ids.as_deref(),
                 project_id.as_deref(),
+                None, // assignee_id (wired in Task 14)
             )
             .await
             .map_err(|e| e.to_string())?;

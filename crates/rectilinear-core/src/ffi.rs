@@ -698,6 +698,7 @@ impl RectilinearEngine {
                 state_id.as_deref(),
                 label_ids.as_deref(),
                 None,
+                None, // assignee_id (wired in Task 13)
             )
             .await
             .map_err(|e| RectilinearError::Api {
@@ -743,6 +744,7 @@ impl RectilinearEngine {
                 description.as_deref(),
                 priority,
                 &label_ids,
+                None,                  // assignee_id (wired in Task 12)
                 parent_id.as_deref(),
             )
             .await

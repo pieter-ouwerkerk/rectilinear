@@ -789,6 +789,7 @@ fn spawn_apply(
                 None,
                 None,
                 None,
+                None, // assignee_id (wired in later tasks)
             )
             .await;
 
