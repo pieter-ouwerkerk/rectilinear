@@ -682,36 +682,8 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
-        // Resolve labels (if provided). If the catalog has never been synced for this
-        // workspace, fall back to the remote query so create_issue still works on a
-        // fresh install. Otherwise resolve locally and error on unknown names.
         let label_ids: Vec<String> = if let Some(ref names) = args.labels {
-            let catalog_size = self.db
-                .list_labels(&workspace)
-                .map_err(|e| e.to_string())?
-                .len();
-            if catalog_size == 0 {
-                eprintln!(
-                    "info: labels catalog empty for workspace '{}', resolving via remote query",
-                    workspace
-                );
-                client.get_label_ids(names).await.map_err(|e| e.to_string())?
-            } else {
-                let (resolved, unknown) = self.db
-                    .resolve_label_ids_local(&workspace, names)
-                    .map_err(|e| e.to_string())?;
-                if !unknown.is_empty() {
-                    let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
-                    return Err(format!(
-                        "Label{} {} not found. {}Run list_labels for the full set.",
-                        if unknown.len() == 1 { "" } else { "s" },
-                        unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
-                        if suggestions.is_empty() { String::new() }
-                        else { format!("Did you mean: {}? ", suggestions.join(", ")) }
-                    ));
-                }
-                resolved
-            }
+            self.resolve_labels_for_mutation(&workspace, &client, names).await?
         } else {
             Vec::new()
         };
@@ -786,12 +758,7 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(
-                client
-                    .get_label_ids(label_names)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            )
+            Some(self.resolve_labels_for_mutation(&workspace, &client, label_names).await?)
         } else {
             None
         };
@@ -1266,12 +1233,7 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(
-                client
-                    .get_label_ids(label_names)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            )
+            Some(self.resolve_labels_for_mutation(&workspace, &client, label_names).await?)
         } else {
             None
         };
@@ -1499,6 +1461,43 @@ impl RectilinearMcp {
             .workspace_api_key(workspace)
             .map_err(|e| e.to_string())?;
         Ok(LinearClient::with_api_key(&api_key))
+    }
+
+    /// Resolve label names to ids using the same logic as create_issue:
+    /// - empty catalog → defer to remote query (fresh install).
+    /// - non-empty catalog with unknowns → return user-facing error with did-you-mean.
+    /// - non-empty catalog, all resolved → return resolved ids.
+    async fn resolve_labels_for_mutation(
+        &self,
+        workspace: &str,
+        client: &LinearClient,
+        names: &[String],
+    ) -> Result<Vec<String>, String> {
+        let catalog_size = self.db
+            .list_labels(workspace)
+            .map_err(|e| e.to_string())?
+            .len();
+        if catalog_size == 0 {
+            eprintln!(
+                "info: labels catalog empty for workspace '{}', resolving via remote query",
+                workspace
+            );
+            return client.get_label_ids(names).await.map_err(|e| e.to_string());
+        }
+        let (resolved, unknown) = self.db
+            .resolve_label_ids_local(workspace, names)
+            .map_err(|e| e.to_string())?;
+        if !unknown.is_empty() {
+            let suggestions = suggest_label_names(&self.db, workspace, &unknown);
+            return Err(format!(
+                "Label{} {} not found. {}Run list_labels for the full set.",
+                if unknown.len() == 1 { "" } else { "s" },
+                unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
+                if suggestions.is_empty() { String::new() }
+                else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+            ));
+        }
+        Ok(resolved)
     }
 
     /// Re-chunk and re-embed a single issue. Best-effort — failures are silently ignored.
