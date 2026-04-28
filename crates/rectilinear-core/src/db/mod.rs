@@ -207,6 +207,34 @@ impl Database {
         })
     }
 
+    /// Resolve label names to ids using the local catalog (case-insensitive).
+    /// Returns (resolved_ids, unknown_names). Order of resolved_ids is not guaranteed.
+    pub fn resolve_label_ids_local(
+        &self,
+        workspace_id: &str,
+        names: &[String],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        if names.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.with_conn(|conn| {
+            let mut resolved = Vec::new();
+            let mut unknown = Vec::new();
+            let mut stmt = conn.prepare(
+                "SELECT id FROM labels WHERE workspace_id = ?1 AND name = ?2 COLLATE NOCASE",
+            )?;
+            for name in names {
+                let mut rows = stmt.query(rusqlite::params![workspace_id, name])?;
+                if let Some(row) = rows.next()? {
+                    resolved.push(row.get::<_, String>(0)?);
+                } else {
+                    unknown.push(name.clone());
+                }
+            }
+            Ok((resolved, unknown))
+        })
+    }
+
     // --- Issue-Label Join CRUD ---
 
     /// Replace the label set for an issue. Atomic via transaction.
@@ -1680,5 +1708,35 @@ mod tests {
         db.delete_labels_for_workspace_not_in("default", &[]).unwrap();
         let labels = db.get_issue_label_ids(&issue.id).unwrap();
         assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn resolve_label_ids_local_matches_case_insensitive_and_returns_unknowns() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+
+        db.upsert_label(&make_label("l1", "Vanta", "default")).unwrap();
+        db.upsert_label(&make_label("l2", "Security", "default")).unwrap();
+
+        let (resolved, unknown) = db
+            .resolve_label_ids_local("default", &["vanta".to_string(), "secURity".to_string(), "missing".to_string()])
+            .unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&"l1".to_string()));
+        assert!(resolved.contains(&"l2".to_string()));
+        assert_eq!(unknown, vec!["missing".to_string()]);
+    }
+
+    #[test]
+    fn resolve_label_ids_local_is_workspace_scoped() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+        db.upsert_workspace("work", None, None).unwrap();
+
+        db.upsert_label(&make_label("l1", "Vanta", "default")).unwrap();
+        db.upsert_label(&make_label("l2", "Vanta", "work")).unwrap();
+
+        let (resolved, _) = db.resolve_label_ids_local("work", &["vanta".to_string()]).unwrap();
+        assert_eq!(resolved, vec!["l2".to_string()]);
     }
 }
