@@ -562,14 +562,20 @@ impl LinearClient {
             input.insert("labelIds".into(), serde_json::json!(lids));
         }
         if let Some(pid) = project_id {
-            input.insert(
-                "projectId".into(),
-                serde_json::Value::String(pid.to_string()),
-            );
+            let value = if pid.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(pid.to_string())
+            };
+            input.insert("projectId".into(), value);
         }
         if let Some(aid) = assignee_id {
-            // Empty string clears the field (matches existing project_id convention).
-            input.insert("assigneeId".into(), serde_json::Value::String(aid.to_string()));
+            let value = if aid.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(aid.to_string())
+            };
+            input.insert("assigneeId".into(), value);
         }
 
         let query = r#"
