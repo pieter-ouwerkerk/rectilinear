@@ -128,6 +128,10 @@ impl Database {
                 rusqlite::params![id],
             )?;
             conn.execute(
+                "DELETE FROM labels WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
                 "DELETE FROM workspaces WHERE id = ?1",
                 rusqlite::params![id],
             )?;
@@ -1874,5 +1878,16 @@ mod tests {
         let r = db.fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()])).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].identifier, "ENG-20");
+    }
+
+    #[test]
+    fn delete_workspace_cleans_up_labels() {
+        use super::test_helpers::{test_db, make_label};
+        let (db, _dir) = test_db();
+        db.upsert_workspace("doomed", None, None).unwrap();
+        db.upsert_label(&make_label("l1", "Lab", "doomed")).unwrap();
+        db.delete_workspace("doomed").unwrap();
+        let listed = db.list_labels("doomed").unwrap();
+        assert!(listed.is_empty());
     }
 }
