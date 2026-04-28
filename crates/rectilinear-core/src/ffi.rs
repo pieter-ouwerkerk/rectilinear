@@ -705,9 +705,10 @@ impl RectilinearEngine {
             })?;
 
         // Re-sync the updated issue back to local DB
-        if let Ok((issue, relations)) = client.fetch_single_issue(&issue_id).await {
+        if let Ok((issue, relations, label_ids)) = client.fetch_single_issue(&issue_id).await {
             let _ = self.db.upsert_issue(&issue);
             let _ = self.db.upsert_relations(&issue.id, &relations);
+            let _ = self.db.replace_issue_labels(&issue.id, &label_ids);
         }
 
         Ok(())
@@ -804,9 +805,10 @@ impl RectilinearEngine {
             )
         };
 
-        if let Some((issue, relations)) = result {
+        if let Some((issue, relations, label_ids)) = result {
             self.db.upsert_issue(&issue)?;
             self.db.upsert_relations(&issue.id, &relations)?;
+            self.db.replace_issue_labels(&issue.id, &label_ids)?;
             Ok(Some(RtIssue::from(issue)))
         } else {
             Ok(None)

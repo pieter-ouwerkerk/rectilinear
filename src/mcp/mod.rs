@@ -497,10 +497,13 @@ impl RectilinearMcp {
                     .await
                     .map_err(|e| e.to_string())?;
                 match result {
-                    Some((issue, relations)) => {
+                    Some((issue, relations, label_ids)) => {
                         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
                         self.db
                             .upsert_relations(&issue.id, &relations)
+                            .map_err(|e| e.to_string())?;
+                        self.db
+                            .replace_issue_labels(&issue.id, &label_ids)
                             .map_err(|e| e.to_string())?;
                         issue
                     }
@@ -572,13 +575,16 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
 
-        let (issue, relations) = client
+        let (issue, relations, label_ids) = client
             .fetch_single_issue(&issue_id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&issue.id, &relations)
+            .map_err(|e| e.to_string())?;
+        self.db
+            .replace_issue_labels(&issue.id, &label_ids)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
@@ -643,7 +649,7 @@ IMPORTANT — Before calling this tool, you MUST:
 
         // If updating description, re-fetch from Linear to preserve any image references
         let safe_description = if args.description.is_some() {
-            let (latest, _) = client
+            let (latest, _, _) = client
                 .fetch_single_issue(&issue.id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -670,13 +676,16 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
 
-        let (updated, relations) = client
+        let (updated, relations, label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &relations)
+            .map_err(|e| e.to_string())?;
+        self.db
+            .replace_issue_labels(&updated.id, &label_ids)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
@@ -722,13 +731,16 @@ IMPORTANT — Before calling this tool, you MUST:
             actions.push("description_updated");
         }
 
-        let (updated, relations) = client
+        let (updated, relations, label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &relations)
+            .map_err(|e| e.to_string())?;
+        self.db
+            .replace_issue_labels(&updated.id, &label_ids)
             .map_err(|e| e.to_string())?;
 
         Ok(serde_json::json!({
@@ -969,13 +981,16 @@ IMPORTANT — Before calling this tool, you MUST:
         let client = self.client_for_workspace(&workspace)?;
 
         // Re-fetch from Linear to get the latest version
-        let (issue, issue_relations) = client
+        let (issue, issue_relations, issue_label_ids) = client
             .fetch_single_issue(&local_issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&issue.id, &issue_relations)
+            .map_err(|e| e.to_string())?;
+        self.db
+            .replace_issue_labels(&issue.id, &issue_label_ids)
             .map_err(|e| e.to_string())?;
 
         // If someone else already prioritized it, let the caller know
@@ -1106,13 +1121,16 @@ IMPORTANT — Before calling this tool, you MUST:
                 .map_err(|e| e.to_string())?;
         }
 
-        let (updated, updated_relations) = client
+        let (updated, updated_relations, updated_label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &updated_relations)
+            .map_err(|e| e.to_string())?;
+        self.db
+            .replace_issue_labels(&updated.id, &updated_label_ids)
             .map_err(|e| e.to_string())?;
 
         // Re-embed if title or description changed
@@ -1178,13 +1196,16 @@ IMPORTANT — Before calling this tool, you MUST:
                     .map_err(|e| e.to_string())?;
 
                 // Re-fetch to update local relations
-                let (updated, relations) = client
+                let (updated, relations, label_ids) = client
                     .fetch_single_issue(&source.id)
                     .await
                     .map_err(|e| e.to_string())?;
                 self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
                 self.db
                     .upsert_relations(&updated.id, &relations)
+                    .map_err(|e| e.to_string())?;
+                self.db
+                    .replace_issue_labels(&updated.id, &label_ids)
                     .map_err(|e| e.to_string())?;
 
                 Ok(serde_json::json!({
@@ -1221,13 +1242,16 @@ IMPORTANT — Before calling this tool, you MUST:
                     .map_err(|e| e.to_string())?;
 
                 // Re-fetch to update local relations
-                let (updated, relations) = client
+                let (updated, relations, label_ids) = client
                     .fetch_single_issue(&source.id)
                     .await
                     .map_err(|e| e.to_string())?;
                 self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
                 self.db
                     .upsert_relations(&updated.id, &relations)
+                    .map_err(|e| e.to_string())?;
+                self.db
+                    .replace_issue_labels(&updated.id, &label_ids)
                     .map_err(|e| e.to_string())?;
 
                 Ok(serde_json::json!({

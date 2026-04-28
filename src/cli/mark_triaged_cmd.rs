@@ -49,9 +49,10 @@ pub async fn handle_mark_triaged(
     let client = LinearClient::with_api_key(&api_key);
 
     // Re-fetch from Linear (staleness check)
-    let (issue, issue_relations) = client.fetch_single_issue(&local_issue.id).await?;
+    let (issue, issue_relations, issue_label_ids) = client.fetch_single_issue(&local_issue.id).await?;
     db.upsert_issue(&issue)?;
     db.upsert_relations(&issue.id, &issue_relations)?;
+    db.replace_issue_labels(&issue.id, &issue_label_ids)?;
 
     // Already triaged?
     if issue.priority != 0 {
@@ -178,9 +179,10 @@ pub async fn handle_mark_triaged(
     }
 
     // Sync back
-    let (updated, updated_relations) = client.fetch_single_issue(&issue.id).await?;
+    let (updated, updated_relations, updated_label_ids) = client.fetch_single_issue(&issue.id).await?;
     db.upsert_issue(&updated)?;
     db.upsert_relations(&updated.id, &updated_relations)?;
+    db.replace_issue_labels(&updated.id, &updated_label_ids)?;
 
     // Re-embed if content changed
     if title.is_some() || description.is_some() {

@@ -793,9 +793,10 @@ fn spawn_apply(
             .await;
 
         if result.is_ok() {
-            if let Ok((updated, relations)) = linear.fetch_single_issue(&issue_id).await {
+            if let Ok((updated, relations, label_ids)) = linear.fetch_single_issue(&issue_id).await {
                 db.upsert_issue(&updated).ok();
                 db.upsert_relations(&updated.id, &relations).ok();
+                db.replace_issue_labels(&updated.id, &label_ids).ok();
             }
         }
 

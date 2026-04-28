@@ -118,6 +118,7 @@ struct LinearLabelConnection {
 
 #[derive(Debug, Deserialize)]
 struct LinearLabel {
+    id: String,
     name: String,
 }
 
@@ -321,7 +322,7 @@ impl LinearClient {
         after_cursor: Option<&str>,
         updated_after: Option<&str>,
         include_archived: bool,
-    ) -> Result<(Vec<(db::Issue, Vec<db::Relation>)>, bool, Option<String>)> {
+    ) -> Result<(Vec<(db::Issue, Vec<db::Relation>, Vec<String>)>, bool, Option<String>)> {
         let mut filter_parts = vec![format!("team: {{ key: {{ eq: \"{}\" }} }}", team_key)];
         if let Some(after) = updated_after {
             filter_parts.push(format!("updatedAt: {{ gt: \"{}\" }}", after));
@@ -352,7 +353,7 @@ impl LinearClient {
                         team {{ key }}
                         assignee {{ name }}
                         project {{ name }}
-                        labels {{ nodes {{ name }} }}
+                        labels {{ nodes {{ id name }} }}
                         relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
                     }}
                     pageInfo {{ hasNextPage endCursor }}
@@ -363,7 +364,7 @@ impl LinearClient {
 
         let data: IssuesData = self.query(&query, serde_json::json!({})).await?;
 
-        let issues: Vec<(db::Issue, Vec<db::Relation>)> = data
+        let issues: Vec<(db::Issue, Vec<db::Relation>, Vec<String>)> = data
             .issues
             .nodes
             .into_iter()
@@ -407,13 +408,14 @@ impl LinearClient {
                 .await?;
 
             let count = issues.len();
-            for (mut issue, relations) in issues {
+            for (mut issue, relations, label_ids) in issues {
                 issue.workspace_id = workspace_id.to_string();
                 if max_updated.is_none() || Some(&issue.updated_at) > max_updated.as_ref() {
                     max_updated = Some(issue.updated_at.clone());
                 }
                 db.upsert_issue(&issue)?;
                 db.upsert_relations(&issue.id, &relations)?;
+                db.replace_issue_labels(&issue.id, &label_ids)?;
             }
             total += count;
 
@@ -565,7 +567,7 @@ impl LinearClient {
     pub async fn fetch_single_issue(
         &self,
         issue_id: &str,
-    ) -> Result<(db::Issue, Vec<db::Relation>)> {
+    ) -> Result<(db::Issue, Vec<db::Relation>, Vec<String>)> {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
@@ -575,7 +577,7 @@ impl LinearClient {
                     team { key }
                     assignee { name }
                     project { name }
-                    labels { nodes { name } }
+                    labels { nodes { id name } }
                     relations { nodes { id type relatedIssue { id identifier } } }
                 }
             }
@@ -593,7 +595,7 @@ impl LinearClient {
     pub async fn fetch_issue_by_identifier(
         &self,
         identifier: &str,
-    ) -> Result<Option<(db::Issue, Vec<db::Relation>)>> {
+    ) -> Result<Option<(db::Issue, Vec<db::Relation>, Vec<String>)>> {
         // Parse "CUT-537" into team_key="CUT", number=537
         let parts: Vec<&str> = identifier.rsplitn(2, '-').collect();
         if parts.len() != 2 {
@@ -623,7 +625,7 @@ impl LinearClient {
                         team {{ key }}
                         assignee {{ name }}
                         project {{ name }}
-                        labels {{ nodes {{ name }} }}
+                        labels {{ nodes {{ id name }} }}
                         relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
                     }}
                     pageInfo {{ hasNextPage endCursor }}
@@ -642,8 +644,9 @@ impl LinearClient {
             .map(Self::convert_linear_issue))
     }
 
-    fn convert_linear_issue(i: LinearIssue) -> (db::Issue, Vec<db::Relation>) {
+    fn convert_linear_issue(i: LinearIssue) -> (db::Issue, Vec<db::Relation>, Vec<String>) {
         let labels: Vec<String> = i.labels.nodes.iter().map(|l| l.name.clone()).collect();
+        let label_ids: Vec<String> = i.labels.nodes.iter().map(|l| l.id.clone()).collect();
         let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
 
         let mut hasher = Sha256::new();
@@ -675,7 +678,7 @@ impl LinearClient {
             workspace_id: "default".to_string(),
         };
 
-        (issue, relations)
+        (issue, relations, label_ids)
     }
 
     /// Get a team's ID from its key
