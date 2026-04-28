@@ -395,6 +395,13 @@ impl LinearClient {
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
+        // Refresh workspace label catalog before syncing issues so issue_labels
+        // can be populated. Linear labels are workspace-scoped, so this runs
+        // per-call (cheap: one paginated query).
+        if let Err(e) = self.sync_labels_catalog(db, workspace_id).await {
+            eprintln!("warning: failed to sync label catalog for workspace '{}': {}", workspace_id, e);
+        }
+
         let updated_after = if full {
             None
         } else {
