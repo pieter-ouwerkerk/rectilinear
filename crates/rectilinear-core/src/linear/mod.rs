@@ -11,6 +11,7 @@ const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 pub struct LinearClient {
     client: reqwest::Client,
     api_key: String,
+    viewer_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,7 +239,7 @@ impl LinearClient {
     pub fn new(config: &Config) -> Result<Self> {
         let api_key = config.linear_api_key()?.to_string();
         let client = reqwest::Client::new();
-        Ok(Self { client, api_key })
+        Ok(Self { client, api_key, viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)) })
     }
 
     /// Create a client with an explicit API key (for FFI callers).
@@ -246,6 +247,7 @@ impl LinearClient {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.to_string(),
+            viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -257,6 +259,7 @@ impl LinearClient {
         Self {
             client,
             api_key: api_key.to_string(),
+            viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -813,6 +816,68 @@ impl LinearClient {
         }
 
         Ok(ids)
+    }
+
+    /// Resolve an assignee identifier to a Linear user id.
+    ///
+    /// - `"me"` (case-insensitive) → cached `viewer.id`.
+    /// - `"none"` (case-insensitive) → empty string (caller decides whether that's allowed).
+    /// - Anything else → case-insensitive `name` lookup against the workspace's users.
+    ///   Errors if zero or multiple matches.
+    pub async fn resolve_assignee_id(&self, input: &str) -> Result<String> {
+        let trimmed = input.trim();
+        if trimmed.eq_ignore_ascii_case("none") {
+            return Ok(String::new());
+        }
+        if trimmed.eq_ignore_ascii_case("me") {
+            if let Some(cached) = self.viewer_id.read().unwrap().clone() {
+                return Ok(cached);
+            }
+            let data: serde_json::Value = self
+                .query("query { viewer { id } }", serde_json::json!({}))
+                .await?;
+            let id = data["viewer"]["id"]
+                .as_str()
+                .context("viewer query returned no id")?
+                .to_string();
+            *self.viewer_id.write().unwrap() = Some(id.clone());
+            return Ok(id);
+        }
+
+        // Name lookup. Linear's `users` query has no `eqIgnoreCase` filter; fetch and filter locally.
+        let data: serde_json::Value = self
+            .query(
+                "query { users(first: 250) { nodes { id name } } }",
+                serde_json::json!({}),
+            )
+            .await?;
+        let nodes = data["users"]["nodes"]
+            .as_array()
+            .context("users query returned no nodes")?;
+        let matches: Vec<(String, String)> = nodes
+            .iter()
+            .filter_map(|n| {
+                let name = n["name"].as_str()?;
+                if name.eq_ignore_ascii_case(trimmed) {
+                    Some((n["id"].as_str()?.to_string(), name.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        match matches.len() {
+            0 => anyhow::bail!("Assignee '{}' not found in Linear users.", trimmed),
+            1 => Ok(matches.into_iter().next().unwrap().0),
+            _ => {
+                let names: Vec<&str> = matches.iter().map(|(_, n)| n.as_str()).collect();
+                anyhow::bail!(
+                    "Assignee '{}' matched multiple users: {}. Use a more specific name.",
+                    trimmed,
+                    names.join(", ")
+                )
+            }
+        }
     }
 
     /// Fetch the full label catalog for the workspace (all pages).
