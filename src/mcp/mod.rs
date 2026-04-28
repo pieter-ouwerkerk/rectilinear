@@ -588,25 +588,34 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
-        // Resolve labels (if provided) — local catalog first, fall back to remote on empty cache.
+        // Resolve labels (if provided). If the catalog has never been synced for this
+        // workspace, fall back to the remote query so create_issue still works on a
+        // fresh install. Otherwise resolve locally and error on unknown names.
         let label_ids: Vec<String> = if let Some(ref names) = args.labels {
-            let (resolved, unknown) = self.db
-                .resolve_label_ids_local(&workspace, names)
-                .map_err(|e| e.to_string())?;
-            if !unknown.is_empty() {
-                let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
-                return Err(format!(
-                    "Label{} {} not found. {}Run list_labels for the full set.",
-                    if unknown.len() == 1 { "" } else { "s" },
-                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
-                    if suggestions.is_empty() { String::new() }
-                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
-                ));
-            }
-            // Stale-catalog fallback: if local catalog is empty for this workspace, fall through to remote resolution.
-            if resolved.is_empty() && !names.is_empty() {
+            let catalog_size = self.db
+                .list_labels(&workspace)
+                .map_err(|e| e.to_string())?
+                .len();
+            if catalog_size == 0 {
+                eprintln!(
+                    "info: labels catalog empty for workspace '{}', resolving via remote query",
+                    workspace
+                );
                 client.get_label_ids(names).await.map_err(|e| e.to_string())?
             } else {
+                let (resolved, unknown) = self.db
+                    .resolve_label_ids_local(&workspace, names)
+                    .map_err(|e| e.to_string())?;
+                if !unknown.is_empty() {
+                    let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
+                    return Err(format!(
+                        "Label{} {} not found. {}Run list_labels for the full set.",
+                        if unknown.len() == 1 { "" } else { "s" },
+                        unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
+                        if suggestions.is_empty() { String::new() }
+                        else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                    ));
+                }
                 resolved
             }
         } else {
