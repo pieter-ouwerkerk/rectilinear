@@ -1371,4 +1371,78 @@ mod tests {
         assert_eq!(work_teams.len(), 1);
         assert_eq!(work_teams[0].key, "WRK");
     }
+
+    #[test]
+    fn migration_8_creates_label_tables_and_resets_sync_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .unwrap();
+
+        // Run migrations 1-7 only
+        crate::db::schema::run_migrations(&conn).unwrap();
+
+        // Delete from schema_version to simulate being at version 7
+        conn.execute("DELETE FROM schema_version WHERE version = 8", [])
+            .unwrap();
+
+        // Seed sync_state as if a prior sync had completed
+        conn.execute(
+            "INSERT INTO sync_state (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
+             VALUES ('default', 'ENG', '2026-04-01T00:00:00Z', 1, '2026-04-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Verify the sync_state row before migration 8
+        let full_done_before: i64 = conn
+            .query_row(
+                "SELECT full_sync_done FROM sync_state WHERE workspace_id='default' AND team_key='ENG'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(full_done_before, 1);
+
+        // Run migrations again — migration 8 should now run
+        crate::db::schema::run_migrations(&conn).unwrap();
+
+        // Tables exist
+        let labels_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='labels'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(labels_count, 1);
+        let join_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issue_labels'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(join_count, 1);
+
+        // sync_state reset
+        let full_done: i64 = conn
+            .query_row(
+                "SELECT full_sync_done FROM sync_state WHERE workspace_id='default' AND team_key='ENG'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(full_done, 0);
+        let last_updated: String = conn
+            .query_row(
+                "SELECT last_updated_at FROM sync_state WHERE workspace_id='default' AND team_key='ENG'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_updated, "1970-01-01T00:00:00Z");
+    }
 }

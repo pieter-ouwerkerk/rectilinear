@@ -51,8 +51,37 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (7)", [])?;
     }
 
+    if current_version < 8 {
+        conn.execute_batch(MIGRATION_8)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (8)", [])?;
+    }
+
     Ok(())
 }
+
+const MIGRATION_8: &str = "
+-- Workspace label catalog
+CREATE TABLE IF NOT EXISTS labels (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    name TEXT NOT NULL,
+    color TEXT,
+    parent_id TEXT,
+    UNIQUE (workspace_id, name COLLATE NOCASE)
+);
+CREATE INDEX IF NOT EXISTS idx_labels_workspace ON labels(workspace_id);
+
+-- Issue ↔ label join table
+CREATE TABLE IF NOT EXISTS issue_labels (
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+    PRIMARY KEY (issue_id, label_id)
+);
+CREATE INDEX IF NOT EXISTS idx_issue_labels_label ON issue_labels(label_id);
+
+-- Force full re-sync so issue_labels gets populated for existing issues.
+UPDATE sync_state SET full_sync_done = 0, last_updated_at = '1970-01-01T00:00:00Z';
+";
 
 const MIGRATION_7: &str = "
 -- Workspace registry
