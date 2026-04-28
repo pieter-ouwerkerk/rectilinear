@@ -193,6 +193,26 @@ fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<
     hints
 }
 
+/// Suggest up to 3 label names from the local catalog matching any unknown name as a substring.
+/// Returns an empty vec if catalog can't be read or no candidates match.
+fn suggest_label_names(db: &Database, workspace: &str, unknown: &[String]) -> Vec<String> {
+    let Ok(catalog) = db.list_labels(workspace) else { return Vec::new() };
+    let mut hits: Vec<String> = Vec::new();
+    for u in unknown {
+        let needle = u.to_lowercase();
+        for label in &catalog {
+            let hay = label.name.to_lowercase();
+            if hay.contains(&needle) || needle.contains(&hay) {
+                if !hits.contains(&label.name) {
+                    hits.push(label.name.clone());
+                    if hits.len() >= 3 { return hits; }
+                }
+            }
+        }
+    }
+    hits
+}
+
 #[derive(Clone)]
 pub struct RectilinearMcp {
     db: Database,
@@ -258,6 +278,10 @@ struct CreateIssueArgs {
     priority: Option<i32>,
     /// Parent issue identifier to create as sub-issue (e.g., "CUT-42")
     parent: Option<String>,
+    /// Set labels by name (case-insensitive). Use list_labels to discover.
+    labels: Option<Vec<String>>,
+    /// Assignee. Pass "me" to assign to the authenticated user, or a name (case-insensitive).
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -534,7 +558,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "create_issue",
-        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low).
+        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low), labels (list of names), and assignee ('me' for self-assign, or a user's display name).
 
 IMPORTANT — Before calling this tool, you MUST:
 
@@ -564,14 +588,49 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
+        // Resolve labels (if provided) — local catalog first, fall back to remote on empty cache.
+        let label_ids: Vec<String> = if let Some(ref names) = args.labels {
+            let (resolved, unknown) = self.db
+                .resolve_label_ids_local(&workspace, names)
+                .map_err(|e| e.to_string())?;
+            if !unknown.is_empty() {
+                let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
+                return Err(format!(
+                    "Label{} {} not found. {}Run list_labels for the full set.",
+                    if unknown.len() == 1 { "" } else { "s" },
+                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
+                    if suggestions.is_empty() { String::new() }
+                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                ));
+            }
+            // Stale-catalog fallback: if local catalog is empty for this workspace, fall through to remote resolution.
+            if resolved.is_empty() && !names.is_empty() {
+                client.get_label_ids(names).await.map_err(|e| e.to_string())?
+            } else {
+                resolved
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Resolve assignee.
+        let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
+            if a.eq_ignore_ascii_case("none") {
+                return Err("Cannot use 'none' on create_issue; omit the parameter to leave unassigned.".to_string());
+            }
+            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+
         let (issue_id, identifier) = client
             .create_issue(
                 &team_id,
                 &args.title,
                 args.description.as_deref(),
                 args.priority,
-                &[],
-                None,                  // assignee_id (wired in Task 12)
+                &label_ids,
+                assignee_id.as_deref(),
                 parent_id.as_deref(),
             )
             .await
