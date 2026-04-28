@@ -236,6 +236,8 @@ struct SearchArgs {
     mode: Option<String>,
     /// Maximum number of results
     limit: Option<usize>,
+    /// Filter to issues that have ALL of these labels (case-insensitive).
+    labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -352,6 +354,8 @@ struct GetTriageQueueArgs {
     shuffle: Option<bool>,
     /// Include completed/canceled issues (default false). Useful for archival prioritization.
     include_completed: Option<bool>,
+    /// Filter to issues that have ALL of these labels (case-insensitive).
+    labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -452,6 +456,33 @@ impl RectilinearMcp {
             None
         };
 
+        let label_ids = if let Some(ref names) = args.labels {
+            let (resolved, unknown) = self.db
+                .resolve_label_ids_local(&workspace, names)
+                .map_err(|e| e.to_string())?;
+            if !unknown.is_empty() {
+                if resolved.is_empty()
+                    && self.db.list_labels(&workspace).map_err(|e| e.to_string())?.is_empty()
+                {
+                    return Err(format!(
+                        "No labels synced yet for workspace '{}'. Run sync_team first.",
+                        workspace
+                    ));
+                }
+                let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
+                return Err(format!(
+                    "Label{} {} not found. {}Run list_labels for the full set.",
+                    if unknown.len() == 1 { "" } else { "s" },
+                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
+                    if suggestions.is_empty() { String::new() }
+                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                ));
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+
         let results = search::search(
             &self.db,
             search::SearchParams {
@@ -459,7 +490,7 @@ impl RectilinearMcp {
                 mode,
                 team_key: args.team.as_deref(),
                 state_filter: args.state.as_deref(),
-                label_ids: None,
+                label_ids: label_ids.as_deref(),
                 limit,
                 embedder: embedder.as_ref(),
                 rrf_k: self.config.search.rrf_k,
@@ -932,12 +963,40 @@ IMPORTANT — Before calling this tool, you MUST:
                 .await;
         }
 
+        let label_ids = if let Some(ref names) = args.labels {
+            let (resolved, unknown) = self.db
+                .resolve_label_ids_local(&workspace, names)
+                .map_err(|e| e.to_string())?;
+            if !unknown.is_empty() {
+                if resolved.is_empty()
+                    && self.db.list_labels(&workspace).map_err(|e| e.to_string())?.is_empty()
+                {
+                    return Err(format!(
+                        "No labels synced yet for workspace '{}'. Run sync_team first.",
+                        workspace
+                    ));
+                }
+                let suggestions = suggest_label_names(&self.db, &workspace, &unknown);
+                return Err(format!(
+                    "Label{} {} not found. {}Run list_labels for the full set.",
+                    if unknown.len() == 1 { "" } else { "s" },
+                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
+                    if suggestions.is_empty() { String::new() }
+                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                ));
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+
         let all_issues = self
             .db
-            .get_unprioritized_issues(
+            .get_unprioritized_issues_filtered(
                 Some(&args.team),
                 args.include_completed.unwrap_or(false),
                 &workspace,
+                label_ids.as_deref(),
             )
             .map_err(|e| e.to_string())?;
 
