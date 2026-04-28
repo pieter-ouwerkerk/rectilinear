@@ -319,11 +319,49 @@ impl Database {
         })
     }
 
+    /// Build a SQL fragment "<table_alias>.id IN (SELECT issue_id FROM issue_labels ...)"
+    /// for AND-matching all of `label_ids`. Returns the fragment + bound params.
+    /// Caller is responsible for prepending " AND " before splicing in.
+    /// `param_offset` is the next free `?N` index (1-based).
+    /// `table_alias` is the alias used by the outer query (e.g. "issues" or "i").
+    fn label_filter_fragment(
+        label_ids: &[String],
+        param_offset: usize,
+        table_alias: &str,
+    ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let n = label_ids.len();
+        let placeholders = (0..n)
+            .map(|i| format!("?{}", param_offset + i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "{table_alias}.id IN (\
+                SELECT issue_id FROM issue_labels \
+                WHERE label_id IN ({placeholders}) \
+                GROUP BY issue_id \
+                HAVING COUNT(DISTINCT label_id) = {n}\
+             )"
+        );
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            label_ids.iter().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::types::ToSql>).collect();
+        (sql, params)
+    }
+
     pub fn get_unprioritized_issues(
         &self,
         team_key: Option<&str>,
         include_completed: bool,
         workspace_id: &str,
+    ) -> Result<Vec<Issue>> {
+        self.get_unprioritized_issues_filtered(team_key, include_completed, workspace_id, None)
+    }
+
+    pub fn get_unprioritized_issues_filtered(
+        &self,
+        team_key: Option<&str>,
+        include_completed: bool,
+        workspace_id: &str,
+        label_ids: Option<&[String]>,
     ) -> Result<Vec<Issue>> {
         self.with_conn(|conn| {
             let state_filter = if include_completed {
@@ -331,30 +369,35 @@ impl Database {
             } else {
                 " AND state_type NOT IN ('completed', 'canceled')"
             };
-            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(team) = team_key {
-                (
-                    format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
-                         FROM issues WHERE priority = 0{} AND team_key = ?1 AND workspace_id = ?2
-                         ORDER BY created_at DESC", state_filter
-                    ),
-                    vec![Box::new(team.to_string()) as Box<dyn rusqlite::types::ToSql>, Box::new(workspace_id.to_string())],
-                )
+
+            // Required base params come first; label-filter params (if any) are appended.
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let base_where: String = if let Some(team) = team_key {
+                params.push(Box::new(team.to_string()));
+                params.push(Box::new(workspace_id.to_string()));
+                "team_key = ?1 AND workspace_id = ?2".to_string()
             } else {
-                (
-                    format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
-                         FROM issues WHERE priority = 0{} AND workspace_id = ?1
-                         ORDER BY created_at DESC", state_filter
-                    ),
-                    vec![Box::new(workspace_id.to_string()) as Box<dyn rusqlite::types::ToSql>],
-                )
+                params.push(Box::new(workspace_id.to_string()));
+                "workspace_id = ?1".to_string()
             };
+
+            let label_clause = if let Some(ids) = label_ids.filter(|ids| !ids.is_empty()) {
+                let (frag, mut lp) = Self::label_filter_fragment(ids, params.len() + 1, "issues");
+                params.append(&mut lp);
+                format!(" AND {frag}")
+            } else {
+                String::new()
+            };
+
+            let sql = format!(
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                 FROM issues WHERE priority = 0{state_filter} AND {base_where}{label_clause}
+                 ORDER BY created_at DESC"
+            );
+
             let mut stmt = conn.prepare(&sql)?;
             let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let rows = stmt.query_map(param_refs.as_slice(), |row| {
-                Ok(Issue::from_row(row).unwrap())
-            })?;
+            let rows = stmt.query_map(param_refs.as_slice(), |row| Ok(Issue::from_row(row).unwrap()))?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
@@ -990,16 +1033,42 @@ impl Database {
         limit: usize,
         workspace_id: &str,
     ) -> Result<Vec<FtsResult>> {
+        self.fts_search_filtered(query, limit, workspace_id, None)
+    }
+
+    pub fn fts_search_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        workspace_id: &str,
+        label_ids: Option<&[String]>,
+    ) -> Result<Vec<FtsResult>> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(query.to_string()),
+                Box::new(limit as i64),
+                Box::new(workspace_id.to_string()),
+            ];
+
+            let label_clause = if let Some(ids) = label_ids.filter(|ids| !ids.is_empty()) {
+                let (frag, mut lp) = Self::label_filter_fragment(ids, params.len() + 1, "i");
+                params.append(&mut lp);
+                format!(" AND {frag}")
+            } else {
+                String::new()
+            };
+
+            let sql = format!(
                 "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, bm25(issues_fts) as rank
                  FROM issues_fts f
                  JOIN issues i ON f.rowid = i.rowid
-                 WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3
+                 WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3{label_clause}
                  ORDER BY rank
                  LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(rusqlite::params![query, limit, workspace_id], |row| {
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
                 Ok(FtsResult {
                     issue_id: row.get(0)?,
                     identifier: row.get(1)?,
@@ -1738,5 +1807,72 @@ mod tests {
 
         let (resolved, _) = db.resolve_label_ids_local("work", &["vanta".to_string()]).unwrap();
         assert_eq!(resolved, vec!["l2".to_string()]);
+    }
+
+    #[test]
+    fn get_unprioritized_issues_filters_by_labels_with_and_semantics() {
+        use super::test_helpers::{test_db, make_issue, make_label};
+        let (db, _dir) = test_db();
+
+        let mut a = make_issue("ENG-10", "ENG"); a.priority = 0;
+        let mut b = make_issue("ENG-11", "ENG"); b.priority = 0;
+        let mut c = make_issue("ENG-12", "ENG"); c.priority = 0;
+        db.upsert_issue(&a).unwrap();
+        db.upsert_issue(&b).unwrap();
+        db.upsert_issue(&c).unwrap();
+
+        db.upsert_label(&make_label("vanta", "Vanta", "default")).unwrap();
+        db.upsert_label(&make_label("sec",   "Security", "default")).unwrap();
+
+        db.replace_issue_labels(&a.id, &["vanta".to_string(), "sec".to_string()]).unwrap();
+        db.replace_issue_labels(&b.id, &["vanta".to_string()]).unwrap();
+        db.replace_issue_labels(&c.id, &["sec".to_string()]).unwrap();
+
+        // Filter by both labels (AND) → only `a`
+        let result = db.get_unprioritized_issues_filtered(
+            Some("ENG"), false, "default",
+            Some(&["vanta".to_string(), "sec".to_string()]),
+        ).unwrap();
+        let idents: Vec<_> = result.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(idents, vec!["ENG-10"]);
+
+        // Filter by single label → `a` and `b`
+        let result = db.get_unprioritized_issues_filtered(
+            Some("ENG"), false, "default",
+            Some(&["vanta".to_string()]),
+        ).unwrap();
+        let idents: Vec<_> = result.iter().map(|i| i.identifier.as_str()).collect();
+        assert!(idents.contains(&"ENG-10"));
+        assert!(idents.contains(&"ENG-11"));
+        assert!(!idents.contains(&"ENG-12"));
+
+        // No filter → all three
+        let result = db.get_unprioritized_issues_filtered(Some("ENG"), false, "default", None).unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn fts_search_with_label_filter_intersects() {
+        use super::test_helpers::{test_db, make_issue, make_label};
+        let (db, _dir) = test_db();
+
+        let mut a = make_issue("ENG-20", "ENG");
+        a.title = "Audit logging gap".to_string();
+        let mut b = make_issue("ENG-21", "ENG");
+        b.title = "Audit something else".to_string();
+        db.upsert_issue(&a).unwrap();
+        db.upsert_issue(&b).unwrap();
+
+        db.upsert_label(&make_label("vanta", "Vanta", "default")).unwrap();
+        db.replace_issue_labels(&a.id, &["vanta".to_string()]).unwrap();
+
+        // Without filter, both match "audit"
+        let r = db.fts_search_filtered("\"audit\"", 10, "default", None).unwrap();
+        assert_eq!(r.len(), 2);
+
+        // With Vanta filter, only `a`
+        let r = db.fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()])).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].identifier, "ENG-20");
     }
 }
