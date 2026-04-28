@@ -223,6 +223,12 @@ pub struct RectilinearMcp {
 struct ListWorkspacesArgs {}
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ListLabelsArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct SearchArgs {
     /// Workspace name (required). Use list_workspaces to see available workspaces.
     workspace: Option<String>,
@@ -433,6 +439,59 @@ impl RectilinearMcp {
             "instruction": "Pass the workspace name to all other tools."
         }))
         .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "list_labels",
+        description = "List all labels in the workspace, grouped by parent. Pure local read — no Linear API call. If empty, run sync_team to refresh the catalog."
+    )]
+    async fn list_labels(
+        &self,
+        #[tool(aggr)] args: ListLabelsArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let labels = self.db.list_labels(&workspace).map_err(|e| e.to_string())?;
+
+        // Index by id for parent name lookup.
+        let by_id: std::collections::HashMap<&str, &str> =
+            labels.iter().map(|l| (l.id.as_str(), l.name.as_str())).collect();
+
+        // Group: top-level (no parent) and grouped-by-parent.
+        let mut top_level: Vec<&_> = labels.iter().filter(|l| l.parent_id.is_none()).collect();
+        top_level.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        let mut groups: std::collections::BTreeMap<String, Vec<&_>> = std::collections::BTreeMap::new();
+        for l in labels.iter().filter(|l| l.parent_id.is_some()) {
+            let parent_name = l.parent_id.as_deref()
+                .and_then(|pid| by_id.get(pid).copied())
+                .unwrap_or("(unknown group)")
+                .to_string();
+            groups.entry(parent_name).or_default().push(l);
+        }
+        for v in groups.values_mut() {
+            v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+
+        let payload = serde_json::json!({
+            "workspace": workspace,
+            "count": labels.len(),
+            "top_level": top_level.iter().map(|l| serde_json::json!({
+                "name": l.name,
+                "color": l.color,
+            })).collect::<Vec<_>>(),
+            "groups": groups.iter().map(|(parent, members)| serde_json::json!({
+                "parent": parent,
+                "labels": members.iter().map(|l| serde_json::json!({
+                    "name": l.name,
+                    "color": l.color,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "note": if labels.is_empty() {
+                "Catalog is empty. Run sync_team to populate labels."
+            } else { "" },
+        });
+
+        serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
     }
 
     #[tool(
