@@ -142,6 +142,14 @@ pub struct TeamNode {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct LabelCatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub parent_id: Option<String>,
+}
+
 // --- Issue creation types ---
 
 #[derive(Debug, Deserialize)]
@@ -789,6 +797,61 @@ impl LinearClient {
         }
 
         Ok(ids)
+    }
+
+    /// Fetch the full label catalog for the workspace (all pages).
+    pub async fn fetch_labels(&self) -> Result<Vec<LabelCatalogEntry>> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let after_param = match cursor {
+                Some(ref c) => format!(", after: \"{}\"", c),
+                None => String::new(),
+            };
+            let query = format!(
+                r#"query {{
+                    issueLabels(first: 250{}) {{
+                        nodes {{ id name color parent {{ id }} }}
+                        pageInfo {{ hasNextPage endCursor }}
+                    }}
+                }}"#,
+                after_param
+            );
+            let data: serde_json::Value = self.query(&query, serde_json::json!({})).await?;
+            let nodes = data["issueLabels"]["nodes"]
+                .as_array()
+                .context("No issueLabels.nodes in response")?;
+            for n in nodes {
+                let id = n["id"].as_str().context("label has no id")?.to_string();
+                let name = n["name"].as_str().unwrap_or("").to_string();
+                let color = n["color"].as_str().map(|s| s.to_string());
+                let parent_id = n["parent"]["id"].as_str().map(|s| s.to_string());
+                out.push(LabelCatalogEntry { id, name, color, parent_id });
+            }
+            let has_next = data["issueLabels"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
+            if !has_next { break; }
+            cursor = data["issueLabels"]["pageInfo"]["endCursor"].as_str().map(|s| s.to_string());
+            if cursor.is_none() { break; }
+        }
+        Ok(out)
+    }
+
+    /// Sync the workspace's label catalog into the local database.
+    /// Upserts labels by id and removes labels that no longer exist remotely.
+    pub async fn sync_labels_catalog(&self, db: &Database, workspace_id: &str) -> Result<usize> {
+        let entries = self.fetch_labels().await?;
+        let keep_ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+        for e in &entries {
+            db.upsert_label(&db::Label {
+                id: e.id.clone(),
+                workspace_id: workspace_id.to_string(),
+                name: e.name.clone(),
+                color: e.color.clone(),
+                parent_id: e.parent_id.clone(),
+            })?;
+        }
+        db.delete_labels_for_workspace_not_in(workspace_id, &keep_ids)?;
+        Ok(entries.len())
     }
 
     /// Resolve a project name to its ID. Matches case-insensitively.
