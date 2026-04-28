@@ -34,7 +34,7 @@ pub async fn handle_create(
     );
 
     let (issue_id, identifier) = client
-        .create_issue(&team_id, title, description, priority, labels, None, None) // assignee_id (wired in Task 12)
+        .create_issue(&team_id, title, description, priority, labels, None, None) // assignee_id: out of scope (CLI does not expose --assignee)
         .await?;
 
     println!("{} Created {}", "✓".green().bold(), identifier.bold());

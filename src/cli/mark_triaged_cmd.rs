@@ -170,7 +170,7 @@ pub async fn handle_mark_triaged(
             state_id.as_deref(),
             label_ids.as_deref(),
             project_id.as_deref(),
-            None, // assignee_id (wired in Task 14)
+            None, // assignee_id: out of scope (CLI does not expose --assignee)
         )
         .await?;
 

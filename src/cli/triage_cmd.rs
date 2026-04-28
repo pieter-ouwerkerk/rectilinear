@@ -790,7 +790,7 @@ fn spawn_apply(
                 None,
                 None,
                 None,
-                None, // assignee_id (wired in later tasks)
+                None, // assignee_id: out of scope (CLI does not expose --assignee)
             )
             .await;
 
