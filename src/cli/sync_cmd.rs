@@ -78,11 +78,19 @@ pub async fn handle_sync(
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let do_full = full || is_first;
+    let do_include_archived = include_archived || do_full;
     let progress_cb = |total: usize| {
         pb.set_message(format!("{} issues synced", total));
     };
     let count = client
-        .sync_team(db, &team_key, workspace, do_full, include_archived, Some(&progress_cb))
+        .sync_team(
+            db,
+            &team_key,
+            workspace,
+            do_full,
+            do_include_archived,
+            Some(&progress_cb),
+        )
         .await?;
 
     pb.finish_with_message(format!(

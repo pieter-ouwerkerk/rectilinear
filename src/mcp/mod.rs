@@ -45,6 +45,26 @@ fn enrich_with_issue_links(value: &mut serde_json::Value, db: &Database) {
     }
 }
 
+fn attach_comments_payload(
+    value: &mut serde_json::Value,
+    db: &Database,
+    issue_id: &str,
+) -> Result<(), String> {
+    let comments = db.get_comments(issue_id).map_err(|e| e.to_string())?;
+    let sync_state = db
+        .get_comment_sync_state(issue_id)
+        .map_err(|e| e.to_string())?;
+
+    value["comments"] = serde_json::to_value(&comments).map_err(|e| e.to_string())?;
+    value["comments_status"] = serde_json::Value::String(sync_state.status);
+    value["comments_synced_at"] =
+        serde_json::to_value(sync_state.synced_at).map_err(|e| e.to_string())?;
+    value["comments_sync_error"] =
+        serde_json::to_value(sync_state.sync_error).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Extract issue identifiers (e.g. "CUT-42", "ENG-123") from text.
 /// Matches patterns like 1-4 uppercase letters followed by a dash and digits.
 fn extract_issue_identifiers(text: &str) -> Vec<String> {
@@ -334,6 +354,8 @@ struct SyncTeamArgs {
     team: String,
     /// Whether to do a full re-sync
     full: Option<bool>,
+    /// Include archived Linear issues. Defaults to true for full syncs and false for incremental syncs.
+    include_archived: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -602,7 +624,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "get_issue",
-        description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, and optionally comments. Falls back to fetching from Linear API if not found locally."
+        description = "Get full details of an issue by ID or identifier (e.g., 'ENG-123'). Includes description, state, priority, labels, relations, and optionally comments. With include_comments=true, Rectilinear returns comments plus comments_status/comments_synced_at/comments_sync_error so an empty comments array is explicit: 'none_found' means Linear returned no comments, 'not_synced' means comments have not been fetched, 'permission_denied' or 'unavailable' means Linear could not provide them. Falls back to fetching from Linear API, including archived issues, if not found locally."
     )]
     async fn get_issue(&self, #[tool(aggr)] args: GetIssueArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
@@ -616,7 +638,8 @@ impl RectilinearMcp {
                     .await
                     .map_err(|e| e.to_string())?;
                 match result {
-                    Some((issue, relations, label_ids)) => {
+                    Some((mut issue, relations, label_ids)) => {
+                        issue.workspace_id = workspace.clone();
                         self.db.upsert_issue(&issue).map_err(|e| e.to_string())?;
                         self.db
                             .upsert_relations(&issue.id, &relations)
@@ -642,8 +665,9 @@ impl RectilinearMcp {
         }
 
         if args.include_comments.unwrap_or(false) {
-            let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
-            value["comments"] = serde_json::to_value(&comments).map_err(|e| e.to_string())?;
+            self.ensure_comments_synced_if_needed(&workspace, &issue.id)
+                .await?;
+            attach_comments_payload(&mut value, &self.db, &issue.id)?;
         }
 
         enrich_with_issue_links(&mut value, &self.db);
@@ -814,10 +838,11 @@ IMPORTANT — Before calling this tool, you MUST:
             .await
             .map_err(|e| e.to_string())?;
 
-        let (updated, relations, label_ids) = client
+        let (mut updated, relations, label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
+        updated.workspace_id = workspace.clone();
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &relations)
@@ -854,6 +879,9 @@ IMPORTANT — Before calling this tool, you MUST:
                 .add_comment(&issue.id, comment_text)
                 .await
                 .map_err(|e| e.to_string())?;
+            let _ = client
+                .sync_issue_comments(&self.db, &issue.id, &workspace)
+                .await;
             actions.push("comment_added");
         }
 
@@ -869,10 +897,11 @@ IMPORTANT — Before calling this tool, you MUST:
             actions.push("description_updated");
         }
 
-        let (updated, relations, label_ids) = client
+        let (mut updated, relations, label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
+        updated.workspace_id = workspace.clone();
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &relations)
@@ -890,15 +919,16 @@ IMPORTANT — Before calling this tool, you MUST:
 
     #[tool(
         name = "sync_team",
-        description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync."
+        description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync; full syncs include archived issues by default so completed/canceled archived evidence issues are refreshed. Each synced issue also refreshes Linear comments and records comment sync diagnostics for get_issue(include_comments=true)."
     )]
     async fn sync_team(&self, #[tool(aggr)] args: SyncTeamArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let client = self.client_for_workspace(&workspace)?;
         let full = args.full.unwrap_or(false);
+        let include_archived = args.include_archived.unwrap_or(full);
 
         let count = client
-            .sync_team(&self.db, &args.team, &workspace, full, false, None)
+            .sync_team(&self.db, &args.team, &workspace, full, include_archived, None)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -910,7 +940,8 @@ IMPORTANT — Before calling this tool, you MUST:
         Ok(serde_json::json!({
             "synced": count,
             "total": total,
-            "team": args.team
+            "team": args.team,
+            "include_archived": include_archived
         })
         .to_string())
     }
@@ -956,18 +987,20 @@ IMPORTANT — Before calling this tool, you MUST:
             Vec::new()
         };
 
-        let comments = self.db.get_comments(&issue.id).map_err(|e| e.to_string())?;
+        self.ensure_comments_synced_if_needed(&workspace, &issue.id)
+            .await?;
         let relations = self
             .db
             .get_relations_enriched(&issue.id)
             .map_err(|e| e.to_string())?;
+        let issue_id = issue.id.clone();
 
         let mut result = serde_json::json!({
             "issue": issue,
-            "comments": comments,
             "similar_issues": similar,
             "relations": relations,
         });
+        attach_comments_payload(&mut result, &self.db, &issue_id)?;
 
         enrich_with_issue_links(&mut result, &self.db);
         serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
@@ -1287,12 +1320,16 @@ IMPORTANT — Before calling this tool, you MUST:
                 .add_comment(&issue.id, comment_text)
                 .await
                 .map_err(|e| e.to_string())?;
+            let _ = client
+                .sync_issue_comments(&self.db, &issue.id, &workspace)
+                .await;
         }
 
-        let (updated, updated_relations, updated_label_ids) = client
+        let (mut updated, updated_relations, updated_label_ids) = client
             .fetch_single_issue(&issue.id)
             .await
             .map_err(|e| e.to_string())?;
+        updated.workspace_id = workspace.clone();
         self.db.upsert_issue(&updated).map_err(|e| e.to_string())?;
         self.db
             .upsert_relations(&updated.id, &updated_relations)
@@ -1463,6 +1500,26 @@ impl RectilinearMcp {
         Ok(LinearClient::with_api_key(&api_key))
     }
 
+    async fn ensure_comments_synced_if_needed(
+        &self,
+        workspace: &str,
+        issue_id: &str,
+    ) -> Result<(), String> {
+        let sync_state = self
+            .db
+            .get_comment_sync_state(issue_id)
+            .map_err(|e| e.to_string())?;
+        if sync_state.status != "not_synced" {
+            return Ok(());
+        }
+
+        let client = self.client_for_workspace(workspace)?;
+        let _ = client
+            .sync_issue_comments(&self.db, issue_id, workspace)
+            .await;
+        Ok(())
+    }
+
     /// Resolve label names to ids using the same logic as create_issue:
     /// - empty catalog → defer to remote query (fresh install).
     /// - non-empty catalog with unknowns → return user-facing error with did-you-mean.
@@ -1542,6 +1599,11 @@ impl ServerHandler for RectilinearMcp {
                 "## Workspace Selection\n\
                  All tools (except list_workspaces) require a `workspace` parameter. Call list_workspaces first to discover available workspaces.\n\n\
                  Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
+                 ## Comment Evidence\n\
+                 When get_issue(include_comments=true) or issue_context returns comments, always inspect comments_status. \
+                 An empty comments array is only evidence that no Linear comments exist when comments_status is `none_found`. \
+                 `not_synced` means comments were not fetched, and `permission_denied` or `unavailable` means Linear could not provide them; \
+                 check comments_sync_error and comments_synced_at. A full sync_team run includes archived issues by default and refreshes comment sync state.\n\n\
                  ## Triage Workflow\n\
                  IMPORTANT: Present exactly ONE issue at a time. Wait for the user's response and call mark_triaged before presenting the next issue. \
                  Never batch multiple issues into a single message.\n\n\
