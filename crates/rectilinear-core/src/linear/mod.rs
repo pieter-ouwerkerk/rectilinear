@@ -108,6 +108,13 @@ struct LinearUser {
 }
 
 #[derive(Debug, Deserialize)]
+struct LinearExternalUser {
+    name: Option<String>,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct LinearProject {
     name: String,
 }
@@ -182,6 +189,36 @@ struct CreateCommentData {
 #[derive(Debug, Deserialize)]
 struct CreateCommentPayload {
     success: bool,
+}
+
+// --- Comment query types ---
+
+#[derive(Debug, Deserialize)]
+struct CommentsData {
+    comments: LinearCommentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearCommentConnection {
+    nodes: Vec<LinearComment>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearComment {
+    id: String,
+    body: String,
+    #[serde(rename = "createdAt")]
+    created_at: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(rename = "parentId")]
+    parent_id: Option<String>,
+    url: String,
+    user: Option<LinearUser>,
+    #[serde(rename = "externalUser")]
+    external_user: Option<LinearExternalUser>,
 }
 
 // --- Issue update types ---
@@ -434,6 +471,16 @@ impl LinearClient {
                 db.upsert_issue(&issue)?;
                 db.upsert_relations(&issue.id, &relations)?;
                 db.replace_issue_labels(&issue.id, &label_ids)?;
+                if let Err(e) = self
+                    .sync_issue_comments(db, &issue.id, workspace_id)
+                    .await
+                {
+                    eprintln!(
+                        "warning: failed to sync comments for issue {}: {}",
+                        issue.identifier,
+                        Self::redacted_error_message(&e)
+                    );
+                }
             }
             total += count;
 
@@ -529,6 +576,101 @@ impl LinearClient {
         }
 
         Ok(())
+    }
+
+    pub async fn fetch_issue_comments(&self, issue_id: &str) -> Result<Vec<db::Comment>> {
+        let query = r#"
+            query($issueId: ID!, $after: String) {
+                comments(
+                    filter: { issue: { id: { eq: $issueId } } },
+                    first: 100,
+                    after: $after,
+                    includeArchived: true,
+                    orderBy: createdAt
+                ) {
+                    nodes {
+                        id body createdAt updatedAt parentId url
+                        user { name }
+                        externalUser { displayName name }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                }
+            }
+        "#;
+
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let data: CommentsData = self
+                .query(
+                    query,
+                    serde_json::json!({
+                        "issueId": issue_id,
+                        "after": cursor.as_deref(),
+                    }),
+                )
+                .await?;
+
+            comments.extend(
+                data.comments
+                    .nodes
+                    .into_iter()
+                    .map(|comment| Self::convert_linear_comment(issue_id, comment)),
+            );
+
+            if !data.comments.page_info.has_next_page {
+                break;
+            }
+            cursor = data.comments.page_info.end_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(comments)
+    }
+
+    pub async fn sync_issue_comments(
+        &self,
+        db: &Database,
+        issue_id: &str,
+        workspace_id: &str,
+    ) -> Result<usize> {
+        match self.fetch_issue_comments(issue_id).await {
+            Ok(mut comments) => {
+                for comment in &mut comments {
+                    comment.workspace_id = workspace_id.to_string();
+                }
+                let count = comments.len();
+                db.replace_issue_comments(issue_id, workspace_id, &comments)?;
+                db.mark_comments_synced(issue_id, workspace_id, count)?;
+                Ok(count)
+            }
+            Err(error) => {
+                let status = Self::comment_error_status(&error);
+                let message = Self::redacted_error_message(&error);
+                db.mark_comments_sync_failed(issue_id, workspace_id, status, &message)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn comment_error_status(error: &anyhow::Error) -> &'static str {
+        let message = error.to_string().to_lowercase();
+        if message.contains("permission")
+            || message.contains("forbidden")
+            || message.contains("unauthorized")
+            || message.contains("access")
+        {
+            "permission_denied"
+        } else {
+            "unavailable"
+        }
+    }
+
+    fn redacted_error_message(error: &anyhow::Error) -> String {
+        error.to_string().chars().take(500).collect()
     }
 
     pub async fn update_issue(
@@ -649,7 +791,8 @@ impl LinearClient {
                         team: {{ key: {{ eq: "{}" }} }},
                         number: {{ eq: {} }}
                     }},
-                    first: 1
+                    first: 1,
+                    includeArchived: true
                 ) {{
                     nodes {{
                         id identifier url title description priority branchName
@@ -712,6 +855,23 @@ impl LinearClient {
         };
 
         (issue, relations, label_ids)
+    }
+
+    fn convert_linear_comment(issue_id: &str, comment: LinearComment) -> db::Comment {
+        let external_name = comment
+            .external_user
+            .and_then(|u| u.display_name.or(u.name));
+        db::Comment {
+            id: comment.id,
+            issue_id: issue_id.to_string(),
+            body: comment.body,
+            user_name: comment.user.map(|u| u.name).or(external_name),
+            created_at: comment.created_at,
+            updated_at: Some(comment.updated_at),
+            parent_id: comment.parent_id,
+            url: Some(comment.url),
+            workspace_id: "default".to_string(),
+        }
     }
 
     /// Get a team's ID from its key

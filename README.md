@@ -146,7 +146,7 @@ rectilinear sync --team ENG --embed
 # Force full re-sync
 rectilinear sync --team ENG --full
 
-# Include archived issues
+# Include archived issues on an incremental sync. Full syncs include archived issues automatically.
 rectilinear sync --team ENG --include-archived
 ```
 
@@ -197,6 +197,15 @@ rectilinear show ENG-123
 rectilinear show ENG-123 --comments
 rectilinear show ENG-123 --json
 ```
+
+When comments are requested through MCP, Rectilinear returns `comments` with
+`comments_status`, `comments_synced_at`, and `comments_sync_error`. Treat
+`comments: []` as meaningful only with the status:
+
+- `synced` means comments were fetched and at least one comment was found.
+- `none_found` means Linear returned no comments for the issue.
+- `not_synced` means comments have not been fetched yet.
+- `permission_denied` or `unavailable` means Linear could not provide comments; see `comments_sync_error`.
 
 ### Create and update issues
 
@@ -279,12 +288,12 @@ This exposes 10 tools to MCP clients:
 |---|---|
 | `search_issues` | Hybrid search with team/state filters |
 | `find_duplicates` | Semantic duplicate detection given title + description |
-| `get_issue` | Full issue details with optional comments |
+| `get_issue` | Full issue details with optional comments and comment sync diagnostics |
 | `create_issue` | Create in Linear + sync back |
 | `update_issue` | Update title, description, priority, state, labels, project |
 | `append_to_issue` | Add comment or extend description |
-| `sync_team` | Trigger sync for a team |
-| `issue_context` | Issue + its N most similar issues |
+| `sync_team` | Trigger sync for a team; full syncs include archived issues and refresh comments |
+| `issue_context` | Issue + its N most similar issues, comments, and comment sync diagnostics |
 | `get_triage_queue` | Batch of unprioritized issues enriched with similar issues and code search hints |
 | `mark_triaged` | Set priority, state, labels, project + update title/description + add comment in one call |
 

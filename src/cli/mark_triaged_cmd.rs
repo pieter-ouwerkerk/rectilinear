@@ -49,7 +49,9 @@ pub async fn handle_mark_triaged(
     let client = LinearClient::with_api_key(&api_key);
 
     // Re-fetch from Linear (staleness check)
-    let (issue, issue_relations, issue_label_ids) = client.fetch_single_issue(&local_issue.id).await?;
+    let (mut issue, issue_relations, issue_label_ids) =
+        client.fetch_single_issue(&local_issue.id).await?;
+    issue.workspace_id = workspace.to_string();
     db.upsert_issue(&issue)?;
     db.upsert_relations(&issue.id, &issue_relations)?;
     db.replace_issue_labels(&issue.id, &issue_label_ids)?;
@@ -177,10 +179,15 @@ pub async fn handle_mark_triaged(
     // Add comment if provided
     if let Some(comment_text) = comment {
         client.add_comment(&issue.id, comment_text).await?;
+        let _ = client
+            .sync_issue_comments(db, &issue.id, workspace)
+            .await;
     }
 
     // Sync back
-    let (updated, updated_relations, updated_label_ids) = client.fetch_single_issue(&issue.id).await?;
+    let (mut updated, updated_relations, updated_label_ids) =
+        client.fetch_single_issue(&issue.id).await?;
+    updated.workspace_id = workspace.to_string();
     db.upsert_issue(&updated)?;
     db.upsert_relations(&updated.id, &updated_relations)?;
     db.replace_issue_labels(&updated.id, &updated_label_ids)?;

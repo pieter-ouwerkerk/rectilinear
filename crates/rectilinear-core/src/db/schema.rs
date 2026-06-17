@@ -56,8 +56,51 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (8)", [])?;
     }
 
+    if current_version < 9 {
+        run_migration_9(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (9)", [])?;
+    }
+
     Ok(())
 }
+
+fn run_migration_9(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "comments", "updated_at", "TEXT")?;
+    add_column_if_missing(conn, "comments", "parent_id", "TEXT")?;
+    add_column_if_missing(conn, "comments", "url", "TEXT")?;
+    conn.execute_batch(MIGRATION_9)?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+    Ok(())
+}
+
+const MIGRATION_9: &str = "
+-- Preserve Linear comment thread metadata and track whether comments were
+-- actually refreshed for an issue.
+CREATE TABLE IF NOT EXISTS comment_sync_state (
+    issue_id TEXT PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    status TEXT NOT NULL,
+    sync_error TEXT,
+    synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_comment_sync_workspace ON comment_sync_state(workspace_id);
+";
 
 const MIGRATION_8: &str = "
 -- Workspace label catalog

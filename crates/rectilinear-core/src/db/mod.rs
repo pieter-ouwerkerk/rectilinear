@@ -124,6 +124,10 @@ impl Database {
                 rusqlite::params![id],
             )?;
             conn.execute(
+                "DELETE FROM comment_sync_state WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
                 "DELETE FROM sync_state WHERE workspace_id = ?1",
                 rusqlite::params![id],
             )?;
@@ -899,7 +903,10 @@ impl Database {
     pub fn get_comments(&self, issue_id: &str) -> Result<Vec<Comment>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, issue_id, body, user_name, created_at FROM comments WHERE issue_id = ?1 ORDER BY created_at"
+                "SELECT id, issue_id, body, user_name, created_at, updated_at, parent_id, url, workspace_id
+                 FROM comments
+                 WHERE issue_id = ?1
+                 ORDER BY created_at"
             )?;
             let rows = stmt.query_map(rusqlite::params![issue_id], |row| {
                 Ok(Comment {
@@ -908,9 +915,123 @@ impl Database {
                     body: row.get(2)?,
                     user_name: row.get(3)?,
                     created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    parent_id: row.get(6)?,
+                    url: row.get(7)?,
+                    workspace_id: row.get(8)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn replace_issue_comments(
+        &self,
+        issue_id: &str,
+        workspace_id: &str,
+        comments: &[Comment],
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM comments WHERE issue_id = ?1 AND workspace_id = ?2",
+                rusqlite::params![issue_id, workspace_id],
+            )?;
+            for comment in comments {
+                tx.execute(
+                    "INSERT INTO comments
+                        (id, issue_id, body, user_name, created_at, workspace_id, updated_at, parent_id, url)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        issue_id=excluded.issue_id,
+                        body=excluded.body,
+                        user_name=excluded.user_name,
+                        created_at=excluded.created_at,
+                        workspace_id=excluded.workspace_id,
+                        updated_at=excluded.updated_at,
+                        parent_id=excluded.parent_id,
+                        url=excluded.url",
+                    rusqlite::params![
+                        comment.id,
+                        comment.issue_id,
+                        comment.body,
+                        comment.user_name,
+                        comment.created_at,
+                        workspace_id,
+                        comment.updated_at,
+                        comment.parent_id,
+                        comment.url,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn get_comment_sync_state(&self, issue_id: &str) -> Result<CommentSyncState> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT status, sync_error, synced_at
+                 FROM comment_sync_state
+                 WHERE issue_id = ?1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![issue_id])?;
+            if let Some(row) = rows.next()? {
+                Ok(CommentSyncState {
+                    status: row.get(0)?,
+                    sync_error: row.get(1)?,
+                    synced_at: row.get(2)?,
+                })
+            } else {
+                Ok(CommentSyncState::not_synced())
+            }
+        })
+    }
+
+    pub fn mark_comments_synced(
+        &self,
+        issue_id: &str,
+        workspace_id: &str,
+        comment_count: usize,
+    ) -> Result<()> {
+        let status = if comment_count == 0 {
+            "none_found"
+        } else {
+            "synced"
+        };
+        self.set_comment_sync_state(issue_id, workspace_id, status, None)
+    }
+
+    pub fn mark_comments_sync_failed(
+        &self,
+        issue_id: &str,
+        workspace_id: &str,
+        status: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.set_comment_sync_state(issue_id, workspace_id, status, Some(error))
+    }
+
+    fn set_comment_sync_state(
+        &self,
+        issue_id: &str,
+        workspace_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO comment_sync_state (issue_id, workspace_id, status, sync_error, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                 ON CONFLICT(issue_id) DO UPDATE SET
+                    workspace_id=excluded.workspace_id,
+                    status=excluded.status,
+                    sync_error=excluded.sync_error,
+                    synced_at=datetime('now')",
+                rusqlite::params![issue_id, workspace_id, status, error],
+            )?;
+            Ok(())
         })
     }
 
@@ -1189,6 +1310,28 @@ pub struct Comment {
     pub body: String,
     pub user_name: Option<String>,
     pub created_at: String,
+    pub updated_at: Option<String>,
+    pub parent_id: Option<String>,
+    pub url: Option<String>,
+    #[serde(default = "default_workspace_id")]
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentSyncState {
+    pub status: String,
+    pub sync_error: Option<String>,
+    pub synced_at: Option<String>,
+}
+
+impl CommentSyncState {
+    pub fn not_synced() -> Self {
+        Self {
+            status: "not_synced".to_string(),
+            sync_error: None,
+            synced_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1245,12 +1388,78 @@ pub struct Label {
 
 #[cfg(test)]
 mod tests {
+    use super::Comment;
     use super::test_helpers::*;
 
     #[test]
     fn count_embedded_issues_empty_db() {
         let (db, _dir) = test_db();
         assert_eq!(db.count_embedded_issues(None, "default").unwrap(), 0);
+    }
+
+    #[test]
+    fn comment_sync_state_defaults_to_not_synced() {
+        let (db, _dir) = test_db();
+        let issue = make_issue("TST-1", "TST");
+        db.upsert_issue(&issue).unwrap();
+
+        let state = db.get_comment_sync_state(&issue.id).unwrap();
+        assert_eq!(state.status, "not_synced");
+        assert!(state.synced_at.is_none());
+        assert!(state.sync_error.is_none());
+    }
+
+    #[test]
+    fn replace_issue_comments_preserves_thread_metadata() {
+        let (db, _dir) = test_db();
+        let issue = make_issue("TST-1", "TST");
+        db.upsert_issue(&issue).unwrap();
+
+        db.replace_issue_comments(
+            &issue.id,
+            "default",
+            &[Comment {
+                id: "comment-1".to_string(),
+                issue_id: issue.id.clone(),
+                body: "fixed in linked PR".to_string(),
+                user_name: Some("Ada".to_string()),
+                created_at: "2026-01-03T00:00:00Z".to_string(),
+                updated_at: Some("2026-01-03T01:00:00Z".to_string()),
+                parent_id: Some("parent-1".to_string()),
+                url: Some("https://linear.app/comment/comment-1".to_string()),
+                workspace_id: "default".to_string(),
+            }],
+        )
+        .unwrap();
+        db.mark_comments_synced(&issue.id, "default", 1).unwrap();
+
+        let comments = db.get_comments(&issue.id).unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].parent_id.as_deref(), Some("parent-1"));
+        assert_eq!(comments[0].updated_at.as_deref(), Some("2026-01-03T01:00:00Z"));
+        assert_eq!(
+            comments[0].url.as_deref(),
+            Some("https://linear.app/comment/comment-1")
+        );
+        assert_eq!(
+            db.get_comment_sync_state(&issue.id).unwrap().status,
+            "synced"
+        );
+    }
+
+    #[test]
+    fn empty_comment_sync_records_none_found() {
+        let (db, _dir) = test_db();
+        let issue = make_issue("TST-1", "TST");
+        db.upsert_issue(&issue).unwrap();
+
+        db.replace_issue_comments(&issue.id, "default", &[]).unwrap();
+        db.mark_comments_synced(&issue.id, "default", 0).unwrap();
+
+        assert!(db.get_comments(&issue.id).unwrap().is_empty());
+        let state = db.get_comment_sync_state(&issue.id).unwrap();
+        assert_eq!(state.status, "none_found");
+        assert!(state.synced_at.is_some());
     }
 
     #[test]
@@ -1611,7 +1820,7 @@ mod tests {
         crate::db::schema::run_migrations(&conn).unwrap();
 
         // Delete from schema_version to simulate being at version 7
-        conn.execute("DELETE FROM schema_version WHERE version = 8", [])
+        conn.execute("DELETE FROM schema_version WHERE version >= 8", [])
             .unwrap();
 
         // Seed sync_state as if a prior sync had completed
