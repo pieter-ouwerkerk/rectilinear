@@ -48,6 +48,9 @@ pub struct RtIssue {
     pub priority: i32,
     pub assignee_name: Option<String>,
     pub project_name: Option<String>,
+    pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
+    pub project_milestone_name: Option<String>,
     pub labels: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -69,6 +72,9 @@ impl From<crate::db::Issue> for RtIssue {
             priority: issue.priority,
             assignee_name: issue.assignee_name,
             project_name: issue.project_name,
+            project_id: issue.project_id,
+            project_milestone_id: issue.project_milestone_id,
+            project_milestone_name: issue.project_milestone_name,
             labels,
             created_at: issue.created_at,
             updated_at: issue.updated_at,
@@ -144,6 +150,9 @@ pub struct RtIssueEnriched {
     pub priority: i32,
     pub assignee_name: Option<String>,
     pub project_name: Option<String>,
+    pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
+    pub project_milestone_name: Option<String>,
     pub labels: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -224,6 +233,253 @@ pub struct RtTeamSummary {
 pub struct RtCreateIssueResult {
     pub id: String,
     pub identifier: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtCreateIssueInput {
+    pub team_key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Option<i32>,
+    pub label_ids: Vec<String>,
+    pub parent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectTeam {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectMember {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectLabel {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub description: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProject {
+    pub id: String,
+    pub workspace_id: String,
+    pub slug_id: String,
+    pub name: String,
+    pub description: String,
+    pub content: Option<String>,
+    pub icon: Option<String>,
+    pub color: String,
+    pub status_id: String,
+    pub status_name: String,
+    pub status_type: String,
+    pub status_color: String,
+    pub priority: i32,
+    pub start_date: Option<String>,
+    pub target_date: Option<String>,
+    pub lead_id: Option<String>,
+    pub lead_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived_at: Option<String>,
+    pub url: String,
+    pub progress: f64,
+    pub teams: Vec<RtProjectTeam>,
+    pub members: Vec<RtProjectMember>,
+    pub labels: Vec<RtProjectLabel>,
+}
+
+impl From<crate::db::Project> for RtProject {
+    fn from(project: crate::db::Project) -> Self {
+        Self {
+            id: project.id,
+            workspace_id: project.workspace_id,
+            slug_id: project.slug_id,
+            name: project.name,
+            description: project.description,
+            content: project.content,
+            icon: project.icon,
+            color: project.color,
+            status_id: project.status_id,
+            status_name: project.status_name,
+            status_type: project.status_type,
+            status_color: project.status_color,
+            priority: project.priority,
+            start_date: project.start_date,
+            target_date: project.target_date,
+            lead_id: project.lead_id,
+            lead_name: project.lead_name,
+            created_at: project.created_at,
+            updated_at: project.updated_at,
+            archived_at: project.archived_at,
+            url: project.url,
+            progress: project.progress,
+            teams: project
+                .teams
+                .into_iter()
+                .map(|team| RtProjectTeam {
+                    id: team.id,
+                    key: team.key,
+                    name: team.name,
+                })
+                .collect(),
+            members: project
+                .members
+                .into_iter()
+                .map(|member| RtProjectMember {
+                    id: member.id,
+                    name: member.name,
+                })
+                .collect(),
+            labels: project
+                .labels
+                .into_iter()
+                .map(|label| RtProjectLabel {
+                    id: label.id,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectMilestone {
+    pub id: String,
+    pub workspace_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub target_date: Option<String>,
+    pub status: String,
+    pub progress: f64,
+    pub sort_order: f64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived_at: Option<String>,
+}
+
+impl From<crate::db::ProjectMilestone> for RtProjectMilestone {
+    fn from(milestone: crate::db::ProjectMilestone) -> Self {
+        Self {
+            id: milestone.id,
+            workspace_id: milestone.workspace_id,
+            project_id: milestone.project_id,
+            project_name: milestone.project_name,
+            name: milestone.name,
+            description: milestone.description,
+            target_date: milestone.target_date,
+            status: milestone.status,
+            progress: milestone.progress,
+            sort_order: milestone.sort_order,
+            created_at: milestone.created_at,
+            updated_at: milestone.updated_at,
+            archived_at: milestone.archived_at,
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectBundle {
+    pub project: RtProject,
+    pub milestones: Vec<RtProjectMilestone>,
+    pub issues: Vec<RtIssue>,
+}
+
+impl From<crate::db::ProjectBundle> for RtProjectBundle {
+    fn from(bundle: crate::db::ProjectBundle) -> Self {
+        Self {
+            project: bundle.project.into(),
+            milestones: bundle.milestones.into_iter().map(Into::into).collect(),
+            issues: bundle.issues.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectMilestoneBundle {
+    pub project: RtProject,
+    pub milestone: RtProjectMilestone,
+    pub issues: Vec<RtIssue>,
+}
+
+impl From<crate::db::ProjectMilestoneBundle> for RtProjectMilestoneBundle {
+    fn from(bundle: crate::db::ProjectMilestoneBundle) -> Self {
+        Self {
+            project: bundle.project.into(),
+            milestone: bundle.milestone.into(),
+            issues: bundle.issues.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct RtProjectSyncResult {
+    pub projects: u64,
+    pub milestones: u64,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtCreateProjectInput {
+    pub name: String,
+    pub team_ids: Vec<String>,
+    pub description: Option<String>,
+    pub content: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub status_id: Option<String>,
+    pub priority: Option<i32>,
+    pub lead_id: Option<String>,
+    pub start_date: Option<String>,
+    pub target_date: Option<String>,
+    pub member_ids: Option<Vec<String>>,
+    pub label_ids: Option<Vec<String>>,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtUpdateProjectInput {
+    pub name: Option<String>,
+    pub team_ids: Option<Vec<String>>,
+    pub description: Option<String>,
+    pub content: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub status_id: Option<String>,
+    pub priority: Option<i32>,
+    pub lead_id: Option<String>,
+    pub start_date: Option<String>,
+    pub target_date: Option<String>,
+    pub member_ids: Option<Vec<String>>,
+    pub label_ids: Option<Vec<String>>,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtCreateProjectMilestoneInput {
+    pub project_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub target_date: Option<String>,
+    pub sort_order: Option<f64>,
+}
+
+#[derive(uniffi::Record)]
+pub struct RtUpdateProjectMilestoneInput {
+    pub project_id: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub target_date: Option<String>,
+    pub sort_order: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -349,6 +605,74 @@ impl RectilinearEngine {
     /// Look up an issue by UUID or identifier (e.g. "CUT-123").
     pub fn get_issue(&self, id_or_identifier: String) -> Result<Option<RtIssue>, RectilinearError> {
         Ok(self.db.get_issue(&id_or_identifier)?.map(RtIssue::from))
+    }
+
+    /// List cached projects. Call sync_projects first when fresh metadata is required.
+    pub fn list_projects(
+        &self,
+        workspace_id: String,
+        include_archived: bool,
+    ) -> Result<Vec<RtProject>, RectilinearError> {
+        Ok(self
+            .db
+            .list_projects(&workspace_id, include_archived)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Get cached project metadata by UUID, slug, or name.
+    pub fn get_project(
+        &self,
+        id_or_name: String,
+        workspace_id: String,
+    ) -> Result<Option<RtProject>, RectilinearError> {
+        Ok(self
+            .db
+            .get_project(&workspace_id, &id_or_name)?
+            .map(Into::into))
+    }
+
+    /// List cached milestones for a project UUID.
+    pub fn list_project_milestones(
+        &self,
+        project_id: String,
+    ) -> Result<Vec<RtProjectMilestone>, RectilinearError> {
+        Ok(self
+            .db
+            .list_project_milestones(&project_id)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Get a cached project bundle, including milestones and linked issues.
+    pub fn get_project_bundle(
+        &self,
+        id_or_name: String,
+        workspace_id: String,
+    ) -> Result<Option<RtProjectBundle>, RectilinearError> {
+        Ok(self
+            .db
+            .get_project_bundle(&workspace_id, &id_or_name)?
+            .map(Into::into))
+    }
+
+    /// Get a cached milestone bundle, including its project and linked issues.
+    pub fn get_project_milestone_bundle(
+        &self,
+        id_or_name: String,
+        project_id: Option<String>,
+        workspace_id: String,
+    ) -> Result<Option<RtProjectMilestoneBundle>, RectilinearError> {
+        Ok(self
+            .db
+            .get_project_milestone_bundle(
+                &workspace_id,
+                &id_or_name,
+                project_id.as_deref(),
+            )?
+            .map(Into::into))
     }
 
     /// Get unprioritized issues for triage.
@@ -500,6 +824,9 @@ impl RectilinearEngine {
                     priority: issue.priority,
                     assignee_name: issue.assignee_name,
                     project_name: issue.project_name,
+                    project_id: issue.project_id,
+                    project_milestone_id: issue.project_milestone_id,
+                    project_milestone_name: issue.project_milestone_name,
                     labels,
                     created_at: issue.created_at,
                     updated_at: issue.updated_at,
@@ -552,6 +879,253 @@ impl RectilinearEngine {
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
             })
+    }
+
+    /// Sync issues from Linear for a team. Returns the number of issues synced.
+    pub async fn sync_projects(
+        &self,
+        workspace_id: String,
+    ) -> Result<RtProjectSyncResult, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let (projects, milestones) = client
+            .sync_projects(&self.db, &workspace_id)
+            .await
+            .map_err(api_error)?;
+        Ok(RtProjectSyncResult {
+            projects: projects as u64,
+            milestones: milestones as u64,
+        })
+    }
+
+    /// Import and return a complete project hierarchy with every linked issue.
+    pub async fn import_project(
+        &self,
+        id_or_name: String,
+        workspace_id: String,
+    ) -> Result<RtProjectBundle, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        client
+            .import_project(&self.db, &workspace_id, &id_or_name)
+            .await
+            .map(Into::into)
+            .map_err(api_error)
+    }
+
+    /// Import and return a complete milestone hierarchy with every linked issue.
+    pub async fn import_project_milestone(
+        &self,
+        id_or_name: String,
+        project_id: Option<String>,
+        workspace_id: String,
+    ) -> Result<RtProjectMilestoneBundle, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        client
+            .import_project_milestone(
+                &self.db,
+                &workspace_id,
+                project_id.as_deref(),
+                &id_or_name,
+            )
+            .await
+            .map(Into::into)
+            .map_err(api_error)
+    }
+
+    /// Create a project. Relationship fields use Linear model UUIDs.
+    pub async fn create_project(
+        &self,
+        input: RtCreateProjectInput,
+        workspace_id: String,
+    ) -> Result<RtProject, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let input = crate::linear::CreateProjectInput {
+            name: input.name,
+            team_ids: input.team_ids,
+            description: input.description,
+            content: input.content,
+            icon: input.icon,
+            color: input.color,
+            status_id: input.status_id,
+            priority: input.priority,
+            lead_id: input.lead_id,
+            start_date: input.start_date,
+            target_date: input.target_date,
+            member_ids: input.member_ids,
+            label_ids: input.label_ids,
+        };
+        let id = client.create_project(&input).await.map_err(api_error)?;
+        let project = client
+            .fetch_project(&id, &workspace_id)
+            .await
+            .map_err(api_error)?;
+        self.db.upsert_project(&project)?;
+        Ok(project.into())
+    }
+
+    /// Update a project. Empty strings clear nullable metadata fields.
+    pub async fn update_project(
+        &self,
+        id_or_name: String,
+        input: RtUpdateProjectInput,
+        workspace_id: String,
+    ) -> Result<RtProject, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let id = client
+            .find_project_by_name(&id_or_name)
+            .await
+            .map_err(api_error)?;
+        let input = crate::linear::UpdateProjectInput {
+            name: input.name,
+            team_ids: input.team_ids,
+            description: input.description,
+            content: input.content,
+            icon: input.icon,
+            color: input.color,
+            status_id: input.status_id,
+            priority: input.priority,
+            lead_id: input.lead_id,
+            start_date: input.start_date,
+            target_date: input.target_date,
+            member_ids: input.member_ids,
+            label_ids: input.label_ids,
+        };
+        client.update_project(&id, &input).await.map_err(api_error)?;
+        let project = client
+            .fetch_project(&id, &workspace_id)
+            .await
+            .map_err(api_error)?;
+        self.db.upsert_project(&project)?;
+        Ok(project.into())
+    }
+
+    /// Delete (archive) a project in Linear and remove its cached hierarchy.
+    pub async fn delete_project(
+        &self,
+        id_or_name: String,
+        workspace_id: String,
+    ) -> Result<(), RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let id = client
+            .find_project_by_name(&id_or_name)
+            .await
+            .map_err(api_error)?;
+        client.delete_project(&id).await.map_err(api_error)?;
+        self.db.delete_project_local(&id)?;
+        Ok(())
+    }
+
+    /// Create a project milestone. The project_id must be a Linear project UUID.
+    pub async fn create_project_milestone(
+        &self,
+        input: RtCreateProjectMilestoneInput,
+        workspace_id: String,
+    ) -> Result<RtProjectMilestone, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let input = crate::linear::CreateProjectMilestoneInput {
+            project_id: input.project_id,
+            name: input.name,
+            description: input.description,
+            target_date: input.target_date,
+            sort_order: input.sort_order,
+        };
+        let id = client
+            .create_project_milestone(&input)
+            .await
+            .map_err(api_error)?;
+        self.cache_project_milestone(&client, &id, &workspace_id)
+            .await
+    }
+
+    /// Update or move a project milestone.
+    pub async fn update_project_milestone(
+        &self,
+        id_or_name: String,
+        owning_project_id: Option<String>,
+        input: RtUpdateProjectMilestoneInput,
+        workspace_id: String,
+    ) -> Result<RtProjectMilestone, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let id = client
+            .find_project_milestone(owning_project_id.as_deref(), &id_or_name)
+            .await
+            .map_err(api_error)?;
+        let input = crate::linear::UpdateProjectMilestoneInput {
+            project_id: input.project_id,
+            name: input.name,
+            description: input.description,
+            target_date: input.target_date,
+            sort_order: input.sort_order,
+        };
+        client
+            .update_project_milestone(&id, &input)
+            .await
+            .map_err(api_error)?;
+        self.cache_project_milestone(&client, &id, &workspace_id)
+            .await
+    }
+
+    /// Delete a project milestone in Linear and remove it from the local hierarchy.
+    pub async fn delete_project_milestone(
+        &self,
+        id_or_name: String,
+        owning_project_id: Option<String>,
+        workspace_id: String,
+    ) -> Result<(), RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let id = client
+            .find_project_milestone(owning_project_id.as_deref(), &id_or_name)
+            .await
+            .map_err(api_error)?;
+        client
+            .delete_project_milestone(&id)
+            .await
+            .map_err(api_error)?;
+        self.db.delete_project_milestone_local(&id)?;
+        Ok(())
+    }
+
+    /// Replace an issue's project and milestone relationship. Passing nil clears that relationship.
+    pub async fn set_issue_project_context(
+        &self,
+        issue_id: String,
+        project_id: Option<String>,
+        project_milestone_id: Option<String>,
+        workspace_id: String,
+    ) -> Result<RtIssue, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let project_id = match (project_id, project_milestone_id.as_deref()) {
+            (Some(project_id), _) => Some(project_id),
+            (None, Some(milestone_id)) => Some(
+                client
+                    .fetch_project_milestone(milestone_id, &workspace_id)
+                    .await
+                    .map_err(api_error)?
+                    .project_id,
+            ),
+            (None, None) => None,
+        };
+        let project_value = project_id.unwrap_or_default();
+        let milestone_value = project_milestone_id.unwrap_or_default();
+        client
+            .update_issue(
+                &issue_id,
+                crate::linear::UpdateIssueInput {
+                    project_id: Some(&project_value),
+                    project_milestone_id: Some(&milestone_value),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(api_error)?;
+        let (mut issue, relations, label_ids) = client
+            .fetch_single_issue(&issue_id)
+            .await
+            .map_err(api_error)?;
+        issue.workspace_id = workspace_id;
+        self.db.upsert_issue(&issue)?;
+        self.db.upsert_relations(&issue.id, &relations)?;
+        self.db.replace_issue_labels(&issue.id, &label_ids)?;
+        Ok(issue.into())
     }
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
@@ -693,13 +1267,14 @@ impl RectilinearEngine {
         client
             .update_issue(
                 &issue_id,
-                title.as_deref(),
-                description.as_deref(),
-                priority,
-                state_id.as_deref(),
-                label_ids.as_deref(),
-                None,
-                None, // assignee_id (wired in Task 13)
+                crate::linear::UpdateIssueInput {
+                    title: title.as_deref(),
+                    description: description.as_deref(),
+                    priority,
+                    state_id: state_id.as_deref(),
+                    label_ids: label_ids.as_deref(),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| RectilinearError::Api {
@@ -719,12 +1294,7 @@ impl RectilinearEngine {
     /// Create a new issue in Linear and return its (id, identifier).
     pub async fn create_issue(
         &self,
-        team_key: String,
-        title: String,
-        description: Option<String>,
-        priority: Option<i32>,
-        label_ids: Vec<String>,
-        parent_id: Option<String>,
+        input: RtCreateIssueInput,
         workspace_id: String,
     ) -> Result<RtCreateIssueResult, RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
@@ -732,22 +1302,38 @@ impl RectilinearEngine {
             LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
         let team_id = client
-            .get_team_id(&team_key)
+            .get_team_id(&input.team_key)
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
             })?;
+        let project_id = match (
+            input.project_id.as_deref(),
+            input.project_milestone_id.as_deref(),
+        ) {
+            (Some(project_id), _) => Some(project_id.to_string()),
+            (None, Some(milestone_id)) => Some(
+                client
+                    .fetch_project_milestone(milestone_id, &workspace_id)
+                    .await
+                    .map_err(api_error)?
+                    .project_id,
+            ),
+            (None, None) => None,
+        };
 
         let (id, identifier) = client
-            .create_issue(
-                &team_id,
-                &title,
-                description.as_deref(),
-                priority,
-                &label_ids,
-                None,                  // assignee_id (wired in Task 12)
-                parent_id.as_deref(),
-            )
+            .create_issue(crate::linear::CreateIssueInput {
+                team_id: &team_id,
+                title: &input.title,
+                description: input.description.as_deref(),
+                priority: input.priority,
+                label_ids: &input.label_ids,
+                assignee_id: None,
+                parent_id: input.parent_id.as_deref(),
+                project_id: project_id.as_deref(),
+                project_milestone_id: input.project_milestone_id.as_deref(),
+            })
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
@@ -949,6 +1535,36 @@ impl RectilinearEngine {
 // ── Private helpers ──────────────────────────────────────────────────
 
 impl RectilinearEngine {
+    async fn linear_client(
+        &self,
+        workspace_id: &str,
+    ) -> Result<LinearClient, RectilinearError> {
+        let api_key = self.linear_api_key_for_workspace(workspace_id)?;
+        Ok(LinearClient::with_http_client(
+            self.client().await.clone(),
+            &api_key,
+        ))
+    }
+
+    async fn cache_project_milestone(
+        &self,
+        client: &LinearClient,
+        milestone_id: &str,
+        workspace_id: &str,
+    ) -> Result<RtProjectMilestone, RectilinearError> {
+        let milestone = client
+            .fetch_project_milestone(milestone_id, workspace_id)
+            .await
+            .map_err(api_error)?;
+        let project = client
+            .fetch_project(&milestone.project_id, workspace_id)
+            .await
+            .map_err(api_error)?;
+        self.db.upsert_project(&project)?;
+        self.db.upsert_project_milestone(&milestone)?;
+        Ok(milestone.into())
+    }
+
     fn set_sync_progress(&self, progress: Option<RtSyncProgress>) {
         *self.sync_progress.lock().unwrap() = progress;
     }
@@ -991,5 +1607,11 @@ impl RectilinearEngine {
                 Ok(None)
             }
         }
+    }
+}
+
+fn api_error(error: anyhow::Error) -> RectilinearError {
+    RectilinearError::Api {
+        message: error.to_string(),
     }
 }

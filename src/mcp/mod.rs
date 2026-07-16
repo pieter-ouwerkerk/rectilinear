@@ -222,10 +222,12 @@ fn suggest_label_names(db: &Database, workspace: &str, unknown: &[String]) -> Ve
         let needle = u.to_lowercase();
         for label in &catalog {
             let hay = label.name.to_lowercase();
-            if hay.contains(&needle) || needle.contains(&hay) {
-                if !hits.contains(&label.name) {
-                    hits.push(label.name.clone());
-                    if hits.len() >= 3 { return hits; }
+            if (hay.contains(&needle) || needle.contains(&hay))
+                && !hits.contains(&label.name)
+            {
+                hits.push(label.name.clone());
+                if hits.len() >= 3 {
+                    return hits;
                 }
             }
         }
@@ -246,6 +248,188 @@ struct ListWorkspacesArgs {}
 struct ListLabelsArgs {
     /// Workspace name (required). Use list_workspaces to see available workspaces.
     workspace: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ListProjectsArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Refresh projects and milestones from Linear before reading. Defaults to true.
+    refresh: Option<bool>,
+    /// Include archived projects. Defaults to false.
+    include_archived: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct GetProjectArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Project UUID, slug, or name.
+    id: String,
+    /// Include every milestone and linked issue by importing the full project. Defaults to false.
+    include_issues: Option<bool>,
+    /// Refresh metadata from Linear before reading. Defaults to true.
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CreateProjectArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Project name.
+    name: String,
+    /// Team keys that own the project (for example ["ENG", "IOS"]).
+    teams: Vec<String>,
+    /// Short project summary.
+    description: Option<String>,
+    /// Detailed project content in Markdown.
+    content: Option<String>,
+    /// Linear project icon identifier.
+    icon: Option<String>,
+    /// Linear project color.
+    color: Option<String>,
+    /// Project status name or UUID.
+    status: Option<String>,
+    /// Project priority (0=no priority, 1=urgent, 2=high, 3=medium, 4=low).
+    priority: Option<i32>,
+    /// Project lead: "me" or a member name.
+    lead: Option<String>,
+    /// Start date in YYYY-MM-DD format.
+    start_date: Option<String>,
+    /// Target date in YYYY-MM-DD format.
+    target_date: Option<String>,
+    /// Project members: each value is "me" or a member name.
+    members: Option<Vec<String>>,
+    /// Project label names or UUIDs.
+    labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct UpdateProjectArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Project UUID, slug, or current name.
+    id: String,
+    /// New project name.
+    name: Option<String>,
+    /// Replacement team keys.
+    teams: Option<Vec<String>>,
+    /// New short project summary. Pass an empty string to clear.
+    description: Option<String>,
+    /// New detailed project content. Pass an empty string to clear.
+    content: Option<String>,
+    /// New icon. Pass "none" to clear.
+    icon: Option<String>,
+    /// New color. Pass "none" to clear.
+    color: Option<String>,
+    /// New status name or UUID.
+    status: Option<String>,
+    /// New project priority.
+    priority: Option<i32>,
+    /// New lead. Pass "none" to clear.
+    lead: Option<String>,
+    /// New start date, or "none" to clear.
+    start_date: Option<String>,
+    /// New target date, or "none" to clear.
+    target_date: Option<String>,
+    /// Replacement project members.
+    members: Option<Vec<String>>,
+    /// Replacement project label names or UUIDs. Pass [] to clear.
+    labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DeleteProjectArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Project UUID, slug, or name.
+    id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ImportProjectArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Project UUID, slug, or name.
+    id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ListProjectMilestonesArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Owning project UUID, slug, or name.
+    project: String,
+    /// Refresh project and milestone metadata from Linear first. Defaults to true.
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct GetProjectMilestoneArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Milestone UUID or name.
+    id: String,
+    /// Owning project UUID, slug, or name. Recommended when resolving a milestone by name.
+    project: Option<String>,
+    /// Include all linked issues by importing the full milestone. Defaults to false.
+    include_issues: Option<bool>,
+    /// Refresh metadata from Linear first. Defaults to true.
+    refresh: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct CreateProjectMilestoneArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Owning project UUID, slug, or name.
+    project: String,
+    /// Milestone name.
+    name: String,
+    /// Milestone description.
+    description: Option<String>,
+    /// Target date in YYYY-MM-DD format.
+    target_date: Option<String>,
+    /// Position within the project.
+    sort_order: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct UpdateProjectMilestoneArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Milestone UUID or name.
+    id: String,
+    /// Owning/new project UUID, slug, or name. Also disambiguates milestone names.
+    project: Option<String>,
+    /// New milestone name.
+    name: Option<String>,
+    /// New description. Pass an empty string to clear.
+    description: Option<String>,
+    /// New target date, or "none" to clear.
+    target_date: Option<String>,
+    /// New position within the project.
+    sort_order: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct DeleteProjectMilestoneArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Milestone UUID or name.
+    id: String,
+    /// Owning project UUID, slug, or name. Recommended when resolving by name.
+    project: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ImportProjectMilestoneArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Milestone UUID or name.
+    id: String,
+    /// Owning project UUID, slug, or name. Recommended when resolving by name.
+    project: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -310,6 +494,10 @@ struct CreateIssueArgs {
     labels: Option<Vec<String>>,
     /// Assignee. Pass "me" to assign to the authenticated user, or a name (case-insensitive).
     assignee: Option<String>,
+    /// Set project by UUID, slug, or name.
+    project: Option<String>,
+    /// Set project milestone by UUID or name. Its project is inferred when omitted.
+    project_milestone: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -330,6 +518,8 @@ struct UpdateIssueArgs {
     labels: Option<Vec<String>>,
     /// Set project by name (or "none" to remove from project)
     project: Option<String>,
+    /// Set project milestone by name/UUID (or "none" to remove from a milestone).
+    project_milestone: Option<String>,
     /// Assignee. Pass "me" for self-assign, "none" to clear, or a name (case-insensitive).
     assignee: Option<String>,
 }
@@ -406,6 +596,8 @@ struct MarkTriagedArgs {
     labels: Option<Vec<String>>,
     /// Set project by name (or "none" to remove from project)
     project: Option<String>,
+    /// Set project milestone by name/UUID (or "none" to remove from a milestone).
+    project_milestone: Option<String>,
     /// Assignee. Pass "me" for self-assign, "none" to clear, or a name (case-insensitive).
     assignee: Option<String>,
 }
@@ -514,6 +706,501 @@ impl RectilinearMcp {
         });
 
         serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "list_projects",
+        description = "List Linear projects with their status, dates, lead, teams, members, labels, progress, and other metadata. Refreshes the local project/milestone mirror by default."
+    )]
+    async fn list_projects(
+        &self,
+        #[tool(aggr)] args: ListProjectsArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        if args.refresh.unwrap_or(true) {
+            let client = self.client_for_workspace(&workspace)?;
+            client
+                .sync_projects(&self.db, &workspace)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let projects = self
+            .db
+            .list_projects(&workspace, args.include_archived.unwrap_or(false))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "workspace": workspace,
+            "count": projects.len(),
+            "projects": projects,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "get_project",
+        description = "Get a Linear project and its milestones. Set include_issues=true to refresh and return the complete importable project bundle with every linked issue."
+    )]
+    async fn get_project(
+        &self,
+        #[tool(aggr)] args: GetProjectArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        if args.include_issues.unwrap_or(false) {
+            let bundle = client
+                .import_project(&self.db, &workspace, &args.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            return serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string());
+        }
+        if args.refresh.unwrap_or(true) {
+            client
+                .sync_projects(&self.db, &workspace)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let bundle = self
+            .db
+            .get_project_bundle(&workspace, &args.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Project '{}' not found", args.id))?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "project": bundle.project,
+            "milestones": bundle.milestones,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "create_project",
+        description = "Create a Linear project with first-class status, priority, lead, team, membership, label, date, icon, color, summary, and detailed-content metadata."
+    )]
+    async fn create_project(
+        &self,
+        #[tool(aggr)] args: CreateProjectArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let team_ids = self.resolve_team_ids(&client, &args.teams).await?;
+        let status_id = match args.status.as_deref() {
+            Some(status) => Some(
+                client
+                    .get_project_status_id(status)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let lead_id = match args.lead.as_deref() {
+            Some(lead) if lead.eq_ignore_ascii_case("none") => {
+                return Err("Cannot clear a lead while creating a project; omit lead instead.".into())
+            }
+            Some(lead) => Some(
+                client
+                    .resolve_assignee_id(lead)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let member_ids = match args.members.as_deref() {
+            Some(members) => Some(self.resolve_member_ids(&client, members).await?),
+            None => None,
+        };
+        let label_ids = match args.labels.as_deref() {
+            Some(labels) => Some(
+                client
+                    .get_project_label_ids(labels)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let input = crate::linear::CreateProjectInput {
+            name: args.name,
+            team_ids,
+            description: args.description,
+            content: args.content,
+            icon: args.icon,
+            color: args.color,
+            status_id,
+            priority: args.priority,
+            lead_id,
+            start_date: args.start_date,
+            target_date: args.target_date,
+            member_ids,
+            label_ids,
+        };
+        let project_id = client
+            .create_project(&input)
+            .await
+            .map_err(|error| error.to_string())?;
+        let project = client
+            .fetch_project(&project_id, &workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.db
+            .upsert_project(&project)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "created",
+            "project": project,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "update_project",
+        description = "Update a Linear project's metadata. Empty strings clear descriptions/content; use 'none' to clear nullable lead, date, icon, or color fields."
+    )]
+    async fn update_project(
+        &self,
+        #[tool(aggr)] args: UpdateProjectArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = self.resolve_project_id(&client, &workspace, &args.id).await?;
+        let team_ids = match args.teams.as_deref() {
+            Some(teams) => Some(self.resolve_team_ids(&client, teams).await?),
+            None => None,
+        };
+        let status_id = match args.status.as_deref() {
+            Some(status) if status.eq_ignore_ascii_case("none") => {
+                return Err("A project must have a status; choose a status instead of 'none'.".into())
+            }
+            Some(status) => Some(
+                client
+                    .get_project_status_id(status)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let lead_id = match args.lead.as_deref() {
+            Some(lead) => Some(
+                client
+                    .resolve_assignee_id(lead)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let member_ids = match args.members.as_deref() {
+            Some(members) => Some(self.resolve_member_ids(&client, members).await?),
+            None => None,
+        };
+        let label_ids = match args.labels.as_deref() {
+            Some(labels) => Some(
+                client
+                    .get_project_label_ids(labels)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let input = crate::linear::UpdateProjectInput {
+            name: args.name,
+            team_ids,
+            description: args.description,
+            content: args.content,
+            icon: args.icon,
+            color: args.color,
+            status_id,
+            priority: args.priority,
+            lead_id,
+            start_date: args.start_date,
+            target_date: args.target_date,
+            member_ids,
+            label_ids,
+        };
+        client
+            .update_project(&project_id, &input)
+            .await
+            .map_err(|error| error.to_string())?;
+        let project = client
+            .fetch_project(&project_id, &workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.db
+            .upsert_project(&project)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "updated",
+            "project": project,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "delete_project",
+        description = "Delete (archive) a Linear project and remove its cached project/milestone hierarchy from Rectilinear. Linked issues remain cached."
+    )]
+    async fn delete_project(
+        &self,
+        #[tool(aggr)] args: DeleteProjectArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = self.resolve_project_id(&client, &workspace, &args.id).await?;
+        client
+            .delete_project(&project_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.db
+            .delete_project_local(&project_id)
+            .map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({
+            "status": "deleted",
+            "project_id": project_id,
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "import_project",
+        description = "Import a complete Linear project into Rectilinear and return one portable bundle containing project metadata, ordered milestones, and every linked issue across teams."
+    )]
+    async fn import_project(
+        &self,
+        #[tool(aggr)] args: ImportProjectArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let bundle = client
+            .import_project(&self.db, &workspace, &args.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "list_project_milestones",
+        description = "List ordered milestones and progress metadata for a Linear project. Refreshes the project hierarchy from Linear by default."
+    )]
+    async fn list_project_milestones(
+        &self,
+        #[tool(aggr)] args: ListProjectMilestonesArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        if args.refresh.unwrap_or(true) {
+            client
+                .sync_projects(&self.db, &workspace)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let project_id = self
+            .resolve_project_id(&client, &workspace, &args.project)
+            .await?;
+        let milestones = self
+            .db
+            .list_project_milestones(&project_id)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "project_id": project_id,
+            "count": milestones.len(),
+            "milestones": milestones,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "get_project_milestone",
+        description = "Get a Linear project milestone. Set include_issues=true to refresh and return the complete importable milestone bundle with every linked issue."
+    )]
+    async fn get_project_milestone(
+        &self,
+        #[tool(aggr)] args: GetProjectMilestoneArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = match args.project.as_deref() {
+            Some(project) => Some(
+                self.resolve_project_id(&client, &workspace, project)
+                    .await?,
+            ),
+            None => None,
+        };
+        if args.include_issues.unwrap_or(false) {
+            let bundle = client
+                .import_project_milestone(
+                    &self.db,
+                    &workspace,
+                    project_id.as_deref(),
+                    &args.id,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            return serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string());
+        }
+        if args.refresh.unwrap_or(true) {
+            client
+                .sync_projects(&self.db, &workspace)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let milestone = self
+            .db
+            .get_project_milestone(&workspace, &args.id, project_id.as_deref())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Project milestone '{}' not found", args.id))?;
+        serde_json::to_string_pretty(&milestone).map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "create_project_milestone",
+        description = "Create a milestone within a Linear project, including description, target date, and ordering metadata."
+    )]
+    async fn create_project_milestone(
+        &self,
+        #[tool(aggr)] args: CreateProjectMilestoneArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = self
+            .resolve_project_id(&client, &workspace, &args.project)
+            .await?;
+        let input = crate::linear::CreateProjectMilestoneInput {
+            project_id: project_id.clone(),
+            name: args.name,
+            description: args.description,
+            target_date: args.target_date,
+            sort_order: args.sort_order,
+        };
+        let milestone_id = client
+            .create_project_milestone(&input)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.cache_project_and_milestone(&client, &workspace, &milestone_id)
+            .await?;
+        let milestone = self
+            .db
+            .get_project_milestone(&workspace, &milestone_id, Some(&project_id))
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Created milestone was not cached".to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "created",
+            "milestone": milestone,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "update_project_milestone",
+        description = "Update or move a Linear project milestone. Empty description clears it; use 'none' to clear the target date."
+    )]
+    async fn update_project_milestone(
+        &self,
+        #[tool(aggr)] args: UpdateProjectMilestoneArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = match args.project.as_deref() {
+            Some(project) => Some(
+                self.resolve_project_id(&client, &workspace, project)
+                    .await?,
+            ),
+            None => None,
+        };
+        let milestone_id = self
+            .resolve_milestone_id(
+                &client,
+                &workspace,
+                project_id.as_deref(),
+                &args.id,
+            )
+            .await?;
+        let input = crate::linear::UpdateProjectMilestoneInput {
+            project_id,
+            name: args.name,
+            description: args.description,
+            target_date: args.target_date,
+            sort_order: args.sort_order,
+        };
+        client
+            .update_project_milestone(&milestone_id, &input)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.cache_project_and_milestone(&client, &workspace, &milestone_id)
+            .await?;
+        let milestone = self
+            .db
+            .get_project_milestone(&workspace, &milestone_id, None)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Updated milestone was not cached".to_string())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "updated",
+            "milestone": milestone,
+        }))
+        .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        name = "delete_project_milestone",
+        description = "Delete a Linear project milestone and remove it from Rectilinear's local hierarchy. Linked issues remain cached."
+    )]
+    async fn delete_project_milestone(
+        &self,
+        #[tool(aggr)] args: DeleteProjectMilestoneArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = match args.project.as_deref() {
+            Some(project) => Some(
+                self.resolve_project_id(&client, &workspace, project)
+                    .await?,
+            ),
+            None => None,
+        };
+        let milestone_id = self
+            .resolve_milestone_id(
+                &client,
+                &workspace,
+                project_id.as_deref(),
+                &args.id,
+            )
+            .await?;
+        client
+            .delete_project_milestone(&milestone_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.db
+            .delete_project_milestone_local(&milestone_id)
+            .map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({
+            "status": "deleted",
+            "milestone_id": milestone_id,
+        })
+        .to_string())
+    }
+
+    #[tool(
+        name = "import_project_milestone",
+        description = "Import a complete Linear milestone into Rectilinear and return one portable bundle containing its project metadata, milestone metadata, and every linked issue."
+    )]
+    async fn import_project_milestone(
+        &self,
+        #[tool(aggr)] args: ImportProjectMilestoneArgs,
+    ) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let client = self.client_for_workspace(&workspace)?;
+        let project_id = match args.project.as_deref() {
+            Some(project) => Some(
+                self.resolve_project_id(&client, &workspace, project)
+                    .await?,
+            ),
+            None => None,
+        };
+        let bundle = client
+            .import_project_milestone(
+                &self.db,
+                &workspace,
+                project_id.as_deref(),
+                &args.id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -676,7 +1363,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "create_issue",
-        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low), labels (list of names), and assignee ('me' for self-assign, or a user's display name).
+        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low), labels (list of names), assignee ('me' for self-assign, or a user's display name), project, and project milestone.
 
 IMPORTANT — Before calling this tool, you MUST:
 
@@ -722,16 +1409,44 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
+        let mut project_id = match args.project.as_deref() {
+            Some(value) => Some(self.resolve_project_id(&client, &workspace, value).await?),
+            None => None,
+        };
+        let project_milestone_id = match args.project_milestone.as_deref() {
+            Some(value) => {
+                let milestone_id = self
+                    .resolve_milestone_id(
+                        &client,
+                        &workspace,
+                        project_id.as_deref(),
+                        value,
+                    )
+                    .await?;
+                let milestone = client
+                    .fetch_project_milestone(&milestone_id, &workspace)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if project_id.is_none() {
+                    project_id = Some(milestone.project_id);
+                }
+                Some(milestone_id)
+            }
+            None => None,
+        };
+
         let (issue_id, identifier) = client
-            .create_issue(
-                &team_id,
-                &args.title,
-                args.description.as_deref(),
-                args.priority,
-                &label_ids,
-                assignee_id.as_deref(),
-                parent_id.as_deref(),
-            )
+            .create_issue(crate::linear::CreateIssueInput {
+                team_id: &team_id,
+                title: &args.title,
+                description: args.description.as_deref(),
+                priority: args.priority,
+                label_ids: &label_ids,
+                assignee_id: assignee_id.as_deref(),
+                parent_id: parent_id.as_deref(),
+                project_id: project_id.as_deref(),
+                project_milestone_id: project_milestone_id.as_deref(),
+            })
             .await
             .map_err(|e| e.to_string())?;
 
@@ -787,7 +1502,7 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
-        let project_id = if let Some(ref project_name) = args.project {
+        let mut project_id = if let Some(ref project_name) = args.project {
             if project_name.eq_ignore_ascii_case("none") {
                 Some(String::new()) // Empty string removes project in Linear
             } else {
@@ -797,6 +1512,34 @@ IMPORTANT — Before calling this tool, you MUST:
                         .await
                         .map_err(|e| e.to_string())?,
                 )
+            }
+        } else {
+            None
+        };
+
+        let project_milestone_id = if let Some(ref milestone_name) = args.project_milestone {
+            if milestone_name.eq_ignore_ascii_case("none") {
+                Some(String::new())
+            } else {
+                if project_id.as_deref() == Some("") {
+                    return Err("Cannot assign a milestone while removing the issue's project.".into());
+                }
+                let owning_project_id = project_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .or(issue.project_id.as_deref());
+                let milestone_id = client
+                    .find_project_milestone(owning_project_id, milestone_name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let milestone = client
+                    .fetch_project_milestone(&milestone_id, &workspace)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if project_id.is_none() && issue.project_id.as_deref() != Some(&milestone.project_id) {
+                    project_id = Some(milestone.project_id);
+                }
+                Some(milestone_id)
             }
         } else {
             None
@@ -827,13 +1570,16 @@ IMPORTANT — Before calling this tool, you MUST:
         client
             .update_issue(
                 &issue.id,
-                args.title.as_deref(),
-                safe_description.as_deref(),
-                args.priority,
-                state_id.as_deref(),
-                label_ids.as_deref(),
-                project_id.as_deref(),
-                assignee_id.as_deref(),
+                crate::linear::UpdateIssueInput {
+                    title: args.title.as_deref(),
+                    description: safe_description.as_deref(),
+                    priority: args.priority,
+                    state_id: state_id.as_deref(),
+                    label_ids: label_ids.as_deref(),
+                    project_id: project_id.as_deref(),
+                    assignee_id: assignee_id.as_deref(),
+                    project_milestone_id: project_milestone_id.as_deref(),
+                },
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -891,7 +1637,13 @@ IMPORTANT — Before calling this tool, you MUST:
                 None => desc_text.clone(),
             };
             client
-                .update_issue(&issue.id, None, Some(&new_desc), None, None, None, None, None)
+                .update_issue(
+                    &issue.id,
+                    crate::linear::UpdateIssueInput {
+                        description: Some(&new_desc),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             actions.push("description_updated");
@@ -1271,7 +2023,7 @@ IMPORTANT — Before calling this tool, you MUST:
             None
         };
 
-        let project_id = if let Some(ref project_name) = args.project {
+        let mut project_id = if let Some(ref project_name) = args.project {
             if project_name.eq_ignore_ascii_case("none") {
                 Some(String::new())
             } else {
@@ -1281,6 +2033,34 @@ IMPORTANT — Before calling this tool, you MUST:
                         .await
                         .map_err(|e| e.to_string())?,
                 )
+            }
+        } else {
+            None
+        };
+
+        let project_milestone_id = if let Some(ref milestone_name) = args.project_milestone {
+            if milestone_name.eq_ignore_ascii_case("none") {
+                Some(String::new())
+            } else {
+                if project_id.as_deref() == Some("") {
+                    return Err("Cannot assign a milestone while removing the issue's project.".into());
+                }
+                let owning_project_id = project_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .or(issue.project_id.as_deref());
+                let milestone_id = client
+                    .find_project_milestone(owning_project_id, milestone_name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let milestone = client
+                    .fetch_project_milestone(&milestone_id, &workspace)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if project_id.is_none() && issue.project_id.as_deref() != Some(&milestone.project_id) {
+                    project_id = Some(milestone.project_id);
+                }
+                Some(milestone_id)
             }
         } else {
             None
@@ -1304,13 +2084,16 @@ IMPORTANT — Before calling this tool, you MUST:
         client
             .update_issue(
                 &issue.id,
-                args.title.as_deref(),
-                safe_description.as_deref(),
-                Some(args.priority),
-                state_id.as_deref(),
-                label_ids.as_deref(),
-                project_id.as_deref(),
-                assignee_id.as_deref(),
+                crate::linear::UpdateIssueInput {
+                    title: args.title.as_deref(),
+                    description: safe_description.as_deref(),
+                    priority: Some(args.priority),
+                    state_id: state_id.as_deref(),
+                    label_ids: label_ids.as_deref(),
+                    project_id: project_id.as_deref(),
+                    assignee_id: assignee_id.as_deref(),
+                    project_milestone_id: project_milestone_id.as_deref(),
+                },
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -1500,6 +2283,125 @@ impl RectilinearMcp {
         Ok(LinearClient::with_api_key(&api_key))
     }
 
+    async fn resolve_team_ids(
+        &self,
+        client: &LinearClient,
+        values: &[String],
+    ) -> Result<Vec<String>, String> {
+        if values.is_empty() {
+            return Err("At least one team is required.".into());
+        }
+        let teams = client.list_teams().await.map_err(|error| error.to_string())?;
+        let mut ids = Vec::new();
+        for value in values {
+            let team = teams
+                .iter()
+                .find(|team| {
+                    team.id == *value
+                        || team.key.eq_ignore_ascii_case(value)
+                        || team.name.eq_ignore_ascii_case(value)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Team '{}' not found. Available: {}",
+                        value,
+                        teams
+                            .iter()
+                            .map(|team| format!("{} ({})", team.key, team.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+            if !ids.contains(&team.id) {
+                ids.push(team.id.clone());
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn resolve_member_ids(
+        &self,
+        client: &LinearClient,
+        members: &[String],
+    ) -> Result<Vec<String>, String> {
+        let mut ids = Vec::new();
+        for member in members {
+            if member.eq_ignore_ascii_case("none") {
+                return Err("Use an empty members list to remove all project members.".into());
+            }
+            let id = client
+                .resolve_assignee_id(member)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn resolve_project_id(
+        &self,
+        client: &LinearClient,
+        workspace: &str,
+        id_or_name: &str,
+    ) -> Result<String, String> {
+        if let Some(project) = self
+            .db
+            .get_project(workspace, id_or_name)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(project.id);
+        }
+        client
+            .find_project_by_name(id_or_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn resolve_milestone_id(
+        &self,
+        client: &LinearClient,
+        workspace: &str,
+        project_id: Option<&str>,
+        id_or_name: &str,
+    ) -> Result<String, String> {
+        if let Some(milestone) = self
+            .db
+            .get_project_milestone(workspace, id_or_name, project_id)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(milestone.id);
+        }
+        client
+            .find_project_milestone(project_id, id_or_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn cache_project_and_milestone(
+        &self,
+        client: &LinearClient,
+        workspace: &str,
+        milestone_id: &str,
+    ) -> Result<(), String> {
+        let milestone = client
+            .fetch_project_milestone(milestone_id, workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        let project = client
+            .fetch_project(&milestone.project_id, workspace)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.db
+            .upsert_project(&project)
+            .map_err(|error| error.to_string())?;
+        self.db
+            .upsert_project_milestone(&milestone)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     async fn ensure_comments_synced_if_needed(
         &self,
         workspace: &str,
@@ -1598,7 +2500,11 @@ impl ServerHandler for RectilinearMcp {
             instructions: Some(
                 "## Workspace Selection\n\
                  All tools (except list_workspaces) require a `workspace` parameter. Call list_workspaces first to discover available workspaces.\n\n\
-                 Rectilinear provides Linear issue intelligence with search, duplicate detection, and triage.\n\n\
+                 Rectilinear provides Linear issue intelligence plus first-class project and milestone management.\n\n\
+                 ## Project Hierarchy\n\
+                 Use list/get/create/update/delete_project and the corresponding project_milestone tools for metadata CRUD. \
+                 Use import_project or import_project_milestone when a downstream client needs one complete portable hierarchy with linked issues. \
+                 update_issue and mark_triaged accept project_milestone in addition to project.\n\n\
                  ## Comment Evidence\n\
                  When get_issue(include_comments=true) or issue_context returns comments, always inspect comments_status. \
                  An empty comments array is only evidence that no Linear comments exist when comments_status is `none_found`. \
@@ -1640,7 +2546,8 @@ impl ServerHandler for RectilinearMcp {
                  Use the state field in mark_triaged to set the status (e.g. state: \"Duplicate\", state: \"Done\", state: \"Cancelled\").\n\n\
                  ## Labels and Projects\n\
                  When triaging, consider whether the issue should be labeled or assigned to a project. \
-                 Use the labels and project fields in mark_triaged to set these. Pass project: \"none\" to remove an issue from its current project.\n\n\
+                 Use the labels, project, and project_milestone fields in mark_triaged to set these. \
+                 Pass project: \"none\" or project_milestone: \"none\" to remove the corresponding relationship.\n\n\
                  ## Issue Relations\n\
                  Issues may have relations (blocks, blocked_by, related, duplicate) visible in the `relations` field. \
                  When triaging, surface blocking relationships — they affect priority. Use manage_relation to add/remove relations. \

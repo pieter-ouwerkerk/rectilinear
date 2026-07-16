@@ -1,6 +1,6 @@
 # Rectilinear
 
-Local-first Linear issue intelligence. Maintains a search-optimized SQLite mirror of your Linear issues with hybrid full-text + vector search. Find duplicates before filing, search across teams instantly, and manage issues from the terminal or through Claude Code via MCP.
+Local-first Linear issue intelligence. Maintains a search-optimized SQLite mirror of your Linear issues, projects, and project milestones with hybrid full-text + vector search. Find duplicates before filing, search across teams instantly, and manage complete project hierarchies from the terminal, native clients, or MCP.
 
 ## Why
 
@@ -9,6 +9,7 @@ Linear teams accumulate hundreds of issues. Duplicate detection is hard, search 
 - **Find duplicates** before creating new issues — semantic similarity, not just keyword matching
 - **Search fast** — hybrid FTS5 + vector search with Reciprocal Rank Fusion, all local
 - **Manage issues** from the CLI or let Claude Code do it through MCP tools
+- **Preserve project structure** with first-class project/milestone metadata and portable imports that include linked issues
 
 Linear remains the source of truth. The local database is a read-optimized cache. Writes go to Linear first, then sync back.
 
@@ -23,6 +24,8 @@ Linear remains the source of truth. The local database is a read-optimized cache
 │  CLI (clap)              MCP Server (rmcp)       │
 │  ┌──────────┐            ┌──────────────────┐    │
 │  │ sync     │            │ search_issues    │    │
+│  │ projects │            │ import_project   │    │
+│  │ milestone│            │ project CRUD     │    │
 │  │ search   │            │ find_duplicates  │    │
 │  │ find     │            │ get_issue        │    │
 │  │ show     │            │ create_issue     │    │
@@ -222,6 +225,34 @@ rectilinear append ENG-123 --comment "Reproduced on Safari 17.4"
 rectilinear append ENG-123 --description "Also affects Safari 17.3"
 ```
 
+### Projects and milestones
+
+Projects and milestones are first-class cached resources. Linear remains the source of truth; `sync`, `projects sync`, and the MCP refresh operations update the relational mirror.
+
+```sh
+# Query project metadata and milestones
+rectilinear projects list
+rectilinear projects show "API Reliability"
+rectilinear milestones list --project "API Reliability"
+
+# Create and update the hierarchy
+rectilinear projects create --name "API Reliability" --teams ENG \
+  --description "Improve service resilience and incident response" --priority 2 \
+  --labels Infrastructure
+rectilinear milestones create --project "API Reliability" --name "Request tracing" \
+  --target-date 2026-09-01
+rectilinear milestones update "Request tracing" \
+  --description "Instrument critical request paths"
+
+# Export one complete relationship graph as JSON
+rectilinear projects import "API Reliability"
+rectilinear milestones import "Request tracing" --project "API Reliability"
+```
+
+Project imports contain the complete project metadata, ordered milestones, and all linked issues across the project’s teams. Milestone imports contain the owning project, milestone metadata, and every issue assigned to that milestone. This is the preferred downstream-client boundary when the relationship graph matters; consumers no longer need to copy or reconstruct individual issues.
+
+The MCP server exposes matching `list/get/create/update/delete_project`, `*_project_milestone`, `import_project`, and `import_project_milestone` tools. Project CRUD preserves teams, members, labels, status, lead, priority, dates, content, and visual metadata. `create_issue`, `update_issue`, and `mark_triaged` accept `project_milestone` so an issue can be created or moved within the hierarchy. The UniFFI `RectilinearEngine` exposes the same local reads, CRUD calls, hierarchy imports, and `set_issue_project_context` for Swift clients.
+
 ### Use with AI agents (MCP)
 
 Rectilinear ships an MCP server (`rectilinear serve`, stdio transport) that any MCP-aware agent can connect to. Register it once at user scope and every project on your machine gets access — there's nothing per-repo to configure for the server itself, only for *which workspace* a given repo should use (see [Per-project guidance](#per-project-guidance) below).
@@ -282,20 +313,35 @@ Without this hint, agents have to call `list_workspaces` and guess; with it, the
 
 #### Tools exposed
 
-This exposes 10 tools to MCP clients:
+This exposes 25 tools to MCP clients:
 
 | Tool | Purpose |
 |---|---|
+| `list_workspaces` | Discover configured Linear workspaces |
+| `list_labels` | Read the cached workspace label catalog |
+| `list_projects` | Refresh and list project metadata |
+| `get_project` | Read a project, its milestones, and optionally all issues |
+| `create_project` | Create a project with teams and metadata |
+| `update_project` | Update project metadata and relationships |
+| `delete_project` | Archive a project and remove its cached hierarchy |
+| `import_project` | Return a portable project + milestones + issues bundle |
+| `list_project_milestones` | List ordered milestones for a project |
+| `get_project_milestone` | Read a milestone and optionally all issues |
+| `create_project_milestone` | Create a milestone inside a project |
+| `update_project_milestone` | Update or move a milestone |
+| `delete_project_milestone` | Delete a milestone |
+| `import_project_milestone` | Return a portable project + milestone + issues bundle |
 | `search_issues` | Hybrid search with team/state filters |
 | `find_duplicates` | Semantic duplicate detection given title + description |
 | `get_issue` | Full issue details with optional comments and comment sync diagnostics |
-| `create_issue` | Create in Linear + sync back |
-| `update_issue` | Update title, description, priority, state, labels, project |
+| `create_issue` | Create in Linear with optional project/milestone + sync back |
+| `update_issue` | Update title, description, priority, state, labels, project, and milestone |
 | `append_to_issue` | Add comment or extend description |
 | `sync_team` | Trigger sync for a team; full syncs include archived issues and refresh comments |
 | `issue_context` | Issue + its N most similar issues, comments, and comment sync diagnostics |
 | `get_triage_queue` | Batch of unprioritized issues enriched with similar issues and code search hints |
-| `mark_triaged` | Set priority, state, labels, project + update title/description + add comment in one call |
+| `mark_triaged` | Set priority, state, labels, project/milestone + update title/description + add comment in one call |
+| `manage_relation` | Add or remove issue relations |
 
 ### Triage workflow
 

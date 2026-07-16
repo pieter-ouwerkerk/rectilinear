@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::{Database, Issue};
 
 /// Create a temporary database for testing. Returns (Database, TempDir).
@@ -33,6 +31,9 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
         url: format!("https://linear.app/test/issue/{identifier}"),
         branch_name: None,
         workspace_id: "default".to_string(),
+        project_id: None,
+        project_milestone_id: None,
+        project_milestone_name: None,
     }
 }
 

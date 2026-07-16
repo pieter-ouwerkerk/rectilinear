@@ -61,6 +61,24 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (9)", [])?;
     }
 
+    if current_version < 10 {
+        run_migration_10(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (10)", [])?;
+    }
+
+    Ok(())
+}
+
+fn run_migration_10(conn: &Connection) -> Result<()> {
+    conn.execute_batch(MIGRATION_10)?;
+    add_column_if_missing(conn, "issues", "project_id", "TEXT")?;
+    add_column_if_missing(conn, "issues", "project_milestone_id", "TEXT")?;
+    add_column_if_missing(conn, "issues", "project_milestone_name", "TEXT")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(workspace_id, project_id);
+         CREATE INDEX IF NOT EXISTS idx_issues_project_milestone
+             ON issues(workspace_id, project_milestone_id);",
+    )?;
     Ok(())
 }
 
@@ -100,6 +118,87 @@ CREATE TABLE IF NOT EXISTS comment_sync_state (
     synced_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_comment_sync_workspace ON comment_sync_state(workspace_id);
+";
+
+const MIGRATION_10: &str = "
+-- Projects and their milestones are first-class cached resources. Linear is
+-- still the source of truth; these tables make the hierarchy importable by
+-- downstream clients without reconstructing it from issue names.
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    slug_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content TEXT,
+    icon TEXT,
+    color TEXT NOT NULL DEFAULT '',
+    status_id TEXT NOT NULL DEFAULT '',
+    status_name TEXT NOT NULL DEFAULT '',
+    status_type TEXT NOT NULL DEFAULT '',
+    status_color TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    start_date TEXT,
+    target_date TEXT,
+    lead_id TEXT,
+    lead_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT,
+    url TEXT NOT NULL DEFAULT '',
+    progress REAL NOT NULL DEFAULT 0,
+    synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_projects_workspace_name
+    ON projects(workspace_id, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS project_teams (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    team_id TEXT NOT NULL,
+    team_key TEXT NOT NULL,
+    team_name TEXT NOT NULL,
+    PRIMARY KEY (project_id, team_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_teams_key ON project_teams(team_key);
+
+CREATE TABLE IF NOT EXISTS project_members (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_labels (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL,
+    label_name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    PRIMARY KEY (project_id, label_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_labels_name
+    ON project_labels(label_name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS project_milestones (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT,
+    target_date TEXT,
+    status TEXT NOT NULL DEFAULT '',
+    progress REAL NOT NULL DEFAULT 0,
+    sort_order REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT,
+    synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_project_milestones_project
+    ON project_milestones(project_id, sort_order, target_date);
+CREATE INDEX IF NOT EXISTS idx_project_milestones_workspace
+    ON project_milestones(workspace_id);
 ";
 
 const MIGRATION_8: &str = "

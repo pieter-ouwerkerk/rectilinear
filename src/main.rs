@@ -120,6 +120,12 @@ enum Commands {
         /// Label names
         #[arg(short, long)]
         labels: Vec<String>,
+        /// Project UUID, slug, or name
+        #[arg(long)]
+        project: Option<String>,
+        /// Project milestone UUID or name
+        #[arg(long)]
+        project_milestone: Option<String>,
     },
     /// Append to an existing issue
     Append {
@@ -190,6 +196,16 @@ enum Commands {
     },
     /// List available Linear teams
     Teams,
+    /// Manage Linear projects
+    Projects {
+        #[command(subcommand)]
+        action: cli::projects_cmd::ProjectAction,
+    },
+    /// Manage Linear project milestones
+    Milestones {
+        #[command(subcommand)]
+        action: cli::projects_cmd::MilestoneAction,
+    },
     /// Start MCP server (stdio transport)
     Serve,
 }
@@ -378,16 +394,22 @@ async fn main() -> Result<()> {
                     description,
                     priority,
                     labels,
+                    project,
+                    project_milestone,
                 } => {
                     cli::create_cmd::handle_create(
                         &db,
                         &config,
-                        team.as_deref(),
-                        &title,
-                        description.as_deref(),
-                        priority,
-                        &labels,
-                        &workspace,
+                        cli::create_cmd::HandleCreateParams {
+                            team: team.as_deref(),
+                            title: &title,
+                            description: description.as_deref(),
+                            priority,
+                            labels: &labels,
+                            project: project.as_deref(),
+                            project_milestone: project_milestone.as_deref(),
+                            workspace: &workspace,
+                        },
                     )
                     .await?;
                 }
@@ -472,6 +494,24 @@ async fn main() -> Result<()> {
                 }
                 Commands::Teams => {
                     cli::teams_cmd::handle_teams(&config, &workspace).await?;
+                }
+                Commands::Projects { action } => {
+                    cli::projects_cmd::handle_project_action(
+                        action,
+                        &db,
+                        &config,
+                        &workspace,
+                    )
+                    .await?;
+                }
+                Commands::Milestones { action } => {
+                    cli::projects_cmd::handle_milestone_action(
+                        action,
+                        &db,
+                        &config,
+                        &workspace,
+                    )
+                    .await?;
                 }
                 Commands::Config { .. } | Commands::Workspace { .. } | Commands::Serve => {
                     unreachable!()

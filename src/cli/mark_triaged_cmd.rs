@@ -166,13 +166,15 @@ pub async fn handle_mark_triaged(
     client
         .update_issue(
             &issue.id,
-            title,
-            safe_description.as_deref(),
-            Some(priority),
-            state_id.as_deref(),
-            label_ids.as_deref(),
-            project_id.as_deref(),
-            None, // assignee_id: out of scope (CLI does not expose --assignee)
+            crate::linear::UpdateIssueInput {
+                title,
+                description: safe_description.as_deref(),
+                priority: Some(priority),
+                state_id: state_id.as_deref(),
+                label_ids: label_ids.as_deref(),
+                project_id: project_id.as_deref(),
+                ..Default::default()
+            },
         )
         .await?;
 

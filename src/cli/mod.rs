@@ -3,6 +3,7 @@ pub mod config_cmd;
 pub mod create_cmd;
 pub mod embed_cmd;
 pub mod mark_triaged_cmd;
+pub mod projects_cmd;
 pub mod search_cmd;
 pub mod show_cmd;
 pub mod sync_cmd;
