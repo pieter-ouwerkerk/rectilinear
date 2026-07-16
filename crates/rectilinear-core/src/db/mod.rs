@@ -1899,6 +1899,32 @@ mod tests {
     }
 
     #[test]
+    fn migration_10_repairs_missing_project_join_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute("DROP TABLE project_labels", []).unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+
+        crate::db::schema::run_migrations(&conn).unwrap();
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='project_labels'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 1);
+    }
+
+    #[test]
     fn upsert_label_inserts_and_renames_in_place() {
         use super::test_helpers::{test_db, make_label};
         let (db, _dir) = test_db();

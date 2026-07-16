@@ -5,6 +5,15 @@ use crate::db::{self, Database};
 
 use super::{IssueConnection, LinearClient, PageInfo};
 
+// Linear charges query complexity per connection item, including every nested
+// connection selected for that item. Project metadata is unusually rich, so
+// conservative page sizes keep these queries below the workspace complexity
+// limit even when a workspace has hundreds of projects.
+const PROJECT_PAGE_SIZE: usize = 10;
+const MILESTONE_PAGE_SIZE: usize = 50;
+const RESOURCE_LOOKUP_PAGE_SIZE: usize = 50;
+const HIERARCHY_ISSUE_PAGE_SIZE: usize = 25;
+
 const PROJECT_FIELDS: &str = r#"
     id slugId name description content icon color priority
     startDate targetDate createdAt updatedAt archivedAt url progress
@@ -311,7 +320,7 @@ impl LinearClient {
         let query = r#"
             query($after: String, $includeArchived: Boolean!) {
                 projects(
-                    first: 100,
+                    first: __PROJECT_PAGE_SIZE__,
                     after: $after,
                     includeArchived: $includeArchived,
                     orderBy: updatedAt
@@ -321,7 +330,8 @@ impl LinearClient {
                 }
             }
         "#
-        .replace("__PROJECT_FIELDS__", PROJECT_FIELDS);
+        .replace("__PROJECT_FIELDS__", PROJECT_FIELDS)
+        .replace("__PROJECT_PAGE_SIZE__", &PROJECT_PAGE_SIZE.to_string());
         let data: ProjectConnectionData = self
             .query(
                 &query,
@@ -362,7 +372,7 @@ impl LinearClient {
         let query = r#"
             query($after: String, $includeArchived: Boolean!) {
                 projectMilestones(
-                    first: 250,
+                    first: __MILESTONE_PAGE_SIZE__,
                     after: $after,
                     includeArchived: $includeArchived,
                     orderBy: updatedAt
@@ -372,7 +382,8 @@ impl LinearClient {
                 }
             }
         "#
-        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS);
+        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS)
+        .replace("__MILESTONE_PAGE_SIZE__", &MILESTONE_PAGE_SIZE.to_string());
         let data: MilestoneConnectionData = self
             .query(
                 &query,
@@ -419,7 +430,7 @@ impl LinearClient {
             query($id: String!, $after: String, $includeArchived: Boolean!) {
                 project(id: $id) {
                     projectMilestones(
-                        first: 250,
+                        first: __MILESTONE_PAGE_SIZE__,
                         after: $after,
                         includeArchived: $includeArchived,
                         orderBy: updatedAt
@@ -430,7 +441,8 @@ impl LinearClient {
                 }
             }
         "#
-        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS);
+        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS)
+        .replace("__MILESTONE_PAGE_SIZE__", &MILESTONE_PAGE_SIZE.to_string());
         let data: ProjectMilestonesData = self
             .query(
                 &query,
@@ -711,14 +723,18 @@ impl LinearClient {
         loop {
             let query = r#"
                 query($after: String) {
-                    projects(first: 250, after: $after, includeArchived: true) {
+                    projects(first: __LOOKUP_PAGE_SIZE__, after: $after, includeArchived: true) {
                         nodes { id slugId name }
                         pageInfo { hasNextPage endCursor }
                     }
                 }
             "#;
+            let query = query.replace(
+                "__LOOKUP_PAGE_SIZE__",
+                &RESOURCE_LOOKUP_PAGE_SIZE.to_string(),
+            );
             let data: serde_json::Value = self
-                .query(query, serde_json::json!({ "after": cursor }))
+                .query(&query, serde_json::json!({ "after": cursor }))
                 .await?;
             let nodes = data["projects"]["nodes"]
                 .as_array()
@@ -764,14 +780,22 @@ impl LinearClient {
         loop {
             let query = r#"
                 query($after: String) {
-                    projectMilestones(first: 250, after: $after, includeArchived: true) {
+                    projectMilestones(
+                        first: __LOOKUP_PAGE_SIZE__,
+                        after: $after,
+                        includeArchived: true
+                    ) {
                         nodes { id name project { id } }
                         pageInfo { hasNextPage endCursor }
                     }
                 }
             "#;
+            let query = query.replace(
+                "__LOOKUP_PAGE_SIZE__",
+                &RESOURCE_LOOKUP_PAGE_SIZE.to_string(),
+            );
             let data: serde_json::Value = self
-                .query(query, serde_json::json!({ "after": cursor }))
+                .query(&query, serde_json::json!({ "after": cursor }))
                 .await?;
             let nodes = data["projectMilestones"]["nodes"]
                 .as_array()
@@ -924,7 +948,11 @@ impl LinearClient {
             r#"
                 query($id: String!, $after: String) {
                     projectMilestone(id: $id) {
-                        issues(first: 250, after: $after, includeArchived: true) {
+                        issues(
+                            first: __ISSUE_PAGE_SIZE__,
+                            after: $after,
+                            includeArchived: true
+                        ) {
                             nodes { __ISSUE_FIELDS__ }
                             pageInfo { hasNextPage endCursor }
                         }
@@ -935,7 +963,11 @@ impl LinearClient {
             r#"
                 query($id: String!, $after: String) {
                     project(id: $id) {
-                        issues(first: 250, after: $after, includeArchived: true) {
+                        issues(
+                            first: __ISSUE_PAGE_SIZE__,
+                            after: $after,
+                            includeArchived: true
+                        ) {
                             nodes { __ISSUE_FIELDS__ }
                             pageInfo { hasNextPage endCursor }
                         }
@@ -943,7 +975,8 @@ impl LinearClient {
                 }
             "#
         }
-        .replace("__ISSUE_FIELDS__", ISSUE_FIELDS);
+        .replace("__ISSUE_FIELDS__", ISSUE_FIELDS)
+        .replace("__ISSUE_PAGE_SIZE__", &HIERARCHY_ISSUE_PAGE_SIZE.to_string());
         let variables = serde_json::json!({ "id": resource_id, "after": after_cursor });
         let connection = if milestone {
             let data: MilestoneIssuesData = self.query(&query, variables).await?;

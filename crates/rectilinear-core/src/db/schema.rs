@@ -64,6 +64,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     if current_version < 10 {
         run_migration_10(conn)?;
         conn.execute("INSERT INTO schema_version (version) VALUES (10)", [])?;
+    } else {
+        // Development builds briefly recorded schema version 10 before all
+        // project join tables were present. Re-running this idempotent migration
+        // repairs those databases without requiring users to delete their cache.
+        run_migration_10(conn)?;
     }
 
     Ok(())
