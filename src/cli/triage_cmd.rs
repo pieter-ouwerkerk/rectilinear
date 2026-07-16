@@ -784,13 +784,12 @@ fn spawn_apply(
         let result = linear
             .update_issue(
                 &issue_id,
-                new_title.as_deref(),
-                new_desc.as_deref(),
-                Some(priority),
-                None,
-                None,
-                None,
-                None, // assignee_id: out of scope (CLI does not expose --assignee)
+                crate::linear::UpdateIssueInput {
+                    title: new_title.as_deref(),
+                    description: new_desc.as_deref(),
+                    priority: Some(priority),
+                    ..Default::default()
+                },
             )
             .await;
 

@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::db::{self, Database};
 
+mod projects;
+pub use projects::*;
+
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
 #[derive(Clone)]
@@ -63,6 +66,8 @@ struct LinearIssue {
     team: LinearTeam,
     assignee: Option<LinearUser>,
     project: Option<LinearProject>,
+    #[serde(rename = "projectMilestone")]
+    project_milestone: Option<LinearProjectMilestoneRef>,
     labels: LinearLabelConnection,
     #[serde(default)]
     relations: LinearRelationConnection,
@@ -116,6 +121,13 @@ struct LinearExternalUser {
 
 #[derive(Debug, Deserialize)]
 struct LinearProject {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearProjectMilestoneRef {
+    id: String,
     name: String,
 }
 
@@ -178,6 +190,19 @@ struct CreatedIssue {
     identifier: String,
 }
 
+#[derive(Debug)]
+pub struct CreateIssueInput<'a> {
+    pub team_id: &'a str,
+    pub title: &'a str,
+    pub description: Option<&'a str>,
+    pub priority: Option<i32>,
+    pub label_ids: &'a [String],
+    pub assignee_id: Option<&'a str>,
+    pub parent_id: Option<&'a str>,
+    pub project_id: Option<&'a str>,
+    pub project_milestone_id: Option<&'a str>,
+}
+
 // --- Comment creation types ---
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +257,18 @@ struct UpdateIssueData {
 #[derive(Debug, Deserialize)]
 struct UpdateIssuePayload {
     success: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct UpdateIssueInput<'a> {
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub priority: Option<i32>,
+    pub state_id: Option<&'a str>,
+    pub label_ids: Option<&'a [String]>,
+    pub project_id: Option<&'a str>,
+    pub assignee_id: Option<&'a str>,
+    pub project_milestone_id: Option<&'a str>,
 }
 
 // --- Relation mutation types ---
@@ -400,7 +437,8 @@ impl LinearClient {
                         state {{ name type }}
                         team {{ key }}
                         assignee {{ name }}
-                        project {{ name }}
+                        project {{ id name }}
+                        projectMilestone {{ id name }}
                         labels {{ nodes {{ id name }} }}
                         relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
                     }}
@@ -435,6 +473,13 @@ impl LinearClient {
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
+        if let Err(e) = self.sync_projects(db, workspace_id).await {
+            eprintln!(
+                "warning: failed to sync projects for workspace '{}': {}",
+                workspace_id, e
+            );
+        }
+
         // Refresh workspace label catalog before syncing issues so issue_labels
         // can be populated. Linear labels are workspace-scoped, so this runs
         // per-call (cheap: one paginated query).
@@ -501,36 +546,8 @@ impl LinearClient {
         Ok(total)
     }
 
-    pub async fn create_issue(
-        &self,
-        team_id: &str,
-        title: &str,
-        description: Option<&str>,
-        priority: Option<i32>,
-        label_ids: &[String],
-        assignee_id: Option<&str>,
-        parent_id: Option<&str>,
-    ) -> Result<(String, String)> {
-        let mut input = serde_json::json!({
-            "teamId": team_id,
-            "title": title,
-        });
-
-        if let Some(desc) = description {
-            input["description"] = serde_json::Value::String(desc.to_string());
-        }
-        if let Some(p) = priority {
-            input["priority"] = serde_json::Value::Number(p.into());
-        }
-        if !label_ids.is_empty() {
-            input["labelIds"] = serde_json::json!(label_ids);
-        }
-        if let Some(aid) = assignee_id {
-            input["assigneeId"] = serde_json::Value::String(aid.to_string());
-        }
-        if let Some(pid) = parent_id {
-            input["parentId"] = serde_json::Value::String(pid.to_string());
-        }
+    pub async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)> {
+        let input = create_issue_value(&create);
 
         let query = r#"
             mutation($input: IssueCreateInput!) {
@@ -676,34 +693,28 @@ impl LinearClient {
     pub async fn update_issue(
         &self,
         issue_id: &str,
-        title: Option<&str>,
-        description: Option<&str>,
-        priority: Option<i32>,
-        state_id: Option<&str>,
-        label_ids: Option<&[String]>,
-        project_id: Option<&str>,
-        assignee_id: Option<&str>,
+        update: UpdateIssueInput<'_>,
     ) -> Result<()> {
         let mut input = serde_json::Map::new();
-        if let Some(t) = title {
+        if let Some(t) = update.title {
             input.insert("title".into(), serde_json::Value::String(t.to_string()));
         }
-        if let Some(d) = description {
+        if let Some(d) = update.description {
             input.insert(
                 "description".into(),
                 serde_json::Value::String(d.to_string()),
             );
         }
-        if let Some(p) = priority {
+        if let Some(p) = update.priority {
             input.insert("priority".into(), serde_json::Value::Number(p.into()));
         }
-        if let Some(sid) = state_id {
+        if let Some(sid) = update.state_id {
             input.insert("stateId".into(), serde_json::Value::String(sid.to_string()));
         }
-        if let Some(lids) = label_ids {
+        if let Some(lids) = update.label_ids {
             input.insert("labelIds".into(), serde_json::json!(lids));
         }
-        if let Some(pid) = project_id {
+        if let Some(pid) = update.project_id {
             let value = if pid.is_empty() {
                 serde_json::Value::Null
             } else {
@@ -711,13 +722,21 @@ impl LinearClient {
             };
             input.insert("projectId".into(), value);
         }
-        if let Some(aid) = assignee_id {
+        if let Some(aid) = update.assignee_id {
             let value = if aid.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(aid.to_string())
             };
             input.insert("assigneeId".into(), value);
+        }
+        if let Some(mid) = update.project_milestone_id {
+            let value = if mid.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(mid.to_string())
+            };
+            input.insert("projectMilestoneId".into(), value);
         }
 
         let query = r#"
@@ -751,7 +770,8 @@ impl LinearClient {
                     state { name type }
                     team { key }
                     assignee { name }
-                    project { name }
+                    project { id name }
+                    projectMilestone { id name }
                     labels { nodes { id name } }
                     relations { nodes { id type relatedIssue { id identifier } } }
                 }
@@ -800,7 +820,8 @@ impl LinearClient {
                         state {{ name type }}
                         team {{ key }}
                         assignee {{ name }}
-                        project {{ name }}
+                        project {{ id name }}
+                        projectMilestone {{ id name }}
                         labels {{ nodes {{ id name }} }}
                         relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
                     }}
@@ -833,6 +854,14 @@ impl LinearClient {
 
         let relations = Self::extract_relations(&i.id, &i);
 
+        let project_id = i.project.as_ref().map(|project| project.id.clone());
+        let project_name = i.project.map(|project| project.name);
+        let project_milestone_id = i
+            .project_milestone
+            .as_ref()
+            .map(|milestone| milestone.id.clone());
+        let project_milestone_name = i.project_milestone.map(|milestone| milestone.name);
+
         let issue = db::Issue {
             id: i.id,
             identifier: i.identifier,
@@ -844,7 +873,7 @@ impl LinearClient {
             state_type: i.state.state_type,
             priority: i.priority,
             assignee_name: i.assignee.map(|a| a.name),
-            project_name: i.project.map(|p| p.name),
+            project_name,
             labels_json,
             created_at: i.created_at,
             updated_at: i.updated_at,
@@ -852,6 +881,9 @@ impl LinearClient {
             synced_at: None,
             branch_name: i.branch_name,
             workspace_id: "default".to_string(),
+            project_id,
+            project_milestone_id,
+            project_milestone_name,
         };
 
         (issue, relations, label_ids)
@@ -1103,37 +1135,7 @@ impl LinearClient {
 
     /// Resolve a project name to its ID. Matches case-insensitively.
     pub async fn get_project_id(&self, project_name: &str) -> Result<String> {
-        let query = r#"
-            query {
-                projects(first: 250) {
-                    nodes { id name }
-                }
-            }
-        "#;
-
-        let data: serde_json::Value = self.query(query, serde_json::json!({})).await?;
-
-        let projects = data["projects"]["nodes"]
-            .as_array()
-            .context("No projects in response")?;
-
-        for project in projects {
-            if let Some(name) = project["name"].as_str() {
-                if name.eq_ignore_ascii_case(project_name) {
-                    return project["id"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .context("Project has no id");
-                }
-            }
-        }
-
-        let available: Vec<&str> = projects.iter().filter_map(|p| p["name"].as_str()).collect();
-        anyhow::bail!(
-            "Project '{}' not found. Available: {}",
-            project_name,
-            available.join(", ")
-        )
+        self.find_project_by_name(project_name).await
     }
 
     /// Create a relation between two issues.
@@ -1200,5 +1202,61 @@ impl LinearClient {
         }
 
         Ok(())
+    }
+}
+
+fn create_issue_value(create: &CreateIssueInput<'_>) -> serde_json::Value {
+    let mut input = serde_json::json!({
+        "teamId": create.team_id,
+        "title": create.title,
+    });
+    if let Some(desc) = create.description {
+        input["description"] = serde_json::Value::String(desc.to_string());
+    }
+    if let Some(priority) = create.priority {
+        input["priority"] = serde_json::Value::Number(priority.into());
+    }
+    if !create.label_ids.is_empty() {
+        input["labelIds"] = serde_json::json!(create.label_ids);
+    }
+    if let Some(assignee_id) = create.assignee_id {
+        input["assigneeId"] = serde_json::Value::String(assignee_id.to_string());
+    }
+    if let Some(parent_id) = create.parent_id {
+        input["parentId"] = serde_json::Value::String(parent_id.to_string());
+    }
+    if let Some(project_id) = create.project_id {
+        input["projectId"] = serde_json::Value::String(project_id.to_string());
+    }
+    if let Some(milestone_id) = create.project_milestone_id {
+        input["projectMilestoneId"] = serde_json::Value::String(milestone_id.to_string());
+    }
+    input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_create_serializes_project_and_milestone_relationships() {
+        let labels = vec!["label-1".to_string()];
+        let value = create_issue_value(&CreateIssueInput {
+            team_id: "team-1",
+            title: "Add request tracing",
+            description: None,
+            priority: Some(2),
+            label_ids: &labels,
+            assignee_id: None,
+            parent_id: None,
+            project_id: Some("project-1"),
+            project_milestone_id: Some("milestone-1"),
+        });
+        assert_eq!(value["projectId"], serde_json::json!("project-1"));
+        assert_eq!(
+            value["projectMilestoneId"],
+            serde_json::json!("milestone-1")
+        );
+        assert_eq!(value["labelIds"], serde_json::json!(["label-1"]));
     }
 }

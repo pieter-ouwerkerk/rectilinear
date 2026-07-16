@@ -1,4 +1,6 @@
 pub mod schema;
+mod projects;
+pub use projects::*;
 #[cfg(test)]
 mod test_helpers;
 
@@ -133,6 +135,10 @@ impl Database {
             )?;
             conn.execute(
                 "DELETE FROM labels WHERE workspace_id = ?1",
+                rusqlite::params![id],
+            )?;
+            conn.execute(
+                "DELETE FROM projects WHERE workspace_id = ?1",
                 rusqlite::params![id],
             )?;
             conn.execute(
@@ -292,20 +298,24 @@ impl Database {
     pub fn upsert_issue(&self, issue: &Issue) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17)
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17, ?18, ?19, ?20)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
                    labels_json=excluded.labels_json, updated_at=excluded.updated_at,
                    content_hash=excluded.content_hash, url=excluded.url, branch_name=excluded.branch_name,
-                   workspace_id=excluded.workspace_id, synced_at=datetime('now')",
+                   workspace_id=excluded.workspace_id, project_id=excluded.project_id,
+                   project_milestone_id=excluded.project_milestone_id,
+                   project_milestone_name=excluded.project_milestone_name,
+                   synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
                     issue.state_name, issue.state_type, issue.priority, issue.assignee_name,
                     issue.project_name, issue.labels_json, issue.created_at, issue.updated_at,
                     issue.content_hash, issue.url, issue.branch_name, issue.workspace_id,
+                    issue.project_id, issue.project_milestone_id, issue.project_milestone_name,
                 ],
             )?;
             Ok(())
@@ -315,7 +325,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -398,7 +408,7 @@ impl Database {
             };
 
             let sql = format!(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name
                  FROM issues WHERE priority = 0{state_filter} AND {base_where}{label_clause}
                  ORDER BY created_at DESC"
             );
@@ -426,7 +436,8 @@ impl Database {
             let sql = format!(
                 "SELECT id, identifier, team_key, title, description, state_name, state_type, \
                  priority, assignee_name, project_name, labels_json, created_at, updated_at, \
-                 content_hash, synced_at, url, branch_name, workspace_id \
+                 content_hash, synced_at, url, branch_name, workspace_id, project_id, \
+                 project_milestone_id, project_milestone_name \
                  FROM issues WHERE team_key = ?1 AND workspace_id = ?2 AND state_type IN ({placeholders}) \
                  ORDER BY priority ASC, created_at DESC"
             );
@@ -867,12 +878,12 @@ impl Database {
             let sql = if force {
                 if let Some(team) = team_key {
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name
                          FROM issues WHERE team_key = '{}' AND workspace_id = '{}'", team, workspace_id
                     )
                 } else {
                     format!(
-                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id
+                        "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name
                          FROM issues WHERE workspace_id = '{}'", workspace_id
                     )
                 }
@@ -883,7 +894,7 @@ impl Database {
                     String::new()
                 };
                 format!(
-                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url, i.branch_name, i.workspace_id
+                    "SELECT i.id, i.identifier, i.team_key, i.title, i.description, i.state_name, i.state_type, i.priority, i.assignee_name, i.project_name, i.labels_json, i.created_at, i.updated_at, i.content_hash, i.synced_at, i.url, i.branch_name, i.workspace_id, i.project_id, i.project_milestone_id, i.project_milestone_name
                      FROM issues i
                      LEFT JOIN (SELECT DISTINCT issue_id FROM chunks) c ON i.id = c.issue_id
                      WHERE c.issue_id IS NULL AND i.workspace_id = '{}' {}",
@@ -1235,6 +1246,9 @@ pub struct Issue {
     pub branch_name: Option<String>,
     #[serde(default = "default_workspace_id")]
     pub workspace_id: String,
+    pub project_id: Option<String>,
+    pub project_milestone_id: Option<String>,
+    pub project_milestone_name: Option<String>,
 }
 
 impl Issue {
@@ -1258,6 +1272,9 @@ impl Issue {
             url: row.get(15)?,
             branch_name: row.get(16).unwrap_or(None),
             workspace_id: row.get(17).unwrap_or_else(|_| "default".to_string()),
+            project_id: row.get(18).unwrap_or(None),
+            project_milestone_id: row.get(19).unwrap_or(None),
+            project_milestone_name: row.get(20).unwrap_or(None),
         })
     }
 
