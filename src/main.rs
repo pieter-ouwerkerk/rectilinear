@@ -1,6 +1,7 @@
 mod cli;
 mod llm;
 mod mcp;
+mod triage_policy;
 
 // Core modules re-exported from the library crate
 pub use rectilinear_core::config;

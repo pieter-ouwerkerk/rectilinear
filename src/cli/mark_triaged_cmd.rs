@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
+use crate::triage_policy::was_prioritized_since_sync;
 
 pub struct MarkTriagedParams<'a> {
     pub id: &'a str,
@@ -56,8 +57,10 @@ pub async fn handle_mark_triaged(
     db.upsert_relations(&issue.id, &issue_relations)?;
     db.replace_issue_labels(&issue.id, &issue_label_ids)?;
 
-    // Already triaged?
-    if issue.priority != 0 {
+    // Stop only if another caller prioritized an issue that was unprioritized
+    // when we last synced it. Issues that were already prioritized may be
+    // intentionally re-triaged.
+    if was_prioritized_since_sync(local_issue.priority, issue.priority) {
         let result = json!({
             "identifier": issue.identifier,
             "url": issue.url,
