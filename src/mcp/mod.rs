@@ -9,6 +9,7 @@ use crate::db::Database;
 use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 use crate::search::{self, SearchMode};
+use crate::triage_policy::was_prioritized_since_sync;
 
 /// Scan a JSON value for issue identifiers (e.g. "CUT-42") and add a `referenced_issues`
 /// field with their URLs so agents can render them as clickable links.
@@ -1944,8 +1945,10 @@ IMPORTANT — Before calling this tool, you MUST:
             .replace_issue_labels(&issue.id, &issue_label_ids)
             .map_err(|e| e.to_string())?;
 
-        // If someone else already prioritized it, let the caller know
-        if issue.priority != 0 {
+        // Stop only if another caller prioritized an issue that was unprioritized
+        // when we last synced it. Issues that were already prioritized may be
+        // intentionally re-triaged.
+        if was_prioritized_since_sync(local_issue.priority, issue.priority) {
             return Ok(serde_json::json!({
                 "identifier": issue.identifier,
                 "url": issue.url,

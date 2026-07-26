@@ -367,7 +367,7 @@ rectilinear sync --team CUT --embed
 
 Issues are presented **one at a time** — Claude waits for your input and applies changes before moving to the next.
 
-**Staleness protection:** `mark_triaged` re-fetches the issue from Linear before applying changes. If someone else already prioritized it, Claude skips it. If the content changed since the queue was fetched, Claude shows what changed and re-evaluates. Embeddings are automatically updated when content changes.
+**Staleness protection:** `mark_triaged` re-fetches the issue from Linear before applying changes. If an issue that was unprioritized when queued has since been prioritized, Claude skips it. Issues that were already prioritized when selected can be intentionally re-triaged. If the content changed since the queue was fetched, Claude shows what changed and re-evaluates. Embeddings are automatically updated when content changes.
 
 **Best results:** Run triage from within your project directory so Claude can explore the actual codebase. If you use [Cuttlefish](https://github.com/pieter-ouwerkerk/cuttlefish), its MCP tools (`get_symbols`, `find_references`) give Claude even richer code context.
 

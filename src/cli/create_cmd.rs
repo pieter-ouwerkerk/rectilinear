@@ -3,7 +3,7 @@ use colored::Colorize;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::linear::LinearClient;
+use crate::linear::{CreateIssueInput, LinearClient};
 
 pub struct HandleCreateParams<'a> {
     pub team: Option<&'a str>,
@@ -14,6 +14,51 @@ pub struct HandleCreateParams<'a> {
     pub project: Option<&'a str>,
     pub project_milestone: Option<&'a str>,
     pub workspace: &'a str,
+}
+
+struct CreateLinearIssueParams<'a> {
+    team_id: &'a str,
+    title: &'a str,
+    description: Option<&'a str>,
+    priority: Option<i32>,
+    label_names: &'a [String],
+    project_id: Option<&'a str>,
+    project_milestone_id: Option<&'a str>,
+}
+
+trait IssueCreateClient {
+    async fn get_label_ids(&self, label_names: &[String]) -> Result<Vec<String>>;
+    async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)>;
+}
+
+impl IssueCreateClient for LinearClient {
+    async fn get_label_ids(&self, label_names: &[String]) -> Result<Vec<String>> {
+        LinearClient::get_label_ids(self, label_names).await
+    }
+
+    async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)> {
+        LinearClient::create_issue(self, create).await
+    }
+}
+
+async fn create_issue_with_resolved_labels(
+    client: &impl IssueCreateClient,
+    params: CreateLinearIssueParams<'_>,
+) -> Result<(String, String)> {
+    let label_ids = client.get_label_ids(params.label_names).await?;
+    client
+        .create_issue(CreateIssueInput {
+            team_id: params.team_id,
+            title: params.title,
+            description: params.description,
+            priority: params.priority,
+            label_ids: &label_ids,
+            assignee_id: None,
+            parent_id: None,
+            project_id: params.project_id,
+            project_milestone_id: params.project_milestone_id,
+        })
+        .await
 }
 
 pub async fn handle_create(
@@ -69,19 +114,19 @@ pub async fn handle_create(
         team_key.bold()
     );
 
-    let (issue_id, identifier) = client
-        .create_issue(crate::linear::CreateIssueInput {
+    let (issue_id, identifier) = create_issue_with_resolved_labels(
+        &client,
+        CreateLinearIssueParams {
             team_id: &team_id,
             title,
             description,
             priority,
-            label_ids: labels,
-            assignee_id: None,
-            parent_id: None,
+            label_names: labels,
             project_id: project_id.as_deref(),
             project_milestone_id: project_milestone_id.as_deref(),
-        })
-        .await?;
+        },
+    )
+    .await?;
 
     println!("{} Created {}", "✓".green().bold(), identifier.bold());
 
@@ -93,4 +138,60 @@ pub async fn handle_create(
     println!("{} Synced to local database", "✓".green());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MockIssueCreateClient {
+        requested_label_names: Mutex<Vec<String>>,
+        created_label_ids: Mutex<Vec<String>>,
+    }
+
+    impl IssueCreateClient for MockIssueCreateClient {
+        async fn get_label_ids(&self, label_names: &[String]) -> Result<Vec<String>> {
+            *self.requested_label_names.lock().unwrap() = label_names.to_vec();
+            Ok(vec!["label-id-feature".to_string()])
+        }
+
+        async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)> {
+            *self.created_label_ids.lock().unwrap() = create.label_ids.to_vec();
+            Ok(("issue-id".to_string(), "ENG-123".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn create_resolves_label_names_before_sending_label_ids() {
+        let client = MockIssueCreateClient::default();
+        let label_names = vec!["Feature".to_string()];
+
+        let result = create_issue_with_resolved_labels(
+            &client,
+            CreateLinearIssueParams {
+                team_id: "team-id",
+                title: "Add drill loop",
+                description: None,
+                priority: None,
+                label_names: &label_names,
+                project_id: None,
+                project_milestone_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, ("issue-id".to_string(), "ENG-123".to_string()));
+        assert_eq!(
+            *client.requested_label_names.lock().unwrap(),
+            vec!["Feature"]
+        );
+        assert_eq!(
+            *client.created_label_ids.lock().unwrap(),
+            vec!["label-id-feature"]
+        );
+    }
 }
