@@ -96,17 +96,16 @@ const ISSUE_COLUMNS: &str =
     "id, identifier, team_key, title, description, state_name, state_type, \
      priority, assignee_name, project_name, labels_json, created_at, updated_at, \
      content_hash, synced_at, url, branch_name, workspace_id, project_id, \
-     project_milestone_id, project_milestone_name";
+     project_milestone_id, project_milestone_name, cycle_id, cycle_name";
 
 impl Database {
-    pub fn upsert_project(&self, project: &Project) -> Result<()> {
+    pub fn upsert_project_metadata(&self, project: &Project) -> Result<()> {
         self.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO workspaces (id) VALUES (?1)",
                 rusqlite::params![project.workspace_id],
             )?;
-            tx.execute(
+            conn.execute(
                 "INSERT INTO projects (
                     id, workspace_id, slug_id, name, description, content, icon, color,
                     status_id, status_name, status_type, status_color, priority,
@@ -151,6 +150,14 @@ impl Database {
                     project.progress,
                 ],
             )?;
+            Ok(())
+        })
+    }
+
+    pub fn upsert_project(&self, project: &Project) -> Result<()> {
+        self.upsert_project_metadata(project)?;
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
 
             tx.execute(
                 "DELETE FROM project_teams WHERE project_id = ?1",

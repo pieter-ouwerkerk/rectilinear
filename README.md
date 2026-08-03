@@ -151,7 +151,12 @@ rectilinear sync --team ENG --full
 
 # Include archived issues on an incremental sync. Full syncs include archived issues automatically.
 rectilinear sync --team ENG --include-archived
+
+# Show each bounded request, page size, and adaptive complexity reduction
+rectilinear sync --team ENG --full --include-archived --verbose
 ```
+
+Synchronization uses shallow, independently paginated Linear queries. Pages are persisted before traversal continues, complexity rejections reduce only the affected operation's page size, and the team cursor advances only after projects, labels, cycles, issues, issue labels, relationships, and comments all succeed. Page sizes can be overridden with `RECTILINEAR_LINEAR_<OPERATION>_PAGE_SIZE`; the default planner targets 7,000 points rather than Linear's 10,000-point ceiling. See [Complexity-aware Linear synchronization](docs/linear-sync-pagination.md) for the batching model, retry and partial-failure semantics, supported membership paths, and large-workspace fixture.
 
 ### Generate embeddings
 

@@ -40,7 +40,7 @@ enum Commands {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
-    /// Sync issues from Linear
+    /// Synchronize a team's Linear entities
     Sync {
         /// Team key (e.g., ENG)
         #[arg(short, long)]
@@ -51,9 +51,12 @@ enum Commands {
         /// Generate embeddings after sync
         #[arg(long)]
         embed: bool,
-        /// Include archived issues
+        /// Include archived Linear entities
         #[arg(long)]
         include_archived: bool,
+        /// Report each synchronization page and adaptive page-size reduction
+        #[arg(long)]
+        verbose: bool,
     },
     /// Search issues
     Search {
@@ -329,6 +332,7 @@ async fn main() -> Result<()> {
                     full,
                     embed,
                     include_archived,
+                    verbose,
                 } => {
                     cli::sync_cmd::handle_sync(
                         &db,
@@ -337,6 +341,7 @@ async fn main() -> Result<()> {
                         full,
                         embed,
                         include_archived,
+                        verbose,
                         &workspace,
                     )
                     .await?;
