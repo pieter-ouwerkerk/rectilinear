@@ -144,7 +144,7 @@ impl LinearClient {
                 Ok(stats.nodes)
             }
             Err(error) => {
-                let message = Self::redacted_error_message(&error);
+                let message = self.redacted_error_message(&error);
                 db.mark_sync_family_failed(
                     workspace_id,
                     team_key,

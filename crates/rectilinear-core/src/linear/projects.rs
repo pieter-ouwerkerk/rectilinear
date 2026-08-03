@@ -953,7 +953,7 @@ impl LinearClient {
         let project_stats = match project_result {
             Ok(stats) => stats,
             Err(error) => {
-                let message = Self::redacted_error_message(&error);
+                let message = self.redacted_error_message(&error);
                 for family in ["projects", "project milestones"] {
                     db.mark_sync_family_failed(
                         workspace_id,
@@ -999,7 +999,7 @@ impl LinearClient {
         }
         .await;
         if let Err(error) = hydration_result {
-            let message = Self::redacted_error_message(&error);
+            let message = self.redacted_error_message(&error);
             for family in ["projects", "project milestones"] {
                 db.mark_sync_family_failed(
                     workspace_id,

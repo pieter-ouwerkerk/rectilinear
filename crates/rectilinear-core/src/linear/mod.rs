@@ -15,7 +15,7 @@ mod pagination;
 pub use projects::*;
 pub use pagination::{LinearErrorKind, LinearOperation, LinearOperationError, SyncEvent, SyncQueryConfig};
 
-use pagination::{paginate, ConnectionPage, PageInfo};
+use pagination::{operation_error, paginate, ConnectionPage, PageInfo};
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
@@ -23,6 +23,7 @@ const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 pub struct LinearClient {
     client: reqwest::Client,
     api_key: String,
+    api_url: String,
     viewer_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     sync_query_config: SyncQueryConfig,
 }
@@ -389,6 +390,7 @@ impl LinearClient {
         Ok(Self {
             client,
             api_key,
+            api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
         })
@@ -399,6 +401,7 @@ impl LinearClient {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.to_string(),
+            api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
         }
@@ -412,6 +415,7 @@ impl LinearClient {
         Self {
             client,
             api_key: api_key.to_string(),
+            api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
         }
@@ -419,6 +423,12 @@ impl LinearClient {
 
     pub fn with_sync_query_config(mut self, sync_query_config: SyncQueryConfig) -> Self {
         self.sync_query_config = sync_query_config;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+        self.api_url = api_url.into();
         self
     }
 
@@ -441,14 +451,21 @@ impl LinearClient {
             ""
         };
         if let Some(failure) = event.failure {
+            let failure = self.redacted_message(failure);
+            let status = if failure.starts_with("retrying attempt ") {
+                "retrying"
+            } else {
+                "failed"
+            };
             eprintln!(
-                "sync operation={}{} page={} nodes={} page_size={}{} status=failed error={}",
+                "sync operation={}{} page={} nodes={} page_size={}{} status={} error={}",
                 event.operation,
                 parent,
                 event.page_number,
                 event.nodes_received,
                 event.page_size,
                 reduction,
+                status,
                 failure
             );
         } else {
@@ -488,7 +505,7 @@ impl LinearClient {
 
         let resp = self
             .client
-            .post(LINEAR_API_URL)
+            .post(&self.api_url)
             .header("Authorization", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -792,7 +809,7 @@ impl LinearClient {
         let stats = match issue_result {
             Ok(stats) => stats,
             Err(error) => {
-                let message = Self::redacted_error_message(&error);
+                let message = self.redacted_error_message(&error);
                 db.mark_sync_family_failed(
                     workspace_id,
                     team_key,
@@ -814,17 +831,15 @@ impl LinearClient {
             &sync_token,
         )?;
 
-        for family in ["issue labels", "relations", "comments"] {
-            db.mark_sync_family_running(
-                workspace_id,
-                team_key,
-                family,
-                None,
-                None,
-                &sync_token,
-            )?;
-        }
-        let hydration_result: Result<()> = async {
+        db.mark_sync_family_running(
+            workspace_id,
+            team_key,
+            "issue labels",
+            None,
+            None,
+            &sync_token,
+        )?;
+        let label_result: Result<()> = async {
             let mut after_id = None;
             loop {
                 let issue_refs = db.list_issue_sync_refs(
@@ -843,15 +858,44 @@ impl LinearClient {
                         .with_context(|| {
                             format!("label synchronization failed for {}", issue.identifier)
                         })?;
+                }
+                after_id = issue_refs.last().map(|issue| issue.id.clone());
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = label_result {
+            let message = self.redacted_error_message(&error);
+            db.mark_sync_family_failed(
+                workspace_id,
+                team_key,
+                "issue labels",
+                &sync_token,
+                &message,
+            )?;
+            return Err(error);
+        }
+        db.mark_sync_family_complete(workspace_id, team_key, "issue labels", None, &sync_token)?;
+
+        db.mark_sync_family_running(workspace_id, team_key, "relations", None, None, &sync_token)?;
+        let relation_result: Result<()> = async {
+            let mut after_id = None;
+            loop {
+                let issue_refs = db.list_issue_sync_refs(
+                    workspace_id,
+                    team_key,
+                    &sync_token,
+                    after_id.as_deref(),
+                    100,
+                )?;
+                if issue_refs.is_empty() {
+                    break;
+                }
+                for issue in &issue_refs {
                     self.sync_issue_relations(db, &issue.id)
                         .await
                         .with_context(|| {
                             format!("relation synchronization failed for {}", issue.identifier)
-                        })?;
-                    self.sync_issue_comments(db, &issue.id, workspace_id)
-                        .await
-                        .with_context(|| {
-                            format!("comment synchronization failed for {}", issue.identifier)
                         })?;
                 }
                 after_id = issue_refs.last().map(|issue| issue.id.clone());
@@ -859,27 +903,56 @@ impl LinearClient {
             Ok(())
         }
         .await;
-        if let Err(error) = hydration_result {
-            let message = Self::redacted_error_message(&error);
-            for family in ["issue labels", "relations", "comments"] {
-                db.mark_sync_family_failed(
-                    workspace_id,
-                    team_key,
-                    family,
-                    &sync_token,
-                    &message,
-                )?;
-            }
+        if let Err(error) = relation_result {
+            let message = self.redacted_error_message(&error);
+            db.mark_sync_family_failed(workspace_id, team_key, "relations", &sync_token, &message)?;
             return Err(error);
         }
-        for family in ["issue labels", "relations", "comments"] {
-            db.mark_sync_family_complete(
+        db.mark_sync_family_complete(workspace_id, team_key, "relations", None, &sync_token)?;
+
+        db.mark_sync_family_running(workspace_id, team_key, "comments", None, None, &sync_token)?;
+        let mut comment_failures = Vec::new();
+        let mut after_id = None;
+        loop {
+            let issue_refs = db.list_comment_hydration_refs(
                 workspace_id,
                 team_key,
-                family,
-                None,
                 &sync_token,
+                after_id.as_deref(),
+                100,
             )?;
+            if issue_refs.is_empty() {
+                break;
+            }
+            for issue in &issue_refs {
+                if let Err(error) = self
+                    .sync_issue_comments(db, &issue.id, workspace_id)
+                    .await
+                    .with_context(|| {
+                        format!("comment synchronization failed for {}", issue.identifier)
+                    })
+                {
+                    let message = self.redacted_error_message(&error);
+                    if self.sync_query_config.verbose {
+                        eprintln!(
+                            "sync operation=comments issue={} status=failed continuing=true error={}",
+                            issue.identifier, message
+                        );
+                    }
+                    comment_failures.push(issue.identifier.clone());
+                }
+            }
+            after_id = issue_refs.last().map(|issue| issue.id.clone());
+        }
+        if comment_failures.is_empty() {
+            db.mark_sync_family_complete(workspace_id, team_key, "comments", None, &sync_token)?;
+        } else {
+            let summary = format!(
+                "{} comment hydration(s) failed: {}",
+                comment_failures.len(),
+                comment_failures.join(", ")
+            );
+            db.mark_sync_family_partial(workspace_id, team_key, "comments", &sync_token, &summary)?;
         }
 
         let next_updated = max_updated
@@ -1052,7 +1125,7 @@ impl LinearClient {
             }
             Err(error) => {
                 let status = Self::comment_error_status(&error);
-                let message = Self::redacted_error_message(&error);
+                let message = self.redacted_error_message(&error);
                 db.mark_comments_sync_failed(issue_id, workspace_id, status, &message)?;
                 Err(error)
             }
@@ -1258,11 +1331,16 @@ impl LinearClient {
     }
 
     pub fn comment_error_status(error: &anyhow::Error) -> &'static str {
-        let message = error.to_string().to_lowercase();
+        if operation_error(error)
+            .is_some_and(|classified| classified.kind == LinearErrorKind::Authentication)
+        {
+            return "permission_denied";
+        }
+        let message = format!("{error:#}").to_lowercase();
         if message.contains("permission")
             || message.contains("forbidden")
             || message.contains("unauthorized")
-            || message.contains("access")
+            || message.contains("access denied")
         {
             "permission_denied"
         } else {
@@ -1270,8 +1348,16 @@ impl LinearClient {
         }
     }
 
-    fn redacted_error_message(error: &anyhow::Error) -> String {
-        error.to_string().chars().take(500).collect()
+    fn redacted_error_message(&self, error: &anyhow::Error) -> String {
+        self.redacted_message(format!("{error:#}"))
+    }
+
+    fn redacted_message(&self, mut message: String) -> String {
+        if !self.api_key.is_empty() {
+            message = message.replace(&self.api_key, "[REDACTED]");
+        }
+        message = redact_sensitive_fragments(message);
+        message.chars().take(500).collect()
     }
 
     pub async fn update_issue(
@@ -1780,7 +1866,7 @@ impl LinearClient {
                 Ok(stats.nodes)
             }
             Err(error) => {
-                let message = Self::redacted_error_message(&error);
+                let message = self.redacted_error_message(&error);
                 db.mark_sync_family_failed(
                     workspace_id,
                     "*",
@@ -1921,10 +2007,65 @@ fn apply_issue_labels(issue: &mut db::Issue, labels: Vec<LinearLabel>) -> Vec<St
     label_ids
 }
 
+fn redact_sensitive_fragments(mut message: String) -> String {
+    message = redact_token_after_marker(message, "bearer ");
+    for marker in [
+        "authorization:",
+        "authorization=",
+        "api_key:",
+        "api_key=",
+        "api-key:",
+        "api-key=",
+        "access_token:",
+        "access_token=",
+        "password:",
+        "password=",
+        "secret:",
+        "secret=",
+    ] {
+        message = redact_token_after_marker(message, marker);
+    }
+    message
+}
+
+fn redact_token_after_marker(mut message: String, marker: &str) -> String {
+    let mut search_from = 0;
+    loop {
+        let lower = message.to_ascii_lowercase();
+        let Some(relative_start) = lower[search_from..].find(marker) else {
+            break;
+        };
+        let marker_end = search_from + relative_start + marker.len();
+        let bytes = message.as_bytes();
+        let mut value_start = marker_end;
+        while value_start < bytes.len()
+            && (bytes[value_start].is_ascii_whitespace()
+                || matches!(bytes[value_start], b'\'' | b'"'))
+        {
+            value_start += 1;
+        }
+        let mut value_end = value_start;
+        while value_end < bytes.len()
+            && !bytes[value_end].is_ascii_whitespace()
+            && !matches!(bytes[value_end], b',' | b';' | b'\'' | b'"' | b')')
+        {
+            value_end += 1;
+        }
+        if value_start == value_end {
+            search_from = marker_end;
+            continue;
+        }
+        message.replace_range(value_start..value_end, "[REDACTED]");
+        search_from = value_start + "[REDACTED]".len();
+    }
+    message
+}
+
 fn classify_http_status(status: u16) -> LinearErrorKind {
     match status {
         401 | 403 => LinearErrorKind::Authentication,
         429 => LinearErrorKind::RateLimit,
+        408 | 500..=599 => LinearErrorKind::Transient,
         _ => LinearErrorKind::Api,
     }
 }
@@ -1948,6 +2089,15 @@ fn classify_graphql_message(message: &str) -> LinearErrorKind {
         || lower.contains("unknown argument")
     {
         LinearErrorKind::Validation
+    } else if lower.contains("internal server")
+        || lower.contains("internal error")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("service unavailable")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("try again")
+    {
+        LinearErrorKind::Transient
     } else {
         LinearErrorKind::Api
     }
@@ -1955,7 +2105,273 @@ fn classify_graphql_message(message: &str) -> LinearErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::db::SyncFamilyState;
+
     use super::*;
+
+    static SYNC_HTTP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn json(body: serde_json::Value) -> Self {
+            Self {
+                status: 200,
+                body: body.to_string(),
+            }
+        }
+
+        fn status(status: u16) -> Self {
+            Self {
+                status,
+                body: "{}".to_string(),
+            }
+        }
+    }
+
+    struct MockLinearServer {
+        url: String,
+        stop: Arc<AtomicBool>,
+        worker: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockLinearServer {
+        fn start<F>(mut handler: F) -> Self
+        where
+            F: FnMut(serde_json::Value) -> MockResponse + Send + 'static,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker = thread::spawn(move || {
+                while !worker_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            if let Some(request) = read_json_request(&mut stream) {
+                                write_mock_response(&mut stream, handler(request));
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url: format!("http://{address}/graphql"),
+                stop,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for MockLinearServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn read_json_request(stream: &mut TcpStream) -> Option<serde_json::Value> {
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let (header_end, content_length) = loop {
+            let count = stream.read(&mut buffer).ok()?;
+            if count == 0 {
+                return None;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                break (header_end + 4, content_length);
+            }
+        };
+        while request.len() < header_end + content_length {
+            let count = stream.read(&mut buffer).ok()?;
+            if count == 0 {
+                return None;
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length]).ok()
+    }
+
+    fn write_mock_response(stream: &mut TcpStream, response: MockResponse) {
+        let reason = match response.status {
+            200 => "OK",
+            403 => "Forbidden",
+            500 => "Internal Server Error",
+            _ => "Mock",
+        };
+        let headers = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response.status,
+            reason,
+            response.body.len()
+        );
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.write_all(response.body.as_bytes());
+    }
+
+    fn issue_node(id: &str, identifier: &str, updated_at: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "identifier": identifier,
+            "url": format!("https://linear.app/issue/{identifier}"),
+            "title": format!("Issue {identifier}"),
+            "description": "Mock issue",
+            "priority": 2,
+            "branchName": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": updated_at,
+            "state": { "name": "Todo", "type": "unstarted" },
+            "team": { "key": "CUT" },
+            "assignee": null,
+            "project": null,
+            "projectMilestone": null,
+            "cycle": null
+        })
+    }
+
+    fn standard_sync_response(request: &serde_json::Value) -> Option<MockResponse> {
+        let query = request["query"].as_str().unwrap_or_default();
+        if query.contains("teams(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "teams": {
+                    "nodes": [{ "id": "team-1", "key": "CUT", "name": "Cuttlefish" }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("projects(") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "projects": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("issueLabels(") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issueLabels": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("cycles(") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "cycles": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("issues(") {
+            let nodes = if query.contains("updatedAt: { gt:") {
+                Vec::new()
+            } else {
+                vec![
+                    issue_node("issue-1", "CUT-1", "2026-02-01T00:00:00Z"),
+                    issue_node("issue-2", "CUT-2", "2026-02-02T00:00:00Z"),
+                ]
+            };
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issues": {
+                    "nodes": nodes,
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("labels(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issue": { "labels": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        if query.contains("relations(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issue": { "relations": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        None
+    }
+
+    fn successful_comments() -> MockResponse {
+        MockResponse::json(serde_json::json!({
+            "data": { "comments": {
+                "nodes": [],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }}
+        }))
+    }
+
+    fn comment_issue_id(request: &serde_json::Value) -> Option<&str> {
+        request["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("comments("))
+            .then(|| request["variables"]["issueId"].as_str())
+            .flatten()
+    }
+
+    fn test_client(api_url: &str) -> LinearClient {
+        let mut config = SyncQueryConfig::default();
+        config.max_retry_attempts = 2;
+        config.retry_base_delay = Duration::ZERO;
+        LinearClient::with_api_key("test-api-key")
+            .with_api_url(api_url)
+            .with_sync_query_config(config)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn test_db() -> (Database, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("test.db")).unwrap();
+        (db, directory)
+    }
+
+    fn family_status(db: &Database, family: &str) -> SyncFamilyState {
+        db.get_sync_family_state("default", "CUT", family)
+            .unwrap()
+            .unwrap()
+    }
 
     #[test]
     fn issue_create_serializes_project_and_milestone_relationships() {
@@ -2005,6 +2421,203 @@ mod tests {
             classify_graphql_message("Unauthorized"),
             LinearErrorKind::Authentication
         );
+        assert_eq!(
+            classify_graphql_message("Internal server error; try again"),
+            LinearErrorKind::Transient
+        );
         assert_eq!(classify_http_status(429), LinearErrorKind::RateLimit);
+        assert_eq!(classify_http_status(500), LinearErrorKind::Transient);
+    }
+
+    #[test]
+    fn team_sync_retries_http_500_comments_then_completes() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let server_attempts = Arc::clone(&attempts);
+        let server = MockLinearServer::start(move |request| {
+            if let Some(issue_id) = comment_issue_id(&request) {
+                let mut attempts = server_attempts.lock().unwrap();
+                let count = attempts.entry(issue_id.to_string()).or_default();
+                *count += 1;
+                if issue_id == "issue-1" && *count == 1 {
+                    return MockResponse::status(500);
+                }
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        let count = runtime()
+            .block_on(client.sync_team(&db, "CUT", "default", true, true, None))
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(attempts.lock().unwrap().get("issue-1"), Some(&2));
+        assert_eq!(
+            db.get_comment_sync_state("issue-1").unwrap().status,
+            "none_found"
+        );
+        assert_eq!(family_status(&db, "comments").status, "complete");
+    }
+
+    #[test]
+    fn exhausted_comment_retries_are_partial_and_do_not_block_later_issues_or_cursor() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let server_attempts = Arc::clone(&attempts);
+        let server = MockLinearServer::start(move |request| {
+            if let Some(issue_id) = comment_issue_id(&request) {
+                let mut attempts = server_attempts.lock().unwrap();
+                *attempts.entry(issue_id.to_string()).or_default() += 1;
+                return if issue_id == "issue-1" {
+                    MockResponse::status(500)
+                } else {
+                    successful_comments()
+                };
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        let count = runtime()
+            .block_on(client.sync_team(&db, "CUT", "default", true, true, None))
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(attempts.lock().unwrap().get("issue-1"), Some(&3));
+        assert_eq!(attempts.lock().unwrap().get("issue-2"), Some(&1));
+        let failed = db.get_comment_sync_state("issue-1").unwrap();
+        assert_eq!(failed.status, "unavailable");
+        let diagnostic = failed.sync_error.unwrap();
+        assert!(diagnostic.contains("failed to paginate comments at cursor None"));
+        assert!(diagnostic.contains("HTTP 500"));
+        assert!(diagnostic.chars().count() <= 500);
+        assert_eq!(
+            db.get_comment_sync_state("issue-2").unwrap().status,
+            "none_found"
+        );
+        assert_eq!(family_status(&db, "issue labels").status, "complete");
+        assert_eq!(family_status(&db, "relations").status, "complete");
+        let comments = family_status(&db, "comments");
+        assert_eq!(comments.status, "partial");
+        assert_eq!(
+            comments.error.as_deref(),
+            Some("1 comment hydration(s) failed: CUT-1")
+        );
+        assert_eq!(
+            db.get_sync_cursor("default", "CUT").unwrap().as_deref(),
+            Some("2026-02-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn permission_comment_failure_is_not_retried_and_other_issues_continue() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let server_attempts = Arc::clone(&attempts);
+        let server = MockLinearServer::start(move |request| {
+            if let Some(issue_id) = comment_issue_id(&request) {
+                let mut attempts = server_attempts.lock().unwrap();
+                *attempts.entry(issue_id.to_string()).or_default() += 1;
+                if issue_id == "issue-1" {
+                    return MockResponse::json(serde_json::json!({
+                        "errors": [{
+                            "message": "Forbidden: Authorization: Bearer super-secret-token"
+                        }]
+                    }));
+                }
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        runtime()
+            .block_on(client.sync_team(&db, "CUT", "default", true, true, None))
+            .unwrap();
+
+        assert_eq!(attempts.lock().unwrap().get("issue-1"), Some(&1));
+        assert_eq!(attempts.lock().unwrap().get("issue-2"), Some(&1));
+        let failed = db.get_comment_sync_state("issue-1").unwrap();
+        assert_eq!(failed.status, "permission_denied");
+        let diagnostic = failed.sync_error.unwrap();
+        assert!(diagnostic.contains("Forbidden"));
+        assert!(!diagnostic.contains("super-secret-token"));
+        assert_eq!(
+            db.get_comment_sync_state("issue-2").unwrap().status,
+            "none_found"
+        );
+    }
+
+    #[test]
+    fn later_incremental_sync_recovers_failed_comment_state_and_clears_error() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let should_fail = Arc::new(AtomicBool::new(true));
+        let server_should_fail = Arc::clone(&should_fail);
+        let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let server_attempts = Arc::clone(&attempts);
+        let server = MockLinearServer::start(move |request| {
+            if let Some(issue_id) = comment_issue_id(&request) {
+                let mut attempts = server_attempts.lock().unwrap();
+                *attempts.entry(issue_id.to_string()).or_default() += 1;
+                if issue_id == "issue-1" && server_should_fail.load(Ordering::Relaxed) {
+                    return MockResponse::status(500);
+                }
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let rt = runtime();
+
+        rt.block_on(client.sync_team(&db, "CUT", "default", true, true, None))
+            .unwrap();
+        assert_eq!(
+            db.get_comment_sync_state("issue-1").unwrap().status,
+            "unavailable"
+        );
+        let first_cursor = db.get_sync_cursor("default", "CUT").unwrap();
+        should_fail.store(false, Ordering::Relaxed);
+
+        let count = rt
+            .block_on(client.sync_team(&db, "CUT", "default", false, false, None))
+            .unwrap();
+
+        assert_eq!(count, 0);
+        let recovered = db.get_comment_sync_state("issue-1").unwrap();
+        assert_eq!(recovered.status, "none_found");
+        assert!(recovered.sync_error.is_none());
+        assert_eq!(family_status(&db, "comments").status, "complete");
+        assert_eq!(db.get_sync_cursor("default", "CUT").unwrap(), first_cursor);
+        assert_eq!(attempts.lock().unwrap().get("issue-1"), Some(&4));
+    }
+
+    #[test]
+    fn error_diagnostics_keep_chains_bounded_and_redact_credentials() {
+        let client = LinearClient::with_api_key("top-secret-api-key");
+        let error: anyhow::Error = LinearOperationError::new(
+            LinearErrorKind::Transient,
+            "comments",
+            None,
+            format!(
+                "upstream timeout Authorization: Bearer top-secret-api-key {}",
+                "x".repeat(700)
+            ),
+        )
+        .into();
+        let error = error.context("comment synchronization failed for CUT-249");
+
+        let diagnostic = client.redacted_error_message(&error);
+
+        assert!(diagnostic.contains("comment synchronization failed for CUT-249"));
+        assert!(diagnostic.contains("upstream timeout"));
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains("top-secret-api-key"));
+        assert!(diagnostic.chars().count() <= 500);
     }
 }
