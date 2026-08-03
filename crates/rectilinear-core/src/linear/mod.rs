@@ -884,6 +884,8 @@ impl LinearClient {
             project_id,
             project_milestone_id,
             project_milestone_name,
+            cycle_id: None,
+            cycle_name: None,
         };
 
         (issue, relations, label_ids)

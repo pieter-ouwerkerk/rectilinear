@@ -71,6 +71,28 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         run_migration_10(conn)?;
     }
 
+    if current_version < 11 {
+        run_migration_11(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (11)", [])?;
+    }
+
+    Ok(())
+}
+
+fn run_migration_11(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "issues", "cycle_id", "TEXT")?;
+    add_column_if_missing(conn, "issues", "cycle_name", "TEXT")?;
+    add_column_if_missing(conn, "issues", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "comments", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "issue_relations", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "labels", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "issue_labels", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "projects", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "project_teams", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "project_members", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "project_labels", "sync_token", "TEXT")?;
+    add_column_if_missing(conn, "project_milestones", "sync_token", "TEXT")?;
+    conn.execute_batch(MIGRATION_11)?;
     Ok(())
 }
 
@@ -204,6 +226,53 @@ CREATE INDEX IF NOT EXISTS idx_project_milestones_project
     ON project_milestones(project_id, sort_order, target_date);
 CREATE INDEX IF NOT EXISTS idx_project_milestones_workspace
     ON project_milestones(workspace_id);
+";
+
+const MIGRATION_11: &str = "
+-- Bounded synchronization persists pages under a run token. Stale rows are
+-- reconciled only after an entity family completes, so interrupted refreshes
+-- never erase the last complete local view.
+CREATE TABLE IF NOT EXISTS cycles (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    team_id TEXT NOT NULL,
+    team_key TEXT NOT NULL,
+    number INTEGER NOT NULL DEFAULT 0,
+    name TEXT,
+    starts_at TEXT,
+    ends_at TEXT,
+    completed_at TEXT,
+    archived_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sync_token TEXT,
+    synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cycles_workspace_team
+    ON cycles(workspace_id, team_key, number);
+CREATE INDEX IF NOT EXISTS idx_issues_cycle ON issues(workspace_id, cycle_id);
+CREATE INDEX IF NOT EXISTS idx_issues_sync_token
+    ON issues(workspace_id, team_key, sync_token);
+CREATE INDEX IF NOT EXISTS idx_comments_sync_token
+    ON comments(issue_id, sync_token);
+CREATE INDEX IF NOT EXISTS idx_relations_sync_token
+    ON issue_relations(issue_id, sync_token);
+
+CREATE TABLE IF NOT EXISTS sync_family_state (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+    team_key TEXT NOT NULL,
+    family TEXT NOT NULL,
+    status TEXT NOT NULL,
+    cursor TEXT,
+    page_size INTEGER,
+    sync_token TEXT,
+    error TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (workspace_id, team_key, family)
+);
+
+-- Membership fields and cycle inventory require a fresh full traversal once.
+UPDATE sync_state SET full_sync_done = 0, last_updated_at = '1970-01-01T00:00:00Z';
 ";
 
 const MIGRATION_8: &str = "

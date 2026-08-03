@@ -34,6 +34,8 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
         project_id: None,
         project_milestone_id: None,
         project_milestone_name: None,
+        cycle_id: None,
+        cycle_name: None,
     }
 }
 
