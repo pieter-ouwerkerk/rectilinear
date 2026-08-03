@@ -25,6 +25,13 @@ pub struct IssueSyncRef {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncFamilyState {
+    pub status: String,
+    pub sync_token: Option<String>,
+    pub error: Option<String>,
+}
+
 struct SyncFamilyUpdate<'a> {
     workspace_id: &'a str,
     team_key: &'a str,
@@ -348,6 +355,40 @@ impl Database {
         })
     }
 
+    /// Issues changed in this catalog sync plus any issue whose previous
+    /// comment hydration failed. The latter makes supplemental failures
+    /// naturally recoverable even after the authoritative issue cursor moves.
+    pub fn list_comment_hydration_refs(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        sync_token: &str,
+        after_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<IssueSyncRef>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT i.id, i.identifier
+                 FROM issues i
+                 LEFT JOIN comment_sync_state comments ON comments.issue_id = i.id
+                 WHERE i.workspace_id = ?1 AND i.team_key = ?2
+                   AND (i.sync_token = ?3 OR comments.status IN ('permission_denied', 'unavailable'))
+                   AND (?4 IS NULL OR i.id > ?4)
+                 ORDER BY i.id LIMIT ?5",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![workspace_id, team_key, sync_token, after_id, limit as i64],
+                |row| {
+                    Ok(IssueSyncRef {
+                        id: row.get(0)?,
+                        identifier: row.get(1)?,
+                    })
+                },
+            )?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     pub fn reconcile_full_issue_sync(
         &self,
         workspace_id: &str,
@@ -600,6 +641,51 @@ impl Database {
             page_size: None,
             sync_token,
             error: Some(error),
+        })
+    }
+
+    pub fn mark_sync_family_partial(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        family: &str,
+        sync_token: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.set_sync_family_state(SyncFamilyUpdate {
+            workspace_id,
+            team_key,
+            family,
+            status: "partial",
+            cursor: None,
+            page_size: None,
+            sync_token,
+            error: Some(error),
+        })
+    }
+
+    pub fn get_sync_family_state(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        family: &str,
+    ) -> Result<Option<SyncFamilyState>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT status, sync_token, error
+                 FROM sync_family_state
+                 WHERE workspace_id = ?1 AND team_key = ?2 AND family = ?3",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![workspace_id, team_key, family])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(SyncFamilyState {
+                    status: row.get(0)?,
+                    sync_token: row.get(1)?,
+                    error: row.get(2)?,
+                }))
+            } else {
+                Ok(None)
+            }
         })
     }
 

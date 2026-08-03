@@ -252,6 +252,7 @@ pub enum LinearErrorKind {
     Complexity,
     Validation,
     Transport,
+    Transient,
     Api,
 }
 
@@ -383,7 +384,9 @@ where
                 }
 
                 let retry_delay = classified.and_then(|value| match value.kind {
-                    LinearErrorKind::RateLimit | LinearErrorKind::Transport
+                    LinearErrorKind::RateLimit
+                    | LinearErrorKind::Transport
+                    | LinearErrorKind::Transient
                         if retry_attempts < config.max_retry_attempts =>
                     {
                         Some(value.retry_after.unwrap_or_else(|| {
@@ -396,6 +399,20 @@ where
                 });
                 if let Some(delay) = retry_delay {
                     retry_attempts += 1;
+                    observe(SyncEvent {
+                        operation: operation.name(),
+                        parent: parent.clone(),
+                        page_number: request.page_number,
+                        nodes_received: 0,
+                        page_size,
+                        adaptive_reduction: stats.adaptive_reductions > 0,
+                        completed: false,
+                        failure: Some(format!(
+                            "retrying attempt {retry_attempts}/{} after {delay:?} following a {:?} error",
+                            config.max_retry_attempts,
+                            classified.expect("retryable errors are classified").kind
+                        )),
+                    });
                     if !delay.is_zero() {
                         tokio::time::sleep(delay).await;
                     }
@@ -597,6 +614,7 @@ mod tests {
     #[test]
     fn transient_transport_failure_retries_same_cursor() {
         let mut attempts = 0;
+        let mut events = Vec::new();
         let config = SyncQueryConfig {
             retry_base_delay: Duration::ZERO,
             ..Default::default()
@@ -621,11 +639,17 @@ mod tests {
             },
             |_, _| ready(Ok(())),
             |node| *node,
-            |_| {},
+            |event| events.push(event),
         ))
         .unwrap();
         assert_eq!(attempts, 2);
         assert_eq!(stats.nodes, 1);
+        assert!(events.iter().any(|event| {
+            event
+                .failure
+                .as_deref()
+                .is_some_and(|failure| failure.starts_with("retrying attempt 1/"))
+        }));
     }
 
     #[test]

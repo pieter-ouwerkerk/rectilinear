@@ -7,7 +7,8 @@ Rectilinear synchronizes Linear as a sequence of shallow, independently paginate
 3. the workspace label catalog;
 4. cycles filtered by team;
 5. issue core records filtered by team;
-6. each changed issue's labels, relationships, and comments.
+6. each changed issue's labels, followed by relationships;
+7. comments for each changed issue and for any issue whose previous comment hydration failed.
 
 Issues fetch project, project-milestone, and cycle membership as scalar object references. Comments, relationships, and project sub-connections are never nested into the team issue or project pages.
 
@@ -24,13 +25,19 @@ The following environment variables are available for troubleshooting and determ
 
 If Linear rejects a request for complexity, the paginator halves that operation's page size and retries the same cursor. Reduction continues to the configured minimum. A one-node rejection fails with the operation and requested field set because page-size reduction cannot repair structural nesting.
 
-Transport failures and rate-limit responses retry the same cursor with bounded exponential delay. Authentication, validation, and other API errors fail immediately with operation and cursor context.
+Transport failures, HTTP 5xx responses, HTTP 408, and clearly transient GraphQL errors (internal server errors, temporary unavailability, and timeouts) retry the same cursor with bounded exponential delay. HTTP 429 continues to honor `Retry-After` when Linear supplies it. Authentication, permission, validation, and other non-transient API errors are not retried. Verbose output reports each retry attempt, its delay, and the final per-issue comment failure when retries are exhausted.
 
 ## Persistence, retries, and partial failure
 
 Each page is persisted before the next page is requested. Rows receive a unique synchronization token. Stale rows are removed only after the corresponding entity family completes, so an interruption cannot erase the last complete local view. Re-running a partial sync is idempotent: pages may be fetched again, but primary keys, connection-node de-duplication, and upserts prevent duplicates.
 
-`sync_family_state` records `running`, `complete`, or `failed` status for projects, project milestones, labels, cycles, issues, issue labels, relationships, and comments. The team's incremental `updatedAt` cursor advances only after every required family succeeds. A full sync reconciles issues missing from the complete result, while incremental sync only refreshes changed issues.
+`sync_family_state` records `running`, `complete`, or `failed` status for projects, project milestones, labels, cycles, issues, issue labels, relationships, and comments. Comments may additionally be `partial`: the family error records the number of failures and every affected issue identifier, while `comment_sync_state` retains each issue's independent result and redacted diagnostic. A permission failure is `permission_denied`; exhausted transient and other non-permission failures are `unavailable`.
+
+Issue labels and relationships are required structural families. They complete independently, so a comment failure never marks either family failed. Comments are supplemental: a failure for one issue is recorded and hydration continues with later issues. `sync_team` still returns the authoritative issue count when comments are partial.
+
+The team's incremental `updatedAt` cursor advances after the issue catalog, issue labels, and relationships complete, even when comments are partial. This avoids replaying the entire catalog for an isolated supplemental failure. Failed comment issues are selected explicitly on later incremental syncs even when their issue `updatedAt` value did not change. A later successful hydration replaces `permission_denied` or `unavailable` with `synced` or `none_found` and clears the stale diagnostic. A full sync reconciles issues missing from the complete result, while incremental sync otherwise refreshes changed issues.
+
+Persisted diagnostics use the complete error chain, are capped at 500 characters, and redact the configured API key plus authorization, bearer-token, and common credential fields. HTTP response bodies and request authorization headers are not included in operation errors.
 
 Pagination uses `updatedAt` ordering where Linear exposes it. Rectilinear removes duplicate node IDs seen across page boundaries. Linear does not expose a workspace-wide snapshot token, so records that change during a traversal are converged by the next incremental sync rather than inferred from names or stale cache entries.
 
