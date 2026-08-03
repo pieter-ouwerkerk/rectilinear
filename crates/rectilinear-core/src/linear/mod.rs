@@ -1,12 +1,21 @@
+use std::future::ready;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::db::{self, Database};
 
+mod cycles;
 mod projects;
+mod pagination;
 pub use projects::*;
+pub use pagination::{LinearErrorKind, LinearOperation, LinearOperationError, SyncEvent, SyncQueryConfig};
+
+use pagination::{paginate, ConnectionPage, PageInfo};
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 
@@ -15,6 +24,7 @@ pub struct LinearClient {
     client: reqwest::Client,
     api_key: String,
     viewer_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+    sync_query_config: SyncQueryConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,14 +53,6 @@ struct IssueConnection {
 }
 
 #[derive(Debug, Deserialize)]
-struct PageInfo {
-    #[serde(rename = "hasNextPage")]
-    has_next_page: bool,
-    #[serde(rename = "endCursor")]
-    end_cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct LinearIssue {
     id: String,
     identifier: String,
@@ -68,6 +70,8 @@ struct LinearIssue {
     project: Option<LinearProject>,
     #[serde(rename = "projectMilestone")]
     project_milestone: Option<LinearProjectMilestoneRef>,
+    cycle: Option<LinearCycleRef>,
+    #[serde(default)]
     labels: LinearLabelConnection,
     #[serde(default)]
     relations: LinearRelationConnection,
@@ -78,6 +82,23 @@ struct LinearIssue {
 #[derive(Debug, Deserialize, Default)]
 struct LinearRelationConnection {
     nodes: Vec<LinearRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueRelationsData {
+    issue: IssueRelationsNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueRelationsNode {
+    relations: PaginatedRelationConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedRelationConnection {
+    nodes: Vec<LinearRelation>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,8 +153,32 @@ struct LinearProjectMilestoneRef {
 }
 
 #[derive(Debug, Deserialize)]
+struct LinearCycleRef {
+    id: String,
+    name: Option<String>,
+    number: i32,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct LinearLabelConnection {
     nodes: Vec<LinearLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelsForIssueData {
+    issue: IssueLabelsForIssueNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelsForIssueNode {
+    labels: PaginatedIssueLabelConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedIssueLabelConnection {
+    nodes: Vec<LinearLabel>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +197,8 @@ struct TeamsData {
 #[derive(Debug, Deserialize)]
 struct TeamConnection {
     nodes: Vec<TeamNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +215,32 @@ pub struct LabelCatalogEntry {
     pub name: String,
     pub color: Option<String>,
     pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelsData {
+    #[serde(rename = "issueLabels")]
+    issue_labels: IssueLabelCatalogConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelCatalogConnection {
+    nodes: Vec<IssueLabelCatalogNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelCatalogNode {
+    id: String,
+    name: String,
+    color: Option<String>,
+    parent: Option<IssueLabelParent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueLabelParent {
+    id: String,
 }
 
 // --- Issue creation types ---
@@ -313,7 +386,12 @@ impl LinearClient {
     pub fn new(config: &Config) -> Result<Self> {
         let api_key = config.linear_api_key()?.to_string();
         let client = reqwest::Client::new();
-        Ok(Self { client, api_key, viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)) })
+        Ok(Self {
+            client,
+            api_key,
+            viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            sync_query_config: SyncQueryConfig::from_environment(),
+        })
     }
 
     /// Create a client with an explicit API key (for FFI callers).
@@ -322,6 +400,7 @@ impl LinearClient {
             client: reqwest::Client::new(),
             api_key: api_key.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            sync_query_config: SyncQueryConfig::from_environment(),
         }
     }
 
@@ -334,11 +413,71 @@ impl LinearClient {
             client,
             api_key: api_key.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            sync_query_config: SyncQueryConfig::from_environment(),
+        }
+    }
+
+    pub fn with_sync_query_config(mut self, sync_query_config: SyncQueryConfig) -> Self {
+        self.sync_query_config = sync_query_config;
+        self
+    }
+
+    pub fn sync_query_config(&self) -> &SyncQueryConfig {
+        &self.sync_query_config
+    }
+
+    fn observe_sync_event(&self, event: SyncEvent) {
+        if !self.sync_query_config.verbose {
+            return;
+        }
+        let parent = event
+            .parent
+            .as_deref()
+            .map(|value| format!(" parent={value}"))
+            .unwrap_or_default();
+        let reduction = if event.adaptive_reduction {
+            " adaptive-page-size=true"
+        } else {
+            ""
+        };
+        if let Some(failure) = event.failure {
+            eprintln!(
+                "sync operation={}{} page={} nodes={} page_size={}{} status=failed error={}",
+                event.operation,
+                parent,
+                event.page_number,
+                event.nodes_received,
+                event.page_size,
+                reduction,
+                failure
+            );
+        } else {
+            eprintln!(
+                "sync operation={}{} page={} nodes={} page_size={}{} status={}",
+                event.operation,
+                parent,
+                event.page_number,
+                event.nodes_received,
+                event.page_size,
+                reduction,
+                if event.completed { "complete" } else { "running" }
+            );
         }
     }
 
     async fn query<T: serde::de::DeserializeOwned>(
         &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T> {
+        self.query_operation("GraphQL query", None, query, variables)
+            .await
+    }
+
+    async fn query_operation<T: serde::de::DeserializeOwned>(
+        &self,
+        operation: &str,
+        cursor: Option<&str>,
         query: &str,
         variables: serde_json::Value,
     ) -> Result<T> {
@@ -355,35 +494,107 @@ impl LinearClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to send request to Linear API")?;
+            .map_err(|error| {
+                LinearOperationError::new(
+                    LinearErrorKind::Transport,
+                    operation,
+                    cursor,
+                    error.to_string(),
+                )
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Linear API returned {}: {}", status, text);
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let kind = classify_http_status(status.as_u16());
+            return Err(LinearOperationError::new(
+                kind,
+                operation,
+                cursor,
+                format!("HTTP {status} (response body omitted)"),
+            )
+            .with_retry_after(retry_after)
+            .into());
         }
 
         let response: GraphQLResponse<T> = resp
             .json()
             .await
-            .context("Failed to parse Linear response")?;
+            .map_err(|error| {
+                LinearOperationError::new(
+                    LinearErrorKind::Api,
+                    operation,
+                    cursor,
+                    format!("failed to parse response: {error}"),
+                )
+            })?;
 
         if let Some(errors) = response.errors {
-            let msgs: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-            anyhow::bail!("Linear API errors: {}", msgs.join(", "));
+            let message = errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let kind = classify_graphql_message(&message);
+            return Err(LinearOperationError::new(kind, operation, cursor, message).into());
         }
 
-        response.data.context("No data in Linear response")
+        response.data.ok_or_else(|| {
+            LinearOperationError::new(
+                LinearErrorKind::Api,
+                operation,
+                cursor,
+                "response did not contain data",
+            )
+            .into()
+        })
     }
 
     pub async fn list_teams(&self) -> Result<Vec<TeamNode>> {
-        let data: TeamsData = self
-            .query(
-                "query { teams { nodes { id key name } } }",
-                serde_json::json!({}),
-            )
-            .await?;
-        Ok(data.teams.nodes)
+        let query = r#"
+            query($first: Int!, $after: String) {
+                teams(first: $first, after: $after, orderBy: updatedAt) {
+                    nodes { id key name }
+                    pageInfo { hasNextPage endCursor }
+                }
+            }
+        "#;
+        let mut teams = Vec::new();
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::Teams,
+            None,
+            |request| async move {
+                let data: TeamsData = self
+                    .query_operation(
+                        LinearOperation::Teams.name(),
+                        request.cursor.as_deref(),
+                        query,
+                        serde_json::json!({
+                            "first": request.page_size,
+                            "after": request.cursor,
+                        }),
+                    )
+                    .await?;
+                Ok(ConnectionPage {
+                    nodes: data.teams.nodes,
+                    page_info: data.teams.page_info,
+                })
+            },
+            |nodes, _| {
+                teams.extend(nodes);
+                ready(Ok(()))
+            },
+            |team| team.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(teams)
     }
 
     fn extract_relations(issue_id: &str, linear_issue: &LinearIssue) -> Vec<db::Relation> {
@@ -401,6 +612,16 @@ impl LinearClient {
             .collect()
     }
 
+    fn convert_linear_relation(issue_id: &str, relation: LinearRelation) -> db::Relation {
+        db::Relation {
+            id: relation.id,
+            issue_id: issue_id.to_string(),
+            related_issue_id: relation.related_issue.id,
+            related_issue_identifier: relation.related_issue.identifier,
+            relation_type: relation.relation_type,
+        }
+    }
+
     pub async fn fetch_issues(
         &self,
         team_key: &str,
@@ -408,28 +629,43 @@ impl LinearClient {
         updated_after: Option<&str>,
         include_archived: bool,
     ) -> Result<(Vec<(db::Issue, Vec<db::Relation>, Vec<String>)>, bool, Option<String>)> {
+        let page = self
+            .fetch_issues_page(
+                team_key,
+                after_cursor,
+                updated_after,
+                include_archived,
+                self.sync_query_config.page_size(LinearOperation::Issues),
+            )
+            .await?;
+        Ok((
+            page.nodes,
+            page.page_info.has_next_page,
+            page.page_info.end_cursor,
+        ))
+    }
+
+    async fn fetch_issues_page(
+        &self,
+        team_key: &str,
+        after_cursor: Option<&str>,
+        updated_after: Option<&str>,
+        include_archived: bool,
+        page_size: usize,
+    ) -> Result<ConnectionPage<(db::Issue, Vec<db::Relation>, Vec<String>)>> {
         let mut filter_parts = vec![format!("team: {{ key: {{ eq: \"{}\" }} }}", team_key)];
         if let Some(after) = updated_after {
             filter_parts.push(format!("updatedAt: {{ gt: \"{}\" }}", after));
         }
         let filter = filter_parts.join(", ");
-
-        let after_param = if let Some(c) = after_cursor {
-            format!(", after: \"{}\"", c)
-        } else {
-            String::new()
-        };
-
-        let include_archive = if include_archived { "true" } else { "false" };
-
         let query = format!(
-            r#"query {{
+            r#"query($first: Int!, $after: String, $includeArchived: Boolean!) {{
                 issues(
-                    first: 250,
+                    first: $first,
+                    after: $after,
                     filter: {{ {} }},
-                    includeArchived: {}
+                    includeArchived: $includeArchived,
                     orderBy: updatedAt
-                    {}
                 ) {{
                     nodes {{
                         id identifier url title description priority branchName
@@ -439,16 +675,22 @@ impl LinearClient {
                         assignee {{ name }}
                         project {{ id name }}
                         projectMilestone {{ id name }}
-                        labels {{ nodes {{ id name }} }}
-                        relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
+                        cycle {{ id name number }}
                     }}
                     pageInfo {{ hasNextPage endCursor }}
                 }}
             }}"#,
-            filter, include_archive, after_param
+            filter
         );
 
-        let data: IssuesData = self.query(&query, serde_json::json!({})).await?;
+        let data: IssuesData = self
+            .query_operation(
+                LinearOperation::Issues.name(),
+                after_cursor,
+                &query,
+                issue_page_variables(page_size, after_cursor, include_archived),
+            )
+            .await?;
 
         let issues: Vec<(db::Issue, Vec<db::Relation>, Vec<String>)> = data
             .issues
@@ -457,11 +699,7 @@ impl LinearClient {
             .map(Self::convert_linear_issue)
             .collect();
 
-        Ok((
-            issues,
-            data.issues.page_info.has_next_page,
-            data.issues.page_info.end_cursor,
-        ))
+        Ok(ConnectionPage { nodes: issues, page_info: data.issues.page_info })
     }
 
     pub async fn sync_team(
@@ -473,19 +711,15 @@ impl LinearClient {
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
-        if let Err(e) = self.sync_projects(db, workspace_id).await {
-            eprintln!(
-                "warning: failed to sync projects for workspace '{}': {}",
-                workspace_id, e
-            );
-        }
-
-        // Refresh workspace label catalog before syncing issues so issue_labels
-        // can be populated. Linear labels are workspace-scoped, so this runs
-        // per-call (cheap: one paginated query).
-        if let Err(e) = self.sync_labels_catalog(db, workspace_id).await {
-            eprintln!("warning: failed to sync label catalog for workspace '{}': {}", workspace_id, e);
-        }
+        self.sync_projects(db, workspace_id)
+            .await
+            .with_context(|| format!("project synchronization failed for workspace '{workspace_id}'"))?;
+        self.sync_labels_catalog(db, workspace_id)
+            .await
+            .with_context(|| format!("label synchronization failed for workspace '{workspace_id}'"))?;
+        self.sync_cycles(db, team_key, workspace_id, include_archived)
+            .await
+            .with_context(|| format!("cycle synchronization failed for team '{team_key}'"))?;
 
         let updated_after = if full {
             None
@@ -493,57 +727,166 @@ impl LinearClient {
             db.get_sync_cursor(workspace_id, team_key)?
         };
 
-        let mut total = 0;
-        let mut cursor: Option<String> = None;
+        let sync_token = Uuid::new_v4().to_string();
         let mut max_updated: Option<String> = None;
-
-        loop {
-            let (issues, has_next, next_cursor) = self
-                .fetch_issues(
-                    team_key,
-                    cursor.as_deref(),
-                    updated_after.as_deref(),
-                    include_archived,
-                )
-                .await?;
-
-            let count = issues.len();
-            for (mut issue, relations, label_ids) in issues {
-                issue.workspace_id = workspace_id.to_string();
-                if max_updated.is_none() || Some(&issue.updated_at) > max_updated.as_ref() {
-                    max_updated = Some(issue.updated_at.clone());
-                }
-                db.upsert_issue(&issue)?;
-                db.upsert_relations(&issue.id, &relations)?;
-                db.replace_issue_labels(&issue.id, &label_ids)?;
-                if let Err(e) = self
-                    .sync_issue_comments(db, &issue.id, workspace_id)
+        let mut persisted_total = 0;
+        db.mark_sync_family_running(
+            workspace_id,
+            team_key,
+            "issues",
+            None,
+            Some(self.sync_query_config.page_size(LinearOperation::Issues)),
+            &sync_token,
+        )?;
+        let issue_result = paginate(
+            &self.sync_query_config,
+            LinearOperation::Issues,
+            Some(team_key.to_string()),
+            |request| {
+                let updated_after = updated_after.clone();
+                async move {
+                    self.fetch_issues_page(
+                        team_key,
+                        request.cursor.as_deref(),
+                        updated_after.as_deref(),
+                        include_archived,
+                        request.page_size,
+                    )
                     .await
-                {
-                    eprintln!(
-                        "warning: failed to sync comments for issue {}: {}",
-                        issue.identifier,
-                        Self::redacted_error_message(&e)
-                    );
                 }
-            }
-            total += count;
+            },
+            |issues, context| {
+                let count = issues.len();
+                let result = (|| {
+                    for (mut issue, _relations, _label_ids) in issues {
+                        issue.workspace_id = workspace_id.to_string();
+                        if max_updated.is_none()
+                            || Some(&issue.updated_at) > max_updated.as_ref()
+                        {
+                            max_updated = Some(issue.updated_at.clone());
+                        }
+                        db.upsert_issue_preserving_labels(&issue)?;
+                        db.mark_issue_sync_token(&issue.id, &sync_token)?;
+                    }
+                    persisted_total += count;
+                    db.mark_sync_family_running(
+                        workspace_id,
+                        team_key,
+                        "issues",
+                        context.cursor.as_deref(),
+                        Some(context.page_size),
+                        &sync_token,
+                    )?;
+                    if let Some(callback) = progress {
+                        callback(persisted_total);
+                    }
+                    Ok(())
+                })();
+                ready(result)
+            },
+            |(issue, _, _)| issue.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await;
 
-            if let Some(cb) = progress {
-                cb(total);
+        let stats = match issue_result {
+            Ok(stats) => stats,
+            Err(error) => {
+                let message = Self::redacted_error_message(&error);
+                db.mark_sync_family_failed(
+                    workspace_id,
+                    team_key,
+                    "issues",
+                    &sync_token,
+                    &message,
+                )?;
+                return Err(error);
             }
+        };
+        if full {
+            db.reconcile_full_issue_sync(workspace_id, team_key, &sync_token)?;
+        }
+        db.mark_sync_family_complete(
+            workspace_id,
+            team_key,
+            "issues",
+            Some(self.sync_query_config.page_size(LinearOperation::Issues)),
+            &sync_token,
+        )?;
 
-            if !has_next || count == 0 {
-                break;
+        for family in ["issue labels", "relations", "comments"] {
+            db.mark_sync_family_running(
+                workspace_id,
+                team_key,
+                family,
+                None,
+                None,
+                &sync_token,
+            )?;
+        }
+        let hydration_result: Result<()> = async {
+            let mut after_id = None;
+            loop {
+                let issue_refs = db.list_issue_sync_refs(
+                    workspace_id,
+                    team_key,
+                    &sync_token,
+                    after_id.as_deref(),
+                    100,
+                )?;
+                if issue_refs.is_empty() {
+                    break;
+                }
+                for issue in &issue_refs {
+                    self.sync_issue_labels(db, &issue.id)
+                        .await
+                        .with_context(|| {
+                            format!("label synchronization failed for {}", issue.identifier)
+                        })?;
+                    self.sync_issue_relations(db, &issue.id)
+                        .await
+                        .with_context(|| {
+                            format!("relation synchronization failed for {}", issue.identifier)
+                        })?;
+                    self.sync_issue_comments(db, &issue.id, workspace_id)
+                        .await
+                        .with_context(|| {
+                            format!("comment synchronization failed for {}", issue.identifier)
+                        })?;
+                }
+                after_id = issue_refs.last().map(|issue| issue.id.clone());
             }
-            cursor = next_cursor;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = hydration_result {
+            let message = Self::redacted_error_message(&error);
+            for family in ["issue labels", "relations", "comments"] {
+                db.mark_sync_family_failed(
+                    workspace_id,
+                    team_key,
+                    family,
+                    &sync_token,
+                    &message,
+                )?;
+            }
+            return Err(error);
+        }
+        for family in ["issue labels", "relations", "comments"] {
+            db.mark_sync_family_complete(
+                workspace_id,
+                team_key,
+                family,
+                None,
+                &sync_token,
+            )?;
         }
 
-        if let Some(max) = max_updated {
-            db.set_sync_cursor(workspace_id, team_key, &max)?;
-        }
-
-        Ok(total)
+        let next_updated = max_updated
+            .or(updated_after)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        db.set_sync_cursor(workspace_id, team_key, &next_updated)?;
+        Ok(stats.nodes)
     }
 
     pub async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)> {
@@ -595,12 +938,17 @@ impl LinearClient {
         Ok(())
     }
 
-    pub async fn fetch_issue_comments(&self, issue_id: &str) -> Result<Vec<db::Comment>> {
+    async fn fetch_issue_comments_page(
+        &self,
+        issue_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::Comment>> {
         let query = r#"
-            query($issueId: ID!, $after: String) {
+            query($issueId: ID!, $first: Int!, $after: String) {
                 comments(
                     filter: { issue: { id: { eq: $issueId } } },
-                    first: 100,
+                    first: $first,
                     after: $after,
                     includeArchived: true,
                     orderBy: createdAt
@@ -614,37 +962,51 @@ impl LinearClient {
                 }
             }
         "#;
+        let data: CommentsData = self
+            .query_operation(
+                LinearOperation::Comments.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "issueId": issue_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .comments
+                .nodes
+                .into_iter()
+                .map(|comment| Self::convert_linear_comment(issue_id, comment))
+                .collect(),
+            page_info: data.comments.page_info,
+        })
+    }
 
+    pub async fn fetch_issue_comments(&self, issue_id: &str) -> Result<Vec<db::Comment>> {
         let mut comments = Vec::new();
-        let mut cursor: Option<String> = None;
-
-        loop {
-            let data: CommentsData = self
-                .query(
-                    query,
-                    serde_json::json!({
-                        "issueId": issue_id,
-                        "after": cursor.as_deref(),
-                    }),
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::Comments,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_comments_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
                 )
-                .await?;
-
-            comments.extend(
-                data.comments
-                    .nodes
-                    .into_iter()
-                    .map(|comment| Self::convert_linear_comment(issue_id, comment)),
-            );
-
-            if !data.comments.page_info.has_next_page {
-                break;
-            }
-            cursor = data.comments.page_info.end_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-
+                .await
+            },
+            |nodes, _| {
+                comments.extend(nodes);
+                ready(Ok(()))
+            },
+            |comment| comment.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
         Ok(comments)
     }
 
@@ -654,15 +1016,39 @@ impl LinearClient {
         issue_id: &str,
         workspace_id: &str,
     ) -> Result<usize> {
-        match self.fetch_issue_comments(issue_id).await {
-            Ok(mut comments) => {
+        let sync_token = Uuid::new_v4().to_string();
+        let result = paginate(
+            &self.sync_query_config,
+            LinearOperation::Comments,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_comments_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |mut comments, _| {
                 for comment in &mut comments {
                     comment.workspace_id = workspace_id.to_string();
                 }
-                let count = comments.len();
-                db.replace_issue_comments(issue_id, workspace_id, &comments)?;
-                db.mark_comments_synced(issue_id, workspace_id, count)?;
-                Ok(count)
+                ready(db.upsert_comment_page(
+                    issue_id,
+                    workspace_id,
+                    &comments,
+                    &sync_token,
+                ))
+            },
+            |comment| comment.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await;
+        match result {
+            Ok(stats) => {
+                db.complete_comment_sync(issue_id, workspace_id, &sync_token)?;
+                db.mark_comments_synced(issue_id, workspace_id, stats.nodes)?;
+                Ok(stats.nodes)
             }
             Err(error) => {
                 let status = Self::comment_error_status(&error);
@@ -671,6 +1057,204 @@ impl LinearClient {
                 Err(error)
             }
         }
+    }
+
+    async fn fetch_issue_relations_page(
+        &self,
+        issue_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::Relation>> {
+        let query = r#"
+            query($issueId: String!, $first: Int!, $after: String) {
+                issue(id: $issueId) {
+                    relations(first: $first, after: $after) {
+                        nodes { id type relatedIssue { id identifier } }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: IssueRelationsData = self
+            .query_operation(
+                LinearOperation::Relations.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "issueId": issue_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .issue
+                .relations
+                .nodes
+                .into_iter()
+                .map(|relation| Self::convert_linear_relation(issue_id, relation))
+                .collect(),
+            page_info: data.issue.relations.page_info,
+        })
+    }
+
+    pub async fn sync_issue_relations(
+        &self,
+        db: &Database,
+        issue_id: &str,
+    ) -> Result<usize> {
+        let sync_token = Uuid::new_v4().to_string();
+        let stats = paginate(
+            &self.sync_query_config,
+            LinearOperation::Relations,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_relations_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |relations, _| {
+                ready(db.upsert_relation_page(issue_id, &relations, &sync_token))
+            },
+            |relation| relation.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.complete_relation_sync(issue_id, &sync_token)?;
+        Ok(stats.nodes)
+    }
+
+    async fn fetch_issue_labels_page(
+        &self,
+        issue_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<LinearLabel>> {
+        let query = r#"
+            query($issueId: String!, $first: Int!, $after: String) {
+                issue(id: $issueId) {
+                    labels(first: $first, after: $after, orderBy: updatedAt) {
+                        nodes { id name }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: IssueLabelsForIssueData = self
+            .query_operation(
+                "issue labels",
+                cursor,
+                query,
+                serde_json::json!({
+                    "issueId": issue_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data.issue.labels.nodes,
+            page_info: data.issue.labels.page_info,
+        })
+    }
+
+    pub async fn sync_issue_labels(&self, db: &Database, issue_id: &str) -> Result<usize> {
+        let sync_token = Uuid::new_v4().to_string();
+        let mut names = Vec::new();
+        let stats = paginate(
+            &self.sync_query_config,
+            LinearOperation::Labels,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_labels_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |labels, _| {
+                let ids = labels
+                    .iter()
+                    .map(|label| label.id.clone())
+                    .collect::<Vec<_>>();
+                names.extend(labels.into_iter().map(|label| label.name));
+                ready(db.upsert_issue_label_page(issue_id, &ids, &sync_token))
+            },
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.complete_issue_label_sync(issue_id, &sync_token)?;
+
+        let mut issue = db
+            .get_issue(issue_id)?
+            .with_context(|| format!("issue '{issue_id}' disappeared during label sync"))?;
+        issue.labels_json = serde_json::to_string(&names)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&issue.title);
+        hasher.update(issue.description.as_deref().unwrap_or(""));
+        hasher.update(&issue.labels_json);
+        issue.content_hash = hex::encode(hasher.finalize());
+        db.upsert_issue(&issue)?;
+        Ok(stats.nodes)
+    }
+
+    async fn fetch_all_issue_labels_remote(&self, issue_id: &str) -> Result<Vec<LinearLabel>> {
+        let mut labels = Vec::new();
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::Labels,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_labels_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                labels.extend(nodes);
+                ready(Ok(()))
+            },
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(labels)
+    }
+
+    async fn fetch_all_issue_relations_remote(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<db::Relation>> {
+        let mut relations = Vec::new();
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::Relations,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_relations_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                relations.extend(nodes);
+                ready(Ok(()))
+            },
+            |relation| relation.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(relations)
     }
 
     pub fn comment_error_status(error: &anyhow::Error) -> &'static str {
@@ -772,8 +1356,7 @@ impl LinearClient {
                     assignee { name }
                     project { id name }
                     projectMilestone { id name }
-                    labels { nodes { id name } }
-                    relations { nodes { id type relatedIssue { id identifier } } }
+                    cycle { id name number }
                 }
             }
         "#;
@@ -781,8 +1364,12 @@ impl LinearClient {
         let data: SingleIssueData = self
             .query(query, serde_json::json!({ "id": issue_id }))
             .await?;
-
-        Ok(Self::convert_linear_issue(data.issue))
+        let issue_id = data.issue.id.clone();
+        let (mut issue, _, _) = Self::convert_linear_issue(data.issue);
+        let labels = self.fetch_all_issue_labels_remote(&issue_id).await?;
+        let label_ids = apply_issue_labels(&mut issue, labels);
+        let relations = self.fetch_all_issue_relations_remote(&issue_id).await?;
+        Ok((issue, relations, label_ids))
     }
 
     /// Fetch a single issue from Linear by its identifier (e.g., "CUT-537").
@@ -822,8 +1409,7 @@ impl LinearClient {
                         assignee {{ name }}
                         project {{ id name }}
                         projectMilestone {{ id name }}
-                        labels {{ nodes {{ id name }} }}
-                        relations {{ nodes {{ id type relatedIssue {{ id identifier }} }} }}
+                        cycle {{ id name number }}
                     }}
                     pageInfo {{ hasNextPage endCursor }}
                 }}
@@ -833,12 +1419,15 @@ impl LinearClient {
 
         let data: IssuesData = self.query(&query, serde_json::json!({})).await?;
 
-        Ok(data
-            .issues
-            .nodes
-            .into_iter()
-            .next()
-            .map(Self::convert_linear_issue))
+        let Some(linear_issue) = data.issues.nodes.into_iter().next() else {
+            return Ok(None);
+        };
+        let issue_id = linear_issue.id.clone();
+        let (mut issue, _, _) = Self::convert_linear_issue(linear_issue);
+        let labels = self.fetch_all_issue_labels_remote(&issue_id).await?;
+        let label_ids = apply_issue_labels(&mut issue, labels);
+        let relations = self.fetch_all_issue_relations_remote(&issue_id).await?;
+        Ok(Some((issue, relations, label_ids)))
     }
 
     fn convert_linear_issue(i: LinearIssue) -> (db::Issue, Vec<db::Relation>, Vec<String>) {
@@ -861,6 +1450,12 @@ impl LinearClient {
             .as_ref()
             .map(|milestone| milestone.id.clone());
         let project_milestone_name = i.project_milestone.map(|milestone| milestone.name);
+        let cycle_id = i.cycle.as_ref().map(|cycle| cycle.id.clone());
+        let cycle_name = i.cycle.map(|cycle| {
+            cycle
+                .name
+                .unwrap_or_else(|| format!("Cycle {}", cycle.number))
+        });
 
         let issue = db::Issue {
             id: i.id,
@@ -884,8 +1479,8 @@ impl LinearClient {
             project_id,
             project_milestone_id,
             project_milestone_name,
-            cycle_id: None,
-            cycle_name: None,
+            cycle_id,
+            cycle_name,
         };
 
         (issue, relations, label_ids)
@@ -978,34 +1573,20 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
-        let query = r#"
-            query {
-                issueLabels(first: 250) {
-                    nodes { id name }
-                }
-            }
-        "#;
-
-        let data: serde_json::Value = self.query(query, serde_json::json!({})).await?;
-
-        let labels = data["issueLabels"]["nodes"]
-            .as_array()
-            .context("No labels in response")?;
+        let labels = self.fetch_labels().await?;
 
         let mut ids = Vec::new();
         for name in label_names {
-            let found = labels.iter().find(|l| {
-                l["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
-            });
+            let found = labels
+                .iter()
+                .find(|label| label.name.eq_ignore_ascii_case(name));
             match found {
-                Some(l) => {
-                    ids.push(l["id"].as_str().context("Label has no id")?.to_string());
-                }
+                Some(label) => ids.push(label.id.clone()),
                 None => {
-                    let available: Vec<&str> =
-                        labels.iter().filter_map(|l| l["name"].as_str()).collect();
+                    let available = labels
+                        .iter()
+                        .map(|label| label.name.as_str())
+                        .collect::<Vec<_>>();
                     anyhow::bail!(
                         "Label '{}' not found. Available: {}",
                         name,
@@ -1083,56 +1664,133 @@ impl LinearClient {
     /// Fetch the full label catalog for the workspace (all pages).
     pub async fn fetch_labels(&self) -> Result<Vec<LabelCatalogEntry>> {
         let mut out = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let after_param = match cursor {
-                Some(ref c) => format!(", after: \"{}\"", c),
-                None => String::new(),
-            };
-            let query = format!(
-                r#"query {{
-                    issueLabels(first: 250{}) {{
-                        nodes {{ id name color parent {{ id }} }}
-                        pageInfo {{ hasNextPage endCursor }}
-                    }}
-                }}"#,
-                after_param
-            );
-            let data: serde_json::Value = self.query(&query, serde_json::json!({})).await?;
-            let nodes = data["issueLabels"]["nodes"]
-                .as_array()
-                .context("No issueLabels.nodes in response")?;
-            for n in nodes {
-                let id = n["id"].as_str().context("label has no id")?.to_string();
-                let name = n["name"].as_str().unwrap_or("").to_string();
-                let color = n["color"].as_str().map(|s| s.to_string());
-                let parent_id = n["parent"]["id"].as_str().map(|s| s.to_string());
-                out.push(LabelCatalogEntry { id, name, color, parent_id });
-            }
-            let has_next = data["issueLabels"]["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false);
-            if !has_next { break; }
-            cursor = data["issueLabels"]["pageInfo"]["endCursor"].as_str().map(|s| s.to_string());
-            if cursor.is_none() { break; }
-        }
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::Labels,
+            None,
+            |request| async move {
+                self.fetch_labels_page(request.cursor.as_deref(), request.page_size)
+                    .await
+            },
+            |nodes, _| {
+                out.extend(nodes);
+                ready(Ok(()))
+            },
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
         Ok(out)
+    }
+
+    async fn fetch_labels_page(
+        &self,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<LabelCatalogEntry>> {
+        let query = r#"
+            query($first: Int!, $after: String) {
+                issueLabels(first: $first, after: $after, orderBy: updatedAt) {
+                    nodes { id name color parent { id } }
+                    pageInfo { hasNextPage endCursor }
+                }
+            }
+        "#;
+        let data: IssueLabelsData = self
+            .query_operation(
+                LinearOperation::Labels.name(),
+                cursor,
+                query,
+                serde_json::json!({ "first": page_size, "after": cursor }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .issue_labels
+                .nodes
+                .into_iter()
+                .map(|label| LabelCatalogEntry {
+                    id: label.id,
+                    name: label.name,
+                    color: label.color,
+                    parent_id: label.parent.map(|parent| parent.id),
+                })
+                .collect(),
+            page_info: data.issue_labels.page_info,
+        })
     }
 
     /// Sync the workspace's label catalog into the local database.
     /// Upserts labels by id and removes labels that no longer exist remotely.
     pub async fn sync_labels_catalog(&self, db: &Database, workspace_id: &str) -> Result<usize> {
-        let entries = self.fetch_labels().await?;
-        let keep_ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
-        for e in &entries {
-            db.upsert_label(&db::Label {
-                id: e.id.clone(),
-                workspace_id: workspace_id.to_string(),
-                name: e.name.clone(),
-                color: e.color.clone(),
-                parent_id: e.parent_id.clone(),
-            })?;
+        let sync_token = Uuid::new_v4().to_string();
+        db.mark_sync_family_running(
+            workspace_id,
+            "*",
+            "labels",
+            None,
+            Some(self.sync_query_config.page_size(LinearOperation::Labels)),
+            &sync_token,
+        )?;
+        let result = paginate(
+            &self.sync_query_config,
+            LinearOperation::Labels,
+            None,
+            |request| async move {
+                self.fetch_labels_page(request.cursor.as_deref(), request.page_size)
+                    .await
+            },
+            |entries, context| {
+                let result = (|| {
+                    for entry in entries {
+                        db.upsert_label(&db::Label {
+                            id: entry.id.clone(),
+                            workspace_id: workspace_id.to_string(),
+                            name: entry.name,
+                            color: entry.color,
+                            parent_id: entry.parent_id,
+                        })?;
+                        db.mark_label_sync_token(&entry.id, &sync_token)?;
+                    }
+                    db.mark_sync_family_running(
+                        workspace_id,
+                        "*",
+                        "labels",
+                        context.cursor.as_deref(),
+                        Some(context.page_size),
+                        &sync_token,
+                    )
+                })();
+                ready(result)
+            },
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await;
+        match result {
+            Ok(stats) => {
+                db.reconcile_label_sync(workspace_id, &sync_token)?;
+                db.mark_sync_family_complete(
+                    workspace_id,
+                    "*",
+                    "labels",
+                    Some(self.sync_query_config.page_size(LinearOperation::Labels)),
+                    &sync_token,
+                )?;
+                Ok(stats.nodes)
+            }
+            Err(error) => {
+                let message = Self::redacted_error_message(&error);
+                db.mark_sync_family_failed(
+                    workspace_id,
+                    "*",
+                    "labels",
+                    &sync_token,
+                    &message,
+                )?;
+                Err(error)
+            }
         }
-        db.delete_labels_for_workspace_not_in(workspace_id, &keep_ids)?;
-        Ok(entries.len())
     }
 
     /// Resolve a project name to its ID. Matches case-insensitively.
@@ -1236,6 +1894,65 @@ fn create_issue_value(create: &CreateIssueInput<'_>) -> serde_json::Value {
     input
 }
 
+fn issue_page_variables(
+    page_size: usize,
+    cursor: Option<&str>,
+    include_archived: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "first": page_size,
+        "after": cursor,
+        "includeArchived": include_archived,
+    })
+}
+
+fn apply_issue_labels(issue: &mut db::Issue, labels: Vec<LinearLabel>) -> Vec<String> {
+    let label_names = labels
+        .iter()
+        .map(|label| label.name.clone())
+        .collect::<Vec<_>>();
+    let label_ids = labels.into_iter().map(|label| label.id).collect::<Vec<_>>();
+    issue.labels_json = serde_json::to_string(&label_names).unwrap_or_else(|_| "[]".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(&issue.title);
+    hasher.update(issue.description.as_deref().unwrap_or(""));
+    hasher.update(&issue.labels_json);
+    issue.content_hash = hex::encode(hasher.finalize());
+    label_ids
+}
+
+fn classify_http_status(status: u16) -> LinearErrorKind {
+    match status {
+        401 | 403 => LinearErrorKind::Authentication,
+        429 => LinearErrorKind::RateLimit,
+        _ => LinearErrorKind::Api,
+    }
+}
+
+fn classify_graphql_message(message: &str) -> LinearErrorKind {
+    let lower = message.to_lowercase();
+    if lower.contains("complexity")
+        || lower.contains("maximum allowed")
+        || lower.contains("query cost")
+    {
+        LinearErrorKind::Complexity
+    } else if lower.contains("rate limit") || lower.contains("too many requests") {
+        LinearErrorKind::RateLimit
+    } else if lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("authentication")
+    {
+        LinearErrorKind::Authentication
+    } else if lower.contains("validation")
+        || lower.contains("cannot query field")
+        || lower.contains("unknown argument")
+    {
+        LinearErrorKind::Validation
+    } else {
+        LinearErrorKind::Api
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1260,5 +1977,34 @@ mod tests {
             serde_json::json!("milestone-1")
         );
         assert_eq!(value["labelIds"], serde_json::json!(["label-1"]));
+    }
+
+    #[test]
+    fn issue_pages_explicitly_toggle_archived_records() {
+        assert_eq!(
+            issue_page_variables(50, None, false)["includeArchived"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            issue_page_variables(50, Some("cursor-1"), true)["includeArchived"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn graphql_errors_are_classified_without_stringly_typed_callers() {
+        assert_eq!(
+            classify_graphql_message("Query complexity: 72,400; maximum allowed: 10,000"),
+            LinearErrorKind::Complexity
+        );
+        assert_eq!(
+            classify_graphql_message("Cannot query field 'cycles'"),
+            LinearErrorKind::Validation
+        );
+        assert_eq!(
+            classify_graphql_message("Unauthorized"),
+            LinearErrorKind::Authentication
+        );
+        assert_eq!(classify_http_status(429), LinearErrorKind::RateLimit);
     }
 }
