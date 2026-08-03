@@ -711,9 +711,9 @@ impl LinearClient {
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
-        self.sync_projects(db, workspace_id)
-            .await
-            .with_context(|| format!("project synchronization failed for workspace '{workspace_id}'"))?;
+        self.sync_projects_for_team(db, workspace_id, team_key, include_archived).await.with_context(|| {
+            format!("project synchronization failed for workspace '{workspace_id}'")
+        })?;
         self.sync_labels_catalog(db, workspace_id)
             .await
             .with_context(|| format!("label synchronization failed for workspace '{workspace_id}'"))?;

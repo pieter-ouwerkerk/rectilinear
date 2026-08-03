@@ -1,27 +1,27 @@
+use std::future::ready;
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::db::{self, Database};
 
-use super::{IssueConnection, LinearClient, PageInfo};
+use super::pagination::{paginate, ConnectionPage, LinearOperation, PageInfo};
+use super::{IssueConnection, LinearClient};
 
 // Linear charges query complexity per connection item, including every nested
 // connection selected for that item. Project metadata is unusually rich, so
 // conservative page sizes keep these queries below the workspace complexity
 // limit even when a workspace has hundreds of projects.
-const PROJECT_PAGE_SIZE: usize = 10;
 const MILESTONE_PAGE_SIZE: usize = 50;
 const RESOURCE_LOOKUP_PAGE_SIZE: usize = 50;
-const HIERARCHY_ISSUE_PAGE_SIZE: usize = 25;
 
 const PROJECT_FIELDS: &str = r#"
     id slugId name description content icon color priority
     startDate targetDate createdAt updatedAt archivedAt url progress
     status { id name type color }
     lead { id name }
-    teams(first: 50) { nodes { id key name } }
-    members(first: 250) { nodes { id name } }
-    labels(first: 250) { nodes { id name color description } }
 "#;
 
 const MILESTONE_FIELDS: &str = r#"
@@ -38,8 +38,7 @@ const ISSUE_FIELDS: &str = r#"
     assignee { name }
     project { id name }
     projectMilestone { id name }
-    labels { nodes { id name } }
-    relations { nodes { id type relatedIssue { id identifier } } }
+    cycle { id name number }
 "#;
 
 #[derive(Debug, Clone, Default)]
@@ -123,8 +122,11 @@ struct LinearProjectNode {
     color: String,
     status: LinearProjectStatus,
     lead: Option<LinearProjectUser>,
+    #[serde(default)]
     teams: LinearProjectTeamConnection,
+    #[serde(default)]
     members: LinearProjectUserConnection,
+    #[serde(default)]
     labels: LinearProjectLabelConnection,
     priority: i32,
     #[serde(rename = "startDate")]
@@ -156,7 +158,7 @@ struct LinearProjectUser {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct LinearProjectUserConnection {
     nodes: Vec<LinearProjectUser>,
 }
@@ -168,7 +170,7 @@ struct LinearProjectTeam {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct LinearProjectTeamConnection {
     nodes: Vec<LinearProjectTeam>,
 }
@@ -181,9 +183,60 @@ struct LinearProjectLabel {
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct LinearProjectLabelConnection {
     nodes: Vec<LinearProjectLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectTeamsData {
+    project: ProjectTeamsNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectTeamsNode {
+    teams: PaginatedProjectTeamConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedProjectTeamConnection {
+    nodes: Vec<LinearProjectTeam>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectMembersData {
+    project: ProjectMembersNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectMembersNode {
+    members: PaginatedProjectMemberConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedProjectMemberConnection {
+    nodes: Vec<LinearProjectUser>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectLabelsData {
+    project: ProjectLabelsNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectLabelsNode {
+    labels: PaginatedProjectLabelConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedProjectLabelConnection {
+    nodes: Vec<LinearProjectLabel>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,39 +370,86 @@ impl LinearClient {
         include_archived: bool,
         workspace_id: &str,
     ) -> Result<(Vec<db::Project>, bool, Option<String>)> {
-        let query = r#"
-            query($after: String, $includeArchived: Boolean!) {
+        let mut page = self
+            .fetch_projects_page(
+                after_cursor,
+                include_archived,
+                workspace_id,
+                self.sync_query_config().page_size(LinearOperation::Projects),
+                None,
+            )
+            .await?;
+        for project in &mut page.nodes {
+            project.teams = self.fetch_all_project_teams(&project.id).await?;
+            project.members = self.fetch_all_project_members(&project.id).await?;
+            project.labels = self.fetch_all_project_labels(&project.id).await?;
+        }
+        Ok((
+            page.nodes,
+            page.page_info.has_next_page,
+            page.page_info.end_cursor,
+        ))
+    }
+
+    async fn fetch_projects_page(
+        &self,
+        after_cursor: Option<&str>,
+        include_archived: bool,
+        workspace_id: &str,
+        page_size: usize,
+        team_id: Option<&str>,
+    ) -> Result<ConnectionPage<db::Project>> {
+        let (variables, filter) = if team_id.is_some() {
+            (
+                "$first: Int!, $after: String, $includeArchived: Boolean!, $teamId: ID!",
+                "filter: { accessibleTeams: { some: { id: { eq: $teamId } } } },",
+            )
+        } else {
+            (
+                "$first: Int!, $after: String, $includeArchived: Boolean!",
+                "",
+            )
+        };
+        let query = format!(
+            r#"
+            query({variables}) {{
                 projects(
-                    first: __PROJECT_PAGE_SIZE__,
+                    first: $first,
                     after: $after,
+                    {filter}
                     includeArchived: $includeArchived,
                     orderBy: updatedAt
-                ) {
-                    nodes { __PROJECT_FIELDS__ }
-                    pageInfo { hasNextPage endCursor }
-                }
-            }
+                ) {{
+                    nodes {{ __PROJECT_FIELDS__ }}
+                    pageInfo {{ hasNextPage endCursor }}
+                }}
+            }}
         "#
+        )
         .replace("__PROJECT_FIELDS__", PROJECT_FIELDS)
-        .replace("__PROJECT_PAGE_SIZE__", &PROJECT_PAGE_SIZE.to_string());
+        .replace("{filter}", filter);
         let data: ProjectConnectionData = self
-            .query(
+            .query_operation(
+                LinearOperation::Projects.name(),
+                after_cursor,
                 &query,
                 serde_json::json!({
+                    "first": page_size,
                     "after": after_cursor,
                     "includeArchived": include_archived,
+                    "teamId": team_id,
                 }),
             )
             .await?;
-        Ok((
-            data.projects
+        Ok(ConnectionPage {
+            nodes: data
+                .projects
                 .nodes
                 .into_iter()
                 .map(|project| convert_project(project, workspace_id))
                 .collect(),
-            data.projects.page_info.has_next_page,
-            data.projects.page_info.end_cursor,
-        ))
+            page_info: data.projects.page_info,
+        })
     }
 
     pub async fn fetch_project(&self, id: &str, workspace_id: &str) -> Result<db::Project> {
@@ -360,7 +460,276 @@ impl LinearClient {
         "#
         .replace("__PROJECT_FIELDS__", PROJECT_FIELDS);
         let data: SingleProjectData = self.query(&query, serde_json::json!({ "id": id })).await?;
-        Ok(convert_project(data.project, workspace_id))
+        let mut project = convert_project(data.project, workspace_id);
+        project.teams = self.fetch_all_project_teams(id).await?;
+        project.members = self.fetch_all_project_members(id).await?;
+        project.labels = self.fetch_all_project_labels(id).await?;
+        Ok(project)
+    }
+
+    async fn fetch_project_teams_page(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::ProjectTeam>> {
+        let query = r#"
+            query($id: String!, $first: Int!, $after: String) {
+                project(id: $id) {
+                    teams(first: $first, after: $after, orderBy: updatedAt) {
+                        nodes { id key name }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: ProjectTeamsData = self
+            .query_operation(
+                LinearOperation::ProjectTeams.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "id": project_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .project
+                .teams
+                .nodes
+                .into_iter()
+                .map(|team| db::ProjectTeam { id: team.id, key: team.key, name: team.name })
+                .collect(),
+            page_info: data.project.teams.page_info,
+        })
+    }
+
+    async fn fetch_project_members_page(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::ProjectMember>> {
+        let query = r#"
+            query($id: String!, $first: Int!, $after: String) {
+                project(id: $id) {
+                    members(first: $first, after: $after, orderBy: updatedAt) {
+                        nodes { id name }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: ProjectMembersData = self
+            .query_operation(
+                LinearOperation::ProjectMembers.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "id": project_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .project
+                .members
+                .nodes
+                .into_iter()
+                .map(|member| db::ProjectMember { id: member.id, name: member.name })
+                .collect(),
+            page_info: data.project.members.page_info,
+        })
+    }
+
+    async fn fetch_project_labels_page(
+        &self,
+        project_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::ProjectLabel>> {
+        let query = r#"
+            query($id: String!, $first: Int!, $after: String) {
+                project(id: $id) {
+                    labels(first: $first, after: $after, orderBy: updatedAt) {
+                        nodes { id name color description }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: ProjectLabelsData = self
+            .query_operation(
+                LinearOperation::ProjectLabels.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "id": project_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .project
+                .labels
+                .nodes
+                .into_iter()
+                .map(|label| db::ProjectLabel {
+                    id: label.id,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description,
+                })
+                .collect(),
+            page_info: data.project.labels.page_info,
+        })
+    }
+
+    async fn fetch_all_project_teams(&self, project_id: &str) -> Result<Vec<db::ProjectTeam>> {
+        let mut teams = Vec::new();
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectTeams,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_teams_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                teams.extend(nodes);
+                ready(Ok(()))
+            },
+            |team| team.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(teams)
+    }
+
+    async fn fetch_all_project_members(&self, project_id: &str) -> Result<Vec<db::ProjectMember>> {
+        let mut members = Vec::new();
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectMembers,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_members_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                members.extend(nodes);
+                ready(Ok(()))
+            },
+            |member| member.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(members)
+    }
+
+    async fn fetch_all_project_labels(&self, project_id: &str) -> Result<Vec<db::ProjectLabel>> {
+        let mut labels = Vec::new();
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectLabels,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_labels_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                labels.extend(nodes);
+                ready(Ok(()))
+            },
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        Ok(labels)
+    }
+
+    async fn sync_project_connections(
+        &self,
+        db: &Database,
+        project_id: &str,
+        sync_token: &str,
+    ) -> Result<()> {
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectTeams,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_teams_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |teams, _| ready(db.upsert_project_team_page(project_id, &teams, sync_token)),
+            |team| team.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.complete_project_team_sync(project_id, sync_token)?;
+
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectMembers,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_members_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |members, _| ready(db.upsert_project_member_page(project_id, &members, sync_token)),
+            |member| member.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.complete_project_member_sync(project_id, sync_token)?;
+
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectLabels,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_project_labels_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |labels, _| ready(db.upsert_project_label_page(project_id, &labels, sync_token)),
+            |label| label.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.complete_project_label_sync(project_id, sync_token)?;
+        Ok(())
     }
 
     pub async fn fetch_project_milestones(
@@ -426,11 +795,36 @@ impl LinearClient {
         include_archived: bool,
         workspace_id: &str,
     ) -> Result<(Vec<db::ProjectMilestone>, bool, Option<String>)> {
+        let page = self
+            .fetch_milestones_for_project_page(
+                project_id,
+                after_cursor,
+                include_archived,
+                workspace_id,
+                self.sync_query_config()
+                    .page_size(LinearOperation::ProjectMilestones),
+            )
+            .await?;
+        Ok((
+            page.nodes,
+            page.page_info.has_next_page,
+            page.page_info.end_cursor,
+        ))
+    }
+
+    async fn fetch_milestones_for_project_page(
+        &self,
+        project_id: &str,
+        after_cursor: Option<&str>,
+        include_archived: bool,
+        workspace_id: &str,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::ProjectMilestone>> {
         let query = r#"
-            query($id: String!, $after: String, $includeArchived: Boolean!) {
+            query($id: String!, $first: Int!, $after: String, $includeArchived: Boolean!) {
                 project(id: $id) {
                     projectMilestones(
-                        first: __MILESTONE_PAGE_SIZE__,
+                        first: $first,
                         after: $after,
                         includeArchived: $includeArchived,
                         orderBy: updatedAt
@@ -441,65 +835,246 @@ impl LinearClient {
                 }
             }
         "#
-        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS)
-        .replace("__MILESTONE_PAGE_SIZE__", &MILESTONE_PAGE_SIZE.to_string());
+        .replace("__MILESTONE_FIELDS__", MILESTONE_FIELDS);
         let data: ProjectMilestonesData = self
-            .query(
+            .query_operation(
+                LinearOperation::ProjectMilestones.name(),
+                after_cursor,
                 &query,
                 serde_json::json!({
                     "id": project_id,
+                    "first": page_size,
                     "after": after_cursor,
                     "includeArchived": include_archived,
                 }),
             )
             .await?;
         let milestones = data.project.project_milestones;
-        Ok((
-            milestones
+        Ok(ConnectionPage {
+            nodes: milestones
                 .nodes
                 .into_iter()
                 .map(|milestone| convert_milestone(milestone, workspace_id))
                 .collect(),
-            milestones.page_info.has_next_page,
-            milestones.page_info.end_cursor,
-        ))
+            page_info: milestones.page_info,
+        })
     }
 
     pub async fn sync_projects(&self, db: &Database, workspace_id: &str) -> Result<(usize, usize)> {
-        let mut project_cursor = None;
-        let mut project_ids = Vec::new();
-        loop {
-            let (projects, has_next, next_cursor) = self
-                .fetch_projects(project_cursor.as_deref(), true, workspace_id)
-                .await?;
-            for project in projects {
-                project_ids.push(project.id.clone());
-                db.upsert_project(&project)?;
-            }
-            if !has_next {
-                break;
-            }
-            project_cursor = next_cursor;
-        }
-        db.delete_projects_for_workspace_not_in(workspace_id, &project_ids)?;
+        self.sync_projects_scoped(db, workspace_id, None, None, true)
+            .await
+    }
 
-        let mut milestone_cursor = None;
-        let mut milestone_ids = Vec::new();
-        loop {
-            let (milestones, has_next, next_cursor) = self
-                .fetch_project_milestones(milestone_cursor.as_deref(), true, workspace_id)
-                .await?;
-            for milestone in milestones {
-                milestone_ids.push(milestone.id.clone());
-                db.upsert_project_milestone(&milestone)?;
-            }
-            if !has_next {
-                break;
-            }
-            milestone_cursor = next_cursor;
+    pub async fn sync_projects_for_team(
+        &self,
+        db: &Database,
+        workspace_id: &str,
+        team_key: &str,
+        include_archived: bool,
+    ) -> Result<(usize, usize)> {
+        let team_id = self.get_team_id(team_key).await?;
+        self.sync_projects_scoped(
+            db,
+            workspace_id,
+            Some(&team_id),
+            Some(team_key),
+            include_archived,
+        )
+            .await
+    }
+
+    async fn sync_projects_scoped(
+        &self,
+        db: &Database,
+        workspace_id: &str,
+        team_id: Option<&str>,
+        team_key: Option<&str>,
+        include_archived: bool,
+    ) -> Result<(usize, usize)> {
+        let sync_token = Uuid::new_v4().to_string();
+        let scope = team_key.unwrap_or("*");
+        for (family, page_size) in [
+            (
+                "projects",
+                Some(self.sync_query_config().page_size(LinearOperation::Projects)),
+            ),
+            (
+                "project milestones",
+                Some(
+                    self.sync_query_config()
+                        .page_size(LinearOperation::ProjectMilestones),
+                ),
+            ),
+        ] {
+            db.mark_sync_family_running(
+                workspace_id,
+                scope,
+                family,
+                None,
+                page_size,
+                &sync_token,
+            )?;
         }
-        db.delete_milestones_for_workspace_not_in(workspace_id, &milestone_ids)?;
-        Ok((project_ids.len(), milestone_ids.len()))
+        let project_result = paginate(
+            self.sync_query_config(),
+            LinearOperation::Projects,
+            team_key.map(ToString::to_string),
+            |request| async move {
+                self.fetch_projects_page(
+                    request.cursor.as_deref(),
+                    include_archived,
+                    workspace_id,
+                    request.page_size,
+                    team_id,
+                )
+                .await
+            },
+            |projects, context| {
+                let result = (|| {
+                    for project in projects {
+                        db.upsert_project_metadata(&project)?;
+                        db.mark_project_sync_token(&project.id, &sync_token)?;
+                    }
+                    db.mark_sync_family_running(
+                        workspace_id,
+                        scope,
+                        "projects",
+                        context.cursor.as_deref(),
+                        Some(context.page_size),
+                        &sync_token,
+                    )
+                })();
+                ready(result)
+            },
+            |project| project.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await;
+        let project_stats = match project_result {
+            Ok(stats) => stats,
+            Err(error) => {
+                let message = Self::redacted_error_message(&error);
+                for family in ["projects", "project milestones"] {
+                    db.mark_sync_family_failed(
+                        workspace_id,
+                        scope,
+                        family,
+                        &sync_token,
+                        &message,
+                    )?;
+                }
+                return Err(error);
+            }
+        };
+
+        let mut milestone_total = 0;
+        let hydration_result: Result<()> = async {
+            let mut after_id = None;
+            loop {
+                let project_ids = db.list_project_ids_for_sync_token(
+                    workspace_id,
+                    &sync_token,
+                    after_id.as_deref(),
+                    100,
+                )?;
+                if project_ids.is_empty() {
+                    break;
+                }
+                for project_id in &project_ids {
+                    self.sync_project_connections(db, project_id, &sync_token)
+                        .await?;
+                    milestone_total += self
+                        .sync_project_milestones(
+                            db,
+                            workspace_id,
+                            project_id,
+                            &sync_token,
+                            include_archived,
+                        )
+                        .await?;
+                }
+                after_id = project_ids.last().cloned();
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = hydration_result {
+            let message = Self::redacted_error_message(&error);
+            for family in ["projects", "project milestones"] {
+                db.mark_sync_family_failed(
+                    workspace_id,
+                    scope,
+                    family,
+                    &sync_token,
+                    &message,
+                )?;
+            }
+            return Err(error);
+        }
+
+        if let Some(team_key) = team_key {
+            db.reconcile_team_projects(workspace_id, team_key, &sync_token)?;
+        } else {
+            db.reconcile_workspace_projects(workspace_id, &sync_token)?;
+        }
+        db.mark_sync_family_complete(
+            workspace_id,
+            scope,
+            "projects",
+            Some(self.sync_query_config().page_size(LinearOperation::Projects)),
+            &sync_token,
+        )?;
+        db.mark_sync_family_complete(
+            workspace_id,
+            scope,
+            "project milestones",
+            Some(
+                self.sync_query_config()
+                    .page_size(LinearOperation::ProjectMilestones),
+            ),
+            &sync_token,
+        )?;
+        Ok((project_stats.nodes, milestone_total))
+    }
+
+    async fn sync_project_milestones(
+        &self,
+        db: &Database,
+        workspace_id: &str,
+        project_id: &str,
+        sync_token: &str,
+        include_archived: bool,
+    ) -> Result<usize> {
+        let stats = paginate(
+            self.sync_query_config(),
+            LinearOperation::ProjectMilestones,
+            Some(project_id.to_string()),
+            |request| async move {
+                self.fetch_milestones_for_project_page(
+                    project_id,
+                    request.cursor.as_deref(),
+                    include_archived,
+                    workspace_id,
+                    request.page_size,
+                )
+                .await
+            },
+            |milestones, _| {
+                let result = (|| {
+                    for milestone in milestones {
+                        db.upsert_project_milestone(&milestone)?;
+                        db.mark_project_milestone_sync_token(&milestone.id, sync_token)?;
+                    }
+                    Ok(())
+                })();
+                ready(result)
+            },
+            |milestone| milestone.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        db.reconcile_project_milestones_by_token(project_id, sync_token)?;
+        Ok(stats.nodes)
     }
 
     pub async fn create_project(&self, input: &CreateProjectInput) -> Result<String> {
@@ -876,22 +1451,9 @@ impl LinearClient {
         workspace_id: &str,
         project_id: &str,
     ) -> Result<()> {
-        let mut cursor = None;
-        let mut milestone_ids = Vec::new();
-        loop {
-            let (milestones, has_next, next_cursor) = self
-                .fetch_milestones_for_project(project_id, cursor.as_deref(), true, workspace_id)
-                .await?;
-            for milestone in milestones {
-                milestone_ids.push(milestone.id.clone());
-                db.upsert_project_milestone(&milestone)?;
-            }
-            if !has_next {
-                break;
-            }
-            cursor = next_cursor;
-        }
-        db.delete_milestones_for_project_not_in(project_id, &milestone_ids)?;
+        let sync_token = Uuid::new_v4().to_string();
+        self.sync_project_milestones(db, workspace_id, project_id, &sync_token, true)
+            .await?;
         Ok(())
     }
 
@@ -902,30 +1464,39 @@ impl LinearClient {
         resource_id: &str,
         milestone: bool,
     ) -> Result<()> {
-        if let Err(error) = self.sync_labels_catalog(db, workspace_id).await {
-            eprintln!(
-                "warning: failed to sync label catalog for workspace '{}': {}",
-                workspace_id, error
-            );
-        }
-        let mut cursor = None;
-        let mut issue_ids = Vec::new();
-        loop {
-            let (issues, has_next, next_cursor) = self
-                .fetch_hierarchy_issues(resource_id, milestone, cursor.as_deref())
-                .await?;
-            for (mut issue, relations, label_ids) in issues {
-                issue.workspace_id = workspace_id.to_string();
-                issue_ids.push(issue.id.clone());
-                db.upsert_issue(&issue)?;
-                db.upsert_relations(&issue.id, &relations)?;
-                db.replace_issue_labels(&issue.id, &label_ids)?;
-            }
-            if !has_next {
-                break;
-            }
-            cursor = next_cursor;
-        }
+        self.sync_labels_catalog(db, workspace_id).await?;
+        let issue_ids = Arc::new(Mutex::new(Vec::new()));
+        paginate(
+            self.sync_query_config(),
+            LinearOperation::Issues,
+            Some(resource_id.to_string()),
+            |request| async move {
+                self.fetch_hierarchy_issues(
+                    resource_id,
+                    milestone,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |issues, _| {
+                let issue_ids = Arc::clone(&issue_ids);
+                async move {
+                    for (mut issue, _relations, _label_ids) in issues {
+                        issue.workspace_id = workspace_id.to_string();
+                        db.upsert_issue_preserving_labels(&issue)?;
+                        self.sync_issue_labels(db, &issue.id).await?;
+                        self.sync_issue_relations(db, &issue.id).await?;
+                        issue_ids.lock().unwrap().push(issue.id);
+                    }
+                    Ok(())
+                }
+            },
+            |(issue, _, _)| issue.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        let issue_ids = issue_ids.lock().unwrap().clone();
         if milestone {
             db.reconcile_project_milestone_issue_membership(workspace_id, resource_id, &issue_ids)?;
         } else {
@@ -939,11 +1510,8 @@ impl LinearClient {
         resource_id: &str,
         milestone: bool,
         after_cursor: Option<&str>,
-    ) -> Result<(
-        Vec<(db::Issue, Vec<db::Relation>, Vec<String>)>,
-        bool,
-        Option<String>,
-    )> {
+        page_size: usize,
+    ) -> Result<ConnectionPage<(db::Issue, Vec<db::Relation>, Vec<String>)>> {
         let query = if milestone {
             r#"
                 query($id: String!, $after: String) {
@@ -976,7 +1544,7 @@ impl LinearClient {
             "#
         }
         .replace("__ISSUE_FIELDS__", ISSUE_FIELDS)
-        .replace("__ISSUE_PAGE_SIZE__", &HIERARCHY_ISSUE_PAGE_SIZE.to_string());
+        .replace("__ISSUE_PAGE_SIZE__", &page_size.to_string());
         let variables = serde_json::json!({ "id": resource_id, "after": after_cursor });
         let connection = if milestone {
             let data: MilestoneIssuesData = self.query(&query, variables).await?;
@@ -985,15 +1553,14 @@ impl LinearClient {
             let data: ProjectIssuesData = self.query(&query, variables).await?;
             data.project.issues
         };
-        Ok((
-            connection
+        Ok(ConnectionPage {
+            nodes: connection
                 .nodes
                 .into_iter()
                 .map(Self::convert_linear_issue)
                 .collect(),
-            connection.page_info.has_next_page,
-            connection.page_info.end_cursor,
-        ))
+            page_info: connection.page_info,
+        })
     }
 }
 
