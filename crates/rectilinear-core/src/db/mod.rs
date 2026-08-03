@@ -1,10 +1,12 @@
-pub mod schema;
+mod hydration;
 mod projects;
+pub mod schema;
 mod sync;
+pub use hydration::*;
 pub use projects::*;
 pub use sync::*;
 #[cfg(test)]
-mod test_helpers;
+pub(crate) mod test_helpers;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -42,6 +44,16 @@ impl Database {
     fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         schema::run_migrations(&conn)?;
+        // A process may have exited while a resource was marked running. Make
+        // that durable work retryable on the next open instead of leaving it
+        // permanently wedged.
+        conn.execute(
+            "UPDATE issue_hydration_state
+             SET status='retryable', next_retry_at=datetime('now'),
+                 queue_reason='retry'
+             WHERE status='running'",
+            [],
+        )?;
         Ok(())
     }
 
@@ -171,7 +183,13 @@ impl Database {
                    name=excluded.name,
                    color=excluded.color,
                    parent_id=excluded.parent_id",
-                rusqlite::params![label.id, label.workspace_id, label.name, label.color, label.parent_id],
+                rusqlite::params![
+                    label.id,
+                    label.workspace_id,
+                    label.name,
+                    label.color,
+                    label.parent_id
+                ],
             )?;
             Ok(())
         })
@@ -298,7 +316,8 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT label_id FROM issue_labels WHERE issue_id = ?1 ORDER BY label_id",
             )?;
-            let rows = stmt.query_map(rusqlite::params![issue_id], |row| row.get::<_, String>(0))?;
+            let rows =
+                stmt.query_map(rusqlite::params![issue_id], |row| row.get::<_, String>(0))?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
@@ -316,21 +335,22 @@ impl Database {
     fn upsert_issue_with_label_policy(&self, issue: &Issue, preserve_labels: bool) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
-                   labels_json=CASE WHEN ?23 THEN issues.labels_json ELSE excluded.labels_json END,
+                   labels_json=CASE WHEN ?24 THEN issues.labels_json ELSE excluded.labels_json END,
                    updated_at=excluded.updated_at,
-                   content_hash=CASE WHEN ?23 THEN issues.content_hash ELSE excluded.content_hash END,
+                   content_hash=CASE WHEN ?24 THEN issues.content_hash ELSE excluded.content_hash END,
                    url=excluded.url, branch_name=excluded.branch_name,
                    workspace_id=excluded.workspace_id, project_id=excluded.project_id,
                    project_milestone_id=excluded.project_milestone_id,
                    project_milestone_name=excluded.project_milestone_name,
                    cycle_id=excluded.cycle_id,
                    cycle_name=excluded.cycle_name,
+                   archived_at=excluded.archived_at,
                    synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
@@ -339,6 +359,7 @@ impl Database {
                     issue.content_hash, issue.url, issue.branch_name, issue.workspace_id,
                     issue.project_id, issue.project_milestone_id, issue.project_milestone_name,
                     issue.cycle_id, issue.cycle_name,
+                    issue.archived_at,
                     preserve_labels,
                 ],
             )?;
@@ -349,7 +370,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -384,8 +405,10 @@ impl Database {
                 HAVING COUNT(DISTINCT label_id) = {n}\
              )"
         );
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> =
-            label_ids.iter().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::types::ToSql>).collect();
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = label_ids
+            .iter()
+            .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
         (sql, params)
     }
 
@@ -1073,9 +1096,18 @@ impl Database {
     // --- Sync state ---
 
     pub fn get_sync_cursor(&self, workspace_id: &str, team_key: &str) -> Result<Option<String>> {
+        self.get_synced_through_at(workspace_id, team_key)
+    }
+
+    pub fn get_synced_through_at(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+    ) -> Result<Option<String>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT last_updated_at FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2",
+                "SELECT COALESCE(synced_through_at, last_updated_at)
+                 FROM sync_state WHERE workspace_id = ?1 AND team_key = ?2",
             )?;
             let mut rows = stmt.query(rusqlite::params![workspace_id, team_key])?;
             if let Some(row) = rows.next()? {
@@ -1094,9 +1126,15 @@ impl Database {
     ) -> Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO sync_state (workspace_id, team_key, last_updated_at, full_sync_done, last_synced_at)
-                 VALUES (?1, ?2, ?3, 1, datetime('now'))
-                 ON CONFLICT(workspace_id, team_key) DO UPDATE SET last_updated_at=excluded.last_updated_at, full_sync_done=1, last_synced_at=datetime('now')",
+                "INSERT INTO sync_state (
+                    workspace_id, team_key, last_updated_at, synced_through_at,
+                    full_sync_done, last_synced_at
+                 ) VALUES (?1, ?2, ?3, ?3, 1, datetime('now'))
+                 ON CONFLICT(workspace_id, team_key) DO UPDATE SET
+                    last_updated_at=excluded.last_updated_at,
+                    synced_through_at=excluded.synced_through_at,
+                    full_sync_done=1,
+                    last_synced_at=datetime('now')",
                 rusqlite::params![workspace_id, team_key, last_updated_at],
             )?;
             Ok(())
@@ -1275,6 +1313,7 @@ pub struct Issue {
     pub project_milestone_name: Option<String>,
     pub cycle_id: Option<String>,
     pub cycle_name: Option<String>,
+    pub archived_at: Option<String>,
 }
 
 impl Issue {
@@ -1303,6 +1342,7 @@ impl Issue {
             project_milestone_name: row.get(20).unwrap_or(None),
             cycle_id: row.get(21).unwrap_or(None),
             cycle_name: row.get(22).unwrap_or(None),
+            archived_at: row.get(23).unwrap_or(None),
         })
     }
 
@@ -1433,8 +1473,8 @@ pub struct Label {
 
 #[cfg(test)]
 mod tests {
-    use super::Comment;
     use super::test_helpers::*;
+    use super::Comment;
 
     #[test]
     fn count_embedded_issues_empty_db() {
@@ -1481,7 +1521,10 @@ mod tests {
         let comments = db.get_comments(&issue.id).unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].parent_id.as_deref(), Some("parent-1"));
-        assert_eq!(comments[0].updated_at.as_deref(), Some("2026-01-03T01:00:00Z"));
+        assert_eq!(
+            comments[0].updated_at.as_deref(),
+            Some("2026-01-03T01:00:00Z")
+        );
         assert_eq!(
             comments[0].url.as_deref(),
             Some("https://linear.app/comment/comment-1")
@@ -1498,7 +1541,8 @@ mod tests {
         let issue = make_issue("TST-1", "TST");
         db.upsert_issue(&issue).unwrap();
 
-        db.replace_issue_comments(&issue.id, "default", &[]).unwrap();
+        db.replace_issue_comments(&issue.id, "default", &[])
+            .unwrap();
         db.mark_comments_synced(&issue.id, "default", 0).unwrap();
 
         assert!(db.get_comments(&issue.id).unwrap().is_empty());
@@ -1936,9 +1980,11 @@ mod tests {
         conn.execute("DROP TABLE project_labels", []).unwrap();
 
         let version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |row| row.get(0))
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
 
         crate::db::schema::run_migrations(&conn).unwrap();
 
@@ -1954,7 +2000,7 @@ mod tests {
 
     #[test]
     fn upsert_label_inserts_and_renames_in_place() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
 
         let mut l = make_label("lbl_1", "Vanta", "default");
@@ -1975,17 +2021,25 @@ mod tests {
 
     #[test]
     fn list_labels_is_workspace_scoped_and_sorted() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
         db.upsert_workspace("work", None, None).unwrap();
 
-        db.upsert_label(&make_label("a", "Zebra", "default")).unwrap();
-        db.upsert_label(&make_label("b", "Apple", "default")).unwrap();
-        db.upsert_label(&make_label("c", "OnlyInWork", "work")).unwrap();
+        db.upsert_label(&make_label("a", "Zebra", "default"))
+            .unwrap();
+        db.upsert_label(&make_label("b", "Apple", "default"))
+            .unwrap();
+        db.upsert_label(&make_label("c", "OnlyInWork", "work"))
+            .unwrap();
 
         let default_labels = db.list_labels("default").unwrap();
-        assert_eq!(default_labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
-                   vec!["Apple", "Zebra"]);
+        assert_eq!(
+            default_labels
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Apple", "Zebra"]
+        );
         let work_labels = db.list_labels("work").unwrap();
         assert_eq!(work_labels.len(), 1);
         assert_eq!(work_labels[0].name, "OnlyInWork");
@@ -1993,13 +2047,17 @@ mod tests {
 
     #[test]
     fn delete_labels_for_workspace_not_in_removes_orphans() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
 
-        db.upsert_label(&make_label("keep", "Keep", "default")).unwrap();
-        db.upsert_label(&make_label("drop", "Drop", "default")).unwrap();
+        db.upsert_label(&make_label("keep", "Keep", "default"))
+            .unwrap();
+        db.upsert_label(&make_label("drop", "Drop", "default"))
+            .unwrap();
 
-        let kept = db.delete_labels_for_workspace_not_in("default", &["keep".to_string()]).unwrap();
+        let kept = db
+            .delete_labels_for_workspace_not_in("default", &["keep".to_string()])
+            .unwrap();
         assert_eq!(kept, 1, "should report 1 deleted");
 
         let listed = db.list_labels("default").unwrap();
@@ -2009,70 +2067,94 @@ mod tests {
 
     #[test]
     fn replace_issue_labels_overwrites_existing() {
-        use super::test_helpers::{test_db, make_issue, make_label};
+        use super::test_helpers::{make_issue, make_label, test_db};
         let (db, _dir) = test_db();
 
         let issue = make_issue("ENG-1", "ENG");
         db.upsert_issue(&issue).unwrap();
-        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default"))
+            .unwrap();
         db.upsert_label(&make_label("l2", "UI", "default")).unwrap();
-        db.upsert_label(&make_label("l3", "Backend", "default")).unwrap();
+        db.upsert_label(&make_label("l3", "Backend", "default"))
+            .unwrap();
 
-        db.replace_issue_labels(&issue.id, &["l1".to_string(), "l2".to_string()]).unwrap();
+        db.replace_issue_labels(&issue.id, &["l1".to_string(), "l2".to_string()])
+            .unwrap();
         let labels = db.get_issue_label_ids(&issue.id).unwrap();
         assert_eq!(labels, vec!["l1".to_string(), "l2".to_string()]);
 
         // Replace overwrites
-        db.replace_issue_labels(&issue.id, &["l3".to_string()]).unwrap();
+        db.replace_issue_labels(&issue.id, &["l3".to_string()])
+            .unwrap();
         let labels = db.get_issue_label_ids(&issue.id).unwrap();
         assert_eq!(labels, vec!["l3".to_string()]);
     }
 
     #[test]
     fn deleting_issue_cascades_to_issue_labels() {
-        use super::test_helpers::{test_db, make_issue, make_label};
+        use super::test_helpers::{make_issue, make_label, test_db};
         let (db, _dir) = test_db();
 
         let issue = make_issue("ENG-2", "ENG");
         db.upsert_issue(&issue).unwrap();
-        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
-        db.replace_issue_labels(&issue.id, &["l1".to_string()]).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default"))
+            .unwrap();
+        db.replace_issue_labels(&issue.id, &["l1".to_string()])
+            .unwrap();
 
         db.with_conn(|conn| {
-            conn.execute("DELETE FROM issues WHERE id = ?1", rusqlite::params![&issue.id])?;
+            conn.execute(
+                "DELETE FROM issues WHERE id = ?1",
+                rusqlite::params![&issue.id],
+            )?;
             let n: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM issue_labels WHERE issue_id = ?1",
-                rusqlite::params![&issue.id], |r| r.get(0))?;
+                rusqlite::params![&issue.id],
+                |r| r.get(0),
+            )?;
             assert_eq!(n, 0);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn deleting_label_cascades_to_issue_labels() {
-        use super::test_helpers::{test_db, make_issue, make_label};
+        use super::test_helpers::{make_issue, make_label, test_db};
         let (db, _dir) = test_db();
 
         let issue = make_issue("ENG-3", "ENG");
         db.upsert_issue(&issue).unwrap();
-        db.upsert_label(&make_label("l1", "Bug", "default")).unwrap();
-        db.replace_issue_labels(&issue.id, &["l1".to_string()]).unwrap();
+        db.upsert_label(&make_label("l1", "Bug", "default"))
+            .unwrap();
+        db.replace_issue_labels(&issue.id, &["l1".to_string()])
+            .unwrap();
 
-        db.delete_labels_for_workspace_not_in("default", &[]).unwrap();
+        db.delete_labels_for_workspace_not_in("default", &[])
+            .unwrap();
         let labels = db.get_issue_label_ids(&issue.id).unwrap();
         assert!(labels.is_empty());
     }
 
     #[test]
     fn resolve_label_ids_local_matches_case_insensitive_and_returns_unknowns() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
 
-        db.upsert_label(&make_label("l1", "Vanta", "default")).unwrap();
-        db.upsert_label(&make_label("l2", "Security", "default")).unwrap();
+        db.upsert_label(&make_label("l1", "Vanta", "default"))
+            .unwrap();
+        db.upsert_label(&make_label("l2", "Security", "default"))
+            .unwrap();
 
         let (resolved, unknown) = db
-            .resolve_label_ids_local("default", &["vanta".to_string(), "secURity".to_string(), "missing".to_string()])
+            .resolve_label_ids_local(
+                "default",
+                &[
+                    "vanta".to_string(),
+                    "secURity".to_string(),
+                    "missing".to_string(),
+                ],
+            )
             .unwrap();
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains(&"l1".to_string()));
@@ -2082,62 +2164,83 @@ mod tests {
 
     #[test]
     fn resolve_label_ids_local_is_workspace_scoped() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
         db.upsert_workspace("work", None, None).unwrap();
 
-        db.upsert_label(&make_label("l1", "Vanta", "default")).unwrap();
+        db.upsert_label(&make_label("l1", "Vanta", "default"))
+            .unwrap();
         db.upsert_label(&make_label("l2", "Vanta", "work")).unwrap();
 
-        let (resolved, _) = db.resolve_label_ids_local("work", &["vanta".to_string()]).unwrap();
+        let (resolved, _) = db
+            .resolve_label_ids_local("work", &["vanta".to_string()])
+            .unwrap();
         assert_eq!(resolved, vec!["l2".to_string()]);
     }
 
     #[test]
     fn get_unprioritized_issues_filters_by_labels_with_and_semantics() {
-        use super::test_helpers::{test_db, make_issue, make_label};
+        use super::test_helpers::{make_issue, make_label, test_db};
         let (db, _dir) = test_db();
 
-        let mut a = make_issue("ENG-10", "ENG"); a.priority = 0;
-        let mut b = make_issue("ENG-11", "ENG"); b.priority = 0;
-        let mut c = make_issue("ENG-12", "ENG"); c.priority = 0;
+        let mut a = make_issue("ENG-10", "ENG");
+        a.priority = 0;
+        let mut b = make_issue("ENG-11", "ENG");
+        b.priority = 0;
+        let mut c = make_issue("ENG-12", "ENG");
+        c.priority = 0;
         db.upsert_issue(&a).unwrap();
         db.upsert_issue(&b).unwrap();
         db.upsert_issue(&c).unwrap();
 
-        db.upsert_label(&make_label("vanta", "Vanta", "default")).unwrap();
-        db.upsert_label(&make_label("sec",   "Security", "default")).unwrap();
+        db.upsert_label(&make_label("vanta", "Vanta", "default"))
+            .unwrap();
+        db.upsert_label(&make_label("sec", "Security", "default"))
+            .unwrap();
 
-        db.replace_issue_labels(&a.id, &["vanta".to_string(), "sec".to_string()]).unwrap();
-        db.replace_issue_labels(&b.id, &["vanta".to_string()]).unwrap();
-        db.replace_issue_labels(&c.id, &["sec".to_string()]).unwrap();
+        db.replace_issue_labels(&a.id, &["vanta".to_string(), "sec".to_string()])
+            .unwrap();
+        db.replace_issue_labels(&b.id, &["vanta".to_string()])
+            .unwrap();
+        db.replace_issue_labels(&c.id, &["sec".to_string()])
+            .unwrap();
 
         // Filter by both labels (AND) → only `a`
-        let result = db.get_unprioritized_issues_filtered(
-            Some("ENG"), false, "default",
-            Some(&["vanta".to_string(), "sec".to_string()]),
-        ).unwrap();
+        let result = db
+            .get_unprioritized_issues_filtered(
+                Some("ENG"),
+                false,
+                "default",
+                Some(&["vanta".to_string(), "sec".to_string()]),
+            )
+            .unwrap();
         let idents: Vec<_> = result.iter().map(|i| i.identifier.as_str()).collect();
         assert_eq!(idents, vec!["ENG-10"]);
 
         // Filter by single label → `a` and `b`
-        let result = db.get_unprioritized_issues_filtered(
-            Some("ENG"), false, "default",
-            Some(&["vanta".to_string()]),
-        ).unwrap();
+        let result = db
+            .get_unprioritized_issues_filtered(
+                Some("ENG"),
+                false,
+                "default",
+                Some(&["vanta".to_string()]),
+            )
+            .unwrap();
         let idents: Vec<_> = result.iter().map(|i| i.identifier.as_str()).collect();
         assert!(idents.contains(&"ENG-10"));
         assert!(idents.contains(&"ENG-11"));
         assert!(!idents.contains(&"ENG-12"));
 
         // No filter → all three
-        let result = db.get_unprioritized_issues_filtered(Some("ENG"), false, "default", None).unwrap();
+        let result = db
+            .get_unprioritized_issues_filtered(Some("ENG"), false, "default", None)
+            .unwrap();
         assert_eq!(result.len(), 3);
     }
 
     #[test]
     fn fts_search_with_label_filter_intersects() {
-        use super::test_helpers::{test_db, make_issue, make_label};
+        use super::test_helpers::{make_issue, make_label, test_db};
         let (db, _dir) = test_db();
 
         let mut a = make_issue("ENG-20", "ENG");
@@ -2147,22 +2250,28 @@ mod tests {
         db.upsert_issue(&a).unwrap();
         db.upsert_issue(&b).unwrap();
 
-        db.upsert_label(&make_label("vanta", "Vanta", "default")).unwrap();
-        db.replace_issue_labels(&a.id, &["vanta".to_string()]).unwrap();
+        db.upsert_label(&make_label("vanta", "Vanta", "default"))
+            .unwrap();
+        db.replace_issue_labels(&a.id, &["vanta".to_string()])
+            .unwrap();
 
         // Without filter, both match "audit"
-        let r = db.fts_search_filtered("\"audit\"", 10, "default", None).unwrap();
+        let r = db
+            .fts_search_filtered("\"audit\"", 10, "default", None)
+            .unwrap();
         assert_eq!(r.len(), 2);
 
         // With Vanta filter, only `a`
-        let r = db.fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()])).unwrap();
+        let r = db
+            .fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()]))
+            .unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].identifier, "ENG-20");
     }
 
     #[test]
     fn delete_workspace_cleans_up_labels() {
-        use super::test_helpers::{test_db, make_label};
+        use super::test_helpers::{make_label, test_db};
         let (db, _dir) = test_db();
         db.upsert_workspace("doomed", None, None).unwrap();
         db.upsert_label(&make_label("l1", "Lab", "doomed")).unwrap();

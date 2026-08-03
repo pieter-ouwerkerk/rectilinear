@@ -217,15 +217,15 @@ fn extract_code_hints(title: &str, description: &str, labels: &[String]) -> Vec<
 /// Suggest up to 3 label names from the local catalog matching any unknown name as a substring.
 /// Returns an empty vec if catalog can't be read or no candidates match.
 fn suggest_label_names(db: &Database, workspace: &str, unknown: &[String]) -> Vec<String> {
-    let Ok(catalog) = db.list_labels(workspace) else { return Vec::new() };
+    let Ok(catalog) = db.list_labels(workspace) else {
+        return Vec::new();
+    };
     let mut hits: Vec<String> = Vec::new();
     for u in unknown {
         let needle = u.to_lowercase();
         for label in &catalog {
             let hay = label.name.to_lowercase();
-            if (hay.contains(&needle) || needle.contains(&hay))
-                && !hits.contains(&label.name)
-            {
+            if (hay.contains(&needle) || needle.contains(&hay)) && !hits.contains(&label.name) {
                 hits.push(label.name.clone());
                 if hits.len() >= 3 {
                     return hits;
@@ -660,24 +660,26 @@ impl RectilinearMcp {
         name = "list_labels",
         description = "List all labels in the workspace, grouped by parent. Pure local read — no Linear API call. If empty, run sync_team to refresh the catalog."
     )]
-    async fn list_labels(
-        &self,
-        #[tool(aggr)] args: ListLabelsArgs,
-    ) -> Result<String, String> {
+    async fn list_labels(&self, #[tool(aggr)] args: ListLabelsArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let labels = self.db.list_labels(&workspace).map_err(|e| e.to_string())?;
 
         // Index by id for parent name lookup.
-        let by_id: std::collections::HashMap<&str, &str> =
-            labels.iter().map(|l| (l.id.as_str(), l.name.as_str())).collect();
+        let by_id: std::collections::HashMap<&str, &str> = labels
+            .iter()
+            .map(|l| (l.id.as_str(), l.name.as_str()))
+            .collect();
 
         // Group: top-level (no parent) and grouped-by-parent.
         let mut top_level: Vec<&_> = labels.iter().filter(|l| l.parent_id.is_none()).collect();
         top_level.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-        let mut groups: std::collections::BTreeMap<String, Vec<&_>> = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<String, Vec<&_>> =
+            std::collections::BTreeMap::new();
         for l in labels.iter().filter(|l| l.parent_id.is_some()) {
-            let parent_name = l.parent_id.as_deref()
+            let parent_name = l
+                .parent_id
+                .as_deref()
                 .and_then(|pid| by_id.get(pid).copied())
                 .unwrap_or("(unknown group)")
                 .to_string();
@@ -713,10 +715,7 @@ impl RectilinearMcp {
         name = "list_projects",
         description = "List Linear projects with their status, dates, lead, teams, members, labels, progress, and other metadata. Refreshes the local project/milestone mirror by default."
     )]
-    async fn list_projects(
-        &self,
-        #[tool(aggr)] args: ListProjectsArgs,
-    ) -> Result<String, String> {
+    async fn list_projects(&self, #[tool(aggr)] args: ListProjectsArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         if args.refresh.unwrap_or(true) {
             let client = self.client_for_workspace(&workspace)?;
@@ -741,10 +740,7 @@ impl RectilinearMcp {
         name = "get_project",
         description = "Get a Linear project and its milestones. Set include_issues=true to refresh and return the complete importable project bundle with every linked issue."
     )]
-    async fn get_project(
-        &self,
-        #[tool(aggr)] args: GetProjectArgs,
-    ) -> Result<String, String> {
+    async fn get_project(&self, #[tool(aggr)] args: GetProjectArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let client = self.client_for_workspace(&workspace)?;
         if args.include_issues.unwrap_or(false) {
@@ -794,7 +790,9 @@ impl RectilinearMcp {
         };
         let lead_id = match args.lead.as_deref() {
             Some(lead) if lead.eq_ignore_ascii_case("none") => {
-                return Err("Cannot clear a lead while creating a project; omit lead instead.".into())
+                return Err(
+                    "Cannot clear a lead while creating a project; omit lead instead.".into(),
+                )
             }
             Some(lead) => Some(
                 client
@@ -860,14 +858,18 @@ impl RectilinearMcp {
     ) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let client = self.client_for_workspace(&workspace)?;
-        let project_id = self.resolve_project_id(&client, &workspace, &args.id).await?;
+        let project_id = self
+            .resolve_project_id(&client, &workspace, &args.id)
+            .await?;
         let team_ids = match args.teams.as_deref() {
             Some(teams) => Some(self.resolve_team_ids(&client, teams).await?),
             None => None,
         };
         let status_id = match args.status.as_deref() {
             Some(status) if status.eq_ignore_ascii_case("none") => {
-                return Err("A project must have a status; choose a status instead of 'none'.".into())
+                return Err(
+                    "A project must have a status; choose a status instead of 'none'.".into(),
+                )
             }
             Some(status) => Some(
                 client
@@ -942,7 +944,9 @@ impl RectilinearMcp {
     ) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let client = self.client_for_workspace(&workspace)?;
-        let project_id = self.resolve_project_id(&client, &workspace, &args.id).await?;
+        let project_id = self
+            .resolve_project_id(&client, &workspace, &args.id)
+            .await?;
         client
             .delete_project(&project_id)
             .await
@@ -1024,12 +1028,7 @@ impl RectilinearMcp {
         };
         if args.include_issues.unwrap_or(false) {
             let bundle = client
-                .import_project_milestone(
-                    &self.db,
-                    &workspace,
-                    project_id.as_deref(),
-                    &args.id,
-                )
+                .import_project_milestone(&self.db, &workspace, project_id.as_deref(), &args.id)
                 .await
                 .map_err(|error| error.to_string())?;
             return serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string());
@@ -1104,12 +1103,7 @@ impl RectilinearMcp {
             None => None,
         };
         let milestone_id = self
-            .resolve_milestone_id(
-                &client,
-                &workspace,
-                project_id.as_deref(),
-                &args.id,
-            )
+            .resolve_milestone_id(&client, &workspace, project_id.as_deref(), &args.id)
             .await?;
         let input = crate::linear::UpdateProjectMilestoneInput {
             project_id,
@@ -1154,12 +1148,7 @@ impl RectilinearMcp {
             None => None,
         };
         let milestone_id = self
-            .resolve_milestone_id(
-                &client,
-                &workspace,
-                project_id.as_deref(),
-                &args.id,
-            )
+            .resolve_milestone_id(&client, &workspace, project_id.as_deref(), &args.id)
             .await?;
         client
             .delete_project_milestone(&milestone_id)
@@ -1193,12 +1182,7 @@ impl RectilinearMcp {
             None => None,
         };
         let bundle = client
-            .import_project_milestone(
-                &self.db,
-                &workspace,
-                project_id.as_deref(),
-                &args.id,
-            )
+            .import_project_milestone(&self.db, &workspace, project_id.as_deref(), &args.id)
             .await
             .map_err(|error| error.to_string())?;
         serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())
@@ -1226,12 +1210,17 @@ impl RectilinearMcp {
         };
 
         let label_ids = if let Some(ref names) = args.labels {
-            let (resolved, unknown) = self.db
+            let (resolved, unknown) = self
+                .db
                 .resolve_label_ids_local(&workspace, names)
                 .map_err(|e| e.to_string())?;
             if !unknown.is_empty() {
                 if resolved.is_empty()
-                    && self.db.list_labels(&workspace).map_err(|e| e.to_string())?.is_empty()
+                    && self
+                        .db
+                        .list_labels(&workspace)
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
                 {
                     return Err(format!(
                         "No labels synced yet for workspace '{}'. Run sync_team first.",
@@ -1242,9 +1231,16 @@ impl RectilinearMcp {
                 return Err(format!(
                     "Label{} {} not found. {}Run list_labels for the full set.",
                     if unknown.len() == 1 { "" } else { "s" },
-                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
-                    if suggestions.is_empty() { String::new() }
-                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                    unknown
+                        .iter()
+                        .map(|s| format!("'{}'", s))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if suggestions.is_empty() {
+                        String::new()
+                    } else {
+                        format!("Did you mean: {}? ", suggestions.join(", "))
+                    }
                 ));
             }
             Some(resolved)
@@ -1395,7 +1391,8 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let label_ids: Vec<String> = if let Some(ref names) = args.labels {
-            self.resolve_labels_for_mutation(&workspace, &client, names).await?
+            self.resolve_labels_for_mutation(&workspace, &client, names)
+                .await?
         } else {
             Vec::new()
         };
@@ -1403,9 +1400,17 @@ IMPORTANT — Before calling this tool, you MUST:
         // Resolve assignee.
         let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
             if a.eq_ignore_ascii_case("none") {
-                return Err("Cannot use 'none' on create_issue; omit the parameter to leave unassigned.".to_string());
+                return Err(
+                    "Cannot use 'none' on create_issue; omit the parameter to leave unassigned."
+                        .to_string(),
+                );
             }
-            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .resolve_assignee_id(a)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
@@ -1417,12 +1422,7 @@ IMPORTANT — Before calling this tool, you MUST:
         let project_milestone_id = match args.project_milestone.as_deref() {
             Some(value) => {
                 let milestone_id = self
-                    .resolve_milestone_id(
-                        &client,
-                        &workspace,
-                        project_id.as_deref(),
-                        value,
-                    )
+                    .resolve_milestone_id(&client, &workspace, project_id.as_deref(), value)
                     .await?;
                 let milestone = client
                     .fetch_project_milestone(&milestone_id, &workspace)
@@ -1498,7 +1498,10 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(self.resolve_labels_for_mutation(&workspace, &client, label_names).await?)
+            Some(
+                self.resolve_labels_for_mutation(&workspace, &client, label_names)
+                    .await?,
+            )
         } else {
             None
         };
@@ -1523,7 +1526,9 @@ IMPORTANT — Before calling this tool, you MUST:
                 Some(String::new())
             } else {
                 if project_id.as_deref() == Some("") {
-                    return Err("Cannot assign a milestone while removing the issue's project.".into());
+                    return Err(
+                        "Cannot assign a milestone while removing the issue's project.".into(),
+                    );
                 }
                 let owning_project_id = project_id
                     .as_deref()
@@ -1537,7 +1542,9 @@ IMPORTANT — Before calling this tool, you MUST:
                     .fetch_project_milestone(&milestone_id, &workspace)
                     .await
                     .map_err(|e| e.to_string())?;
-                if project_id.is_none() && issue.project_id.as_deref() != Some(&milestone.project_id) {
+                if project_id.is_none()
+                    && issue.project_id.as_deref() != Some(&milestone.project_id)
+                {
                     project_id = Some(milestone.project_id);
                 }
                 Some(milestone_id)
@@ -1547,7 +1554,12 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
-            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .resolve_assignee_id(a)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
@@ -1681,7 +1693,14 @@ IMPORTANT — Before calling this tool, you MUST:
         let include_archived = args.include_archived.unwrap_or(full);
 
         let count = client
-            .sync_team(&self.db, &args.team, &workspace, full, include_archived, None)
+            .sync_team(
+                &self.db,
+                &args.team,
+                &workspace,
+                full,
+                include_archived,
+                None,
+            )
             .await
             .map_err(|e| e.to_string())?;
 
@@ -1776,12 +1795,17 @@ IMPORTANT — Before calling this tool, you MUST:
         }
 
         let label_ids = if let Some(ref names) = args.labels {
-            let (resolved, unknown) = self.db
+            let (resolved, unknown) = self
+                .db
                 .resolve_label_ids_local(&workspace, names)
                 .map_err(|e| e.to_string())?;
             if !unknown.is_empty() {
                 if resolved.is_empty()
-                    && self.db.list_labels(&workspace).map_err(|e| e.to_string())?.is_empty()
+                    && self
+                        .db
+                        .list_labels(&workspace)
+                        .map_err(|e| e.to_string())?
+                        .is_empty()
                 {
                     return Err(format!(
                         "No labels synced yet for workspace '{}'. Run sync_team first.",
@@ -1792,9 +1816,16 @@ IMPORTANT — Before calling this tool, you MUST:
                 return Err(format!(
                     "Label{} {} not found. {}Run list_labels for the full set.",
                     if unknown.len() == 1 { "" } else { "s" },
-                    unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
-                    if suggestions.is_empty() { String::new() }
-                    else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                    unknown
+                        .iter()
+                        .map(|s| format!("'{}'", s))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if suggestions.is_empty() {
+                        String::new()
+                    } else {
+                        format!("Did you mean: {}? ", suggestions.join(", "))
+                    }
                 ));
             }
             Some(resolved)
@@ -2021,7 +2052,10 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let label_ids = if let Some(ref label_names) = args.labels {
-            Some(self.resolve_labels_for_mutation(&workspace, &client, label_names).await?)
+            Some(
+                self.resolve_labels_for_mutation(&workspace, &client, label_names)
+                    .await?,
+            )
         } else {
             None
         };
@@ -2046,7 +2080,9 @@ IMPORTANT — Before calling this tool, you MUST:
                 Some(String::new())
             } else {
                 if project_id.as_deref() == Some("") {
-                    return Err("Cannot assign a milestone while removing the issue's project.".into());
+                    return Err(
+                        "Cannot assign a milestone while removing the issue's project.".into(),
+                    );
                 }
                 let owning_project_id = project_id
                     .as_deref()
@@ -2060,7 +2096,9 @@ IMPORTANT — Before calling this tool, you MUST:
                     .fetch_project_milestone(&milestone_id, &workspace)
                     .await
                     .map_err(|e| e.to_string())?;
-                if project_id.is_none() && issue.project_id.as_deref() != Some(&milestone.project_id) {
+                if project_id.is_none()
+                    && issue.project_id.as_deref() != Some(&milestone.project_id)
+                {
                     project_id = Some(milestone.project_id);
                 }
                 Some(milestone_id)
@@ -2070,7 +2108,12 @@ IMPORTANT — Before calling this tool, you MUST:
         };
 
         let assignee_id: Option<String> = if let Some(ref a) = args.assignee {
-            Some(client.resolve_assignee_id(a).await.map_err(|e| e.to_string())?)
+            Some(
+                client
+                    .resolve_assignee_id(a)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
@@ -2294,7 +2337,10 @@ impl RectilinearMcp {
         if values.is_empty() {
             return Err("At least one team is required.".into());
         }
-        let teams = client.list_teams().await.map_err(|error| error.to_string())?;
+        let teams = client
+            .list_teams()
+            .await
+            .map_err(|error| error.to_string())?;
         let mut ids = Vec::new();
         for value in values {
             let team = teams
@@ -2435,7 +2481,8 @@ impl RectilinearMcp {
         client: &LinearClient,
         names: &[String],
     ) -> Result<Vec<String>, String> {
-        let catalog_size = self.db
+        let catalog_size = self
+            .db
             .list_labels(workspace)
             .map_err(|e| e.to_string())?
             .len();
@@ -2446,7 +2493,8 @@ impl RectilinearMcp {
             );
             return client.get_label_ids(names).await.map_err(|e| e.to_string());
         }
-        let (resolved, unknown) = self.db
+        let (resolved, unknown) = self
+            .db
             .resolve_label_ids_local(workspace, names)
             .map_err(|e| e.to_string())?;
         if !unknown.is_empty() {
@@ -2454,9 +2502,16 @@ impl RectilinearMcp {
             return Err(format!(
                 "Label{} {} not found. {}Run list_labels for the full set.",
                 if unknown.len() == 1 { "" } else { "s" },
-                unknown.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", "),
-                if suggestions.is_empty() { String::new() }
-                else { format!("Did you mean: {}? ", suggestions.join(", ")) }
+                unknown
+                    .iter()
+                    .map(|s| format!("'{}'", s))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if suggestions.is_empty() {
+                    String::new()
+                } else {
+                    format!("Did you mean: {}? ", suggestions.join(", "))
+                }
             ));
         }
         Ok(resolved)

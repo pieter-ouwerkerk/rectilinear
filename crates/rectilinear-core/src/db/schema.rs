@@ -76,6 +76,28 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (11)", [])?;
     }
 
+    if current_version < 12 {
+        run_migration_12(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (12)", [])?;
+    } else {
+        // Repair databases created by development builds of schema 12 before
+        // the latest-index scheduling token was added.
+        run_migration_12(conn)?;
+    }
+
+    Ok(())
+}
+
+fn run_migration_12(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "issues", "archived_at", "TEXT")?;
+    add_column_if_missing(conn, "sync_state", "synced_through_at", "TEXT")?;
+    conn.execute(
+        "UPDATE sync_state
+         SET synced_through_at = COALESCE(synced_through_at, last_updated_at)",
+        [],
+    )?;
+    conn.execute_batch(MIGRATION_12)?;
+    add_column_if_missing(conn, "issue_hydration_state", "index_sync_token", "TEXT")?;
     Ok(())
 }
 
@@ -130,7 +152,9 @@ fn add_column_if_missing(
             return Ok(());
         }
     }
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+    ))?;
     Ok(())
 }
 
@@ -273,6 +297,64 @@ CREATE TABLE IF NOT EXISTS sync_family_state (
 
 -- Membership fields and cycle inventory require a fresh full traversal once.
 UPDATE sync_state SET full_sync_done = 0, last_updated_at = '1970-01-01T00:00:00Z';
+";
+
+const MIGRATION_12: &str = "
+-- Progressive issue synchronization separates the authoritative, bounded
+-- issue index from independently retryable rich-resource hydration.
+CREATE TABLE IF NOT EXISTS issue_hydration_state (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    resource TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source_updated_at TEXT NOT NULL,
+    queue_reason TEXT NOT NULL DEFAULT 'initial',
+    index_sync_token TEXT,
+    last_attempted_at TEXT,
+    hydrated_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
+    last_error TEXT,
+    PRIMARY KEY (workspace_id, issue_id, resource)
+);
+CREATE INDEX IF NOT EXISTS idx_hydration_pending
+    ON issue_hydration_state(workspace_id, status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_hydration_issue
+    ON issue_hydration_state(issue_id, resource);
+
+-- Databases produced by the legacy all-at-once synchronizer already contain
+-- rich issue fields, labels, and relations. Treat those resources as hydrated
+-- so upgrading does not cause a needless full refetch.
+INSERT OR IGNORE INTO issue_hydration_state (
+    workspace_id, issue_id, resource, status, source_updated_at,
+    queue_reason, hydrated_at
+)
+SELECT workspace_id, id, resource, 'hydrated', updated_at, 'migration',
+       COALESCE(synced_at, datetime('now'))
+FROM issues
+CROSS JOIN (SELECT 'details' AS resource UNION ALL SELECT 'labels' UNION ALL SELECT 'relations');
+
+-- Preserve the existing per-issue comment evidence and retry intent. The
+-- compatibility table remains in place for older callers.
+INSERT OR IGNORE INTO issue_hydration_state (
+    workspace_id, issue_id, resource, status, source_updated_at,
+    queue_reason, hydrated_at, next_retry_at, last_error
+)
+SELECT i.workspace_id, i.id, 'comments',
+       CASE c.status
+           WHEN 'synced' THEN 'hydrated'
+           WHEN 'none_found' THEN 'hydrated'
+           WHEN 'permission_denied' THEN 'permission_denied'
+           WHEN 'unavailable' THEN 'retryable'
+           ELSE 'pending'
+       END,
+       i.updated_at,
+       'migration',
+       CASE WHEN c.status IN ('synced', 'none_found') THEN c.synced_at END,
+       CASE WHEN c.status = 'unavailable' THEN datetime('now') END,
+       c.sync_error
+FROM issues i
+LEFT JOIN comment_sync_state c ON c.issue_id = i.id;
 ";
 
 const MIGRATION_8: &str = "

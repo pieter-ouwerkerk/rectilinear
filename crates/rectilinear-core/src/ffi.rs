@@ -58,6 +58,8 @@ pub struct RtIssue {
     pub updated_at: String,
     pub url: String,
     pub branch_name: Option<String>,
+    /// Nil until Linear reports that the issue is archived.
+    pub archived_at: Option<String>,
 }
 
 impl From<crate::db::Issue> for RtIssue {
@@ -84,6 +86,7 @@ impl From<crate::db::Issue> for RtIssue {
             updated_at: issue.updated_at,
             url: issue.url,
             branch_name: issue.branch_name,
+            archived_at: issue.archived_at,
         }
     }
 }
@@ -492,6 +495,13 @@ pub struct RtUpdateProjectMilestoneInput {
 pub enum RtSyncPhase {
     FetchingIssues,
     GeneratingEmbeddings,
+    IndexingIssues,
+    IndexComplete,
+    HydratingIssueDetails,
+    HydratingLabels,
+    HydratingRelations,
+    HydratingComments,
+    WaitingForRateLimitRetry,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -499,6 +509,183 @@ pub struct RtSyncProgress {
     pub phase: RtSyncPhase,
     pub completed: u64,
     pub total: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RtHydrationPolicy {
+    OpenOnly,
+    OpenAndRecent,
+    All,
+}
+
+impl From<RtHydrationPolicy> for crate::db::HydrationPolicy {
+    fn from(value: RtHydrationPolicy) -> Self {
+        match value {
+            RtHydrationPolicy::OpenOnly => Self::OpenOnly,
+            RtHydrationPolicy::OpenAndRecent => Self::OpenAndRecent,
+            RtHydrationPolicy::All => Self::All,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RtHydrationResource {
+    Details,
+    Labels,
+    Relations,
+    Comments,
+}
+
+impl From<crate::db::HydrationResource> for RtHydrationResource {
+    fn from(value: crate::db::HydrationResource) -> Self {
+        match value {
+            crate::db::HydrationResource::Details => Self::Details,
+            crate::db::HydrationResource::Labels => Self::Labels,
+            crate::db::HydrationResource::Relations => Self::Relations,
+            crate::db::HydrationResource::Comments => Self::Comments,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RtHydrationStatus {
+    Pending,
+    Running,
+    Hydrated,
+    Partial,
+    Retryable,
+    PermissionDenied,
+    Unavailable,
+}
+
+impl From<crate::db::HydrationStatus> for RtHydrationStatus {
+    fn from(value: crate::db::HydrationStatus) -> Self {
+        match value {
+            crate::db::HydrationStatus::Pending => Self::Pending,
+            crate::db::HydrationStatus::Running => Self::Running,
+            crate::db::HydrationStatus::Hydrated => Self::Hydrated,
+            crate::db::HydrationStatus::Partial => Self::Partial,
+            crate::db::HydrationStatus::Retryable => Self::Retryable,
+            crate::db::HydrationStatus::PermissionDenied => Self::PermissionDenied,
+            crate::db::HydrationStatus::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RtHydrationResourceState {
+    pub resource: RtHydrationResource,
+    pub status: RtHydrationStatus,
+    pub source_updated_at: String,
+    pub last_attempted_at: Option<String>,
+    pub hydrated_at: Option<String>,
+    pub attempt_count: u32,
+    pub next_retry_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl From<crate::db::HydrationResourceState> for RtHydrationResourceState {
+    fn from(value: crate::db::HydrationResourceState) -> Self {
+        Self {
+            resource: value.resource.into(),
+            status: value.status.into(),
+            source_updated_at: value.source_updated_at,
+            last_attempted_at: value.last_attempted_at,
+            hydrated_at: value.hydrated_at,
+            attempt_count: value.attempt_count,
+            next_retry_at: value.next_retry_at,
+            last_error: value.last_error,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RtIssueIndexSyncResult {
+    pub indexed: u64,
+    pub inserted: u64,
+    pub updated: u64,
+    pub unchanged: u64,
+    pub queued_for_hydration: u64,
+    pub committed_checkpoint: String,
+}
+
+impl From<crate::linear::IssueIndexSyncResult> for RtIssueIndexSyncResult {
+    fn from(value: crate::linear::IssueIndexSyncResult) -> Self {
+        Self {
+            indexed: value.indexed as u64,
+            inserted: value.inserted as u64,
+            updated: value.updated as u64,
+            unchanged: value.unchanged as u64,
+            queued_for_hydration: value.queued_for_hydration as u64,
+            committed_checkpoint: value.committed_checkpoint,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RtIssueHydrationResult {
+    pub issue_id: String,
+    pub status: RtHydrationStatus,
+    pub hydrated_resources: u64,
+    pub retryable_failures: u64,
+    pub permanent_failures: u64,
+    pub rate_limited: bool,
+    pub resources: Vec<RtHydrationResourceState>,
+}
+
+impl From<crate::linear::IssueHydrationResult> for RtIssueHydrationResult {
+    fn from(value: crate::linear::IssueHydrationResult) -> Self {
+        Self {
+            issue_id: value.issue_id,
+            status: value.status.into(),
+            hydrated_resources: value.hydrated_resources as u64,
+            retryable_failures: value.retryable_failures as u64,
+            permanent_failures: value.permanent_failures as u64,
+            rate_limited: value.rate_limited,
+            resources: value.resources.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RtHydrationBatchResult {
+    pub requested: u64,
+    pub hydrated: u64,
+    pub partial: u64,
+    pub deferred: u64,
+    pub retryable_failures: u64,
+    pub permanent_failures: u64,
+    pub rate_limited: bool,
+}
+
+impl From<crate::linear::HydrationBatchResult> for RtHydrationBatchResult {
+    fn from(value: crate::linear::HydrationBatchResult) -> Self {
+        Self {
+            requested: value.requested as u64,
+            hydrated: value.hydrated as u64,
+            partial: value.partial as u64,
+            deferred: value.deferred as u64,
+            retryable_failures: value.retryable_failures as u64,
+            permanent_failures: value.permanent_failures as u64,
+            rate_limited: value.rate_limited,
+        }
+    }
+}
+
+fn rt_progress_phase(value: crate::linear::SyncProgressPhase) -> RtSyncPhase {
+    match value {
+        crate::linear::SyncProgressPhase::IndexingIssues => RtSyncPhase::IndexingIssues,
+        crate::linear::SyncProgressPhase::IndexComplete => RtSyncPhase::IndexComplete,
+        crate::linear::SyncProgressPhase::HydratingIssueDetails => {
+            RtSyncPhase::HydratingIssueDetails
+        }
+        crate::linear::SyncProgressPhase::HydratingLabels => RtSyncPhase::HydratingLabels,
+        crate::linear::SyncProgressPhase::HydratingRelations => RtSyncPhase::HydratingRelations,
+        crate::linear::SyncProgressPhase::HydratingComments => RtSyncPhase::HydratingComments,
+        crate::linear::SyncProgressPhase::WaitingForRateLimitRetry => {
+            RtSyncPhase::WaitingForRateLimitRetry
+        }
+    }
 }
 
 impl From<crate::db::TeamSummary> for RtTeamSummary {
@@ -534,6 +721,16 @@ pub struct RectilinearEngine {
     http_client: OnceCell<reqwest::Client>,
 }
 
+/// Clears observable progress when an async operation returns, errors, or is
+/// canceled and its future is dropped.
+struct SyncProgressReset<'a>(&'a Mutex<Option<RtSyncProgress>>);
+
+impl Drop for SyncProgressReset<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 impl RectilinearEngine {
     /// Get or create the HTTP client. Lazily initialized so it's created
     /// inside the caller's Tokio runtime (UniFFI's), binding hyper's DNS
@@ -550,10 +747,7 @@ impl RectilinearEngine {
     /// Create a new engine with an explicit database path and optional Gemini API key.
     /// Linear API keys are resolved per-workspace from config.
     #[uniffi::constructor]
-    pub fn new(
-        db_path: String,
-        gemini_api_key: Option<String>,
-    ) -> Result<Self, RectilinearError> {
+    pub fn new(db_path: String, gemini_api_key: Option<String>) -> Result<Self, RectilinearError> {
         let path = Path::new(&db_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| RectilinearError::Config {
@@ -673,11 +867,7 @@ impl RectilinearEngine {
     ) -> Result<Option<RtProjectMilestoneBundle>, RectilinearError> {
         Ok(self
             .db
-            .get_project_milestone_bundle(
-                &workspace_id,
-                &id_or_name,
-                project_id.as_deref(),
-            )?
+            .get_project_milestone_bundle(&workspace_id, &id_or_name, project_id.as_deref())?
             .map(Into::into))
     }
 
@@ -717,13 +907,23 @@ impl RectilinearEngine {
     }
 
     /// Count issues in the local database.
-    pub fn count_issues(&self, team: Option<String>, workspace_id: String) -> Result<u64, RectilinearError> {
+    pub fn count_issues(
+        &self,
+        team: Option<String>,
+        workspace_id: String,
+    ) -> Result<u64, RectilinearError> {
         Ok(self.db.count_issues(team.as_deref(), &workspace_id)? as u64)
     }
 
     /// Count issues that have at least one embedding chunk.
-    pub fn count_embedded_issues(&self, team: Option<String>, workspace_id: String) -> Result<u64, RectilinearError> {
-        Ok(self.db.count_embedded_issues(team.as_deref(), &workspace_id)? as u64)
+    pub fn count_embedded_issues(
+        &self,
+        team: Option<String>,
+        workspace_id: String,
+    ) -> Result<u64, RectilinearError> {
+        Ok(self
+            .db
+            .count_embedded_issues(team.as_deref(), &workspace_id)? as u64)
     }
 
     /// Return the current sync progress, if a sync or embedding pass is active.
@@ -737,8 +937,9 @@ impl RectilinearEngine {
         team: Option<String>,
         workspace_id: String,
     ) -> Result<RtFieldCompleteness, RectilinearError> {
-        let (total, desc, pri, labels, proj) =
-            self.db.get_field_completeness(team.as_deref(), &workspace_id)?;
+        let (total, desc, pri, labels, proj) = self
+            .db
+            .get_field_completeness(team.as_deref(), &workspace_id)?;
         Ok(RtFieldCompleteness {
             total: total as u64,
             with_description: desc as u64,
@@ -768,7 +969,10 @@ impl RectilinearEngine {
     }
 
     /// List teams with synced issues and their embedding coverage. Local-only, no network.
-    pub fn list_synced_teams(&self, workspace_id: String) -> Result<Vec<RtTeamSummary>, RectilinearError> {
+    pub fn list_synced_teams(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<RtTeamSummary>, RectilinearError> {
         Ok(self
             .db
             .list_synced_teams(&workspace_id)?
@@ -851,8 +1055,7 @@ impl RectilinearEngine {
     /// List all teams from Linear.
     pub async fn list_teams(&self, workspace_id: String) -> Result<Vec<RtTeam>, RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
         let teams = client
             .list_teams()
             .await
@@ -928,12 +1131,7 @@ impl RectilinearEngine {
     ) -> Result<RtProjectMilestoneBundle, RectilinearError> {
         let client = self.linear_client(&workspace_id).await?;
         client
-            .import_project_milestone(
-                &self.db,
-                &workspace_id,
-                project_id.as_deref(),
-                &id_or_name,
-            )
+            .import_project_milestone(&self.db, &workspace_id, project_id.as_deref(), &id_or_name)
             .await
             .map(Into::into)
             .map_err(api_error)
@@ -997,7 +1195,10 @@ impl RectilinearEngine {
             member_ids: input.member_ids,
             label_ids: input.label_ids,
         };
-        client.update_project(&id, &input).await.map_err(api_error)?;
+        client
+            .update_project(&id, &input)
+            .await
+            .map_err(api_error)?;
         let project = client
             .fetch_project(&id, &workspace_id)
             .await
@@ -1137,16 +1338,21 @@ impl RectilinearEngine {
     }
 
     /// Sync issues from Linear for a team. Returns the number of issues synced.
-    pub async fn sync_team(&self, team_key: String, full: bool, workspace_id: String) -> Result<u64, RectilinearError> {
+    pub async fn sync_team(
+        &self,
+        team_key: String,
+        full: bool,
+        workspace_id: String,
+    ) -> Result<u64, RectilinearError> {
         self.set_sync_progress(Some(RtSyncProgress {
             phase: RtSyncPhase::FetchingIssues,
             completed: 0,
             total: None,
         }));
+        let _progress_reset = SyncProgressReset(&self.sync_progress);
 
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
         let progress_state = &self.sync_progress;
         let progress = move |count: usize| {
             *progress_state.lock().unwrap() = Some(RtSyncProgress {
@@ -1156,13 +1362,155 @@ impl RectilinearEngine {
             });
         };
         let result = client
-            .sync_team(&self.db, &team_key, &workspace_id, full, false, Some(&progress))
+            .sync_team(
+                &self.db,
+                &team_key,
+                &workspace_id,
+                full,
+                false,
+                Some(&progress),
+            )
             .await
             .map_err(|e| RectilinearError::Api {
                 message: e.to_string(),
             });
         self.set_sync_progress(None);
         result.map(|count| count as u64)
+    }
+
+    /// Fast authoritative issue-index sync. Rich fields may remain nil until
+    /// one of the hydration methods completes.
+    pub async fn sync_team_index(
+        &self,
+        team_key: String,
+        full: bool,
+        workspace_id: String,
+    ) -> Result<RtIssueIndexSyncResult, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        self.set_sync_progress(Some(RtSyncProgress {
+            phase: RtSyncPhase::IndexingIssues,
+            completed: 0,
+            total: None,
+        }));
+        let _progress_reset = SyncProgressReset(&self.sync_progress);
+        let progress_state = &self.sync_progress;
+        let progress = move |update: crate::linear::SyncProgressUpdate| {
+            *progress_state.lock().unwrap() = Some(RtSyncProgress {
+                phase: rt_progress_phase(update.phase),
+                completed: update.completed as u64,
+                total: update.total.map(|value| value as u64),
+            });
+        };
+        let result = client
+            .sync_team_index(&self.db, &team_key, &workspace_id, full, Some(&progress))
+            .await
+            .map(Into::into)
+            .map_err(api_error);
+        self.set_sync_progress(None);
+        result
+    }
+
+    /// Immediately hydrate all rich resource families for one indexed issue.
+    pub async fn hydrate_issue(
+        &self,
+        issue_id: String,
+        workspace_id: String,
+    ) -> Result<RtIssueHydrationResult, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let _progress_reset = SyncProgressReset(&self.sync_progress);
+        let progress_state = &self.sync_progress;
+        let progress = move |update: crate::linear::SyncProgressUpdate| {
+            *progress_state.lock().unwrap() = Some(RtSyncProgress {
+                phase: rt_progress_phase(update.phase),
+                completed: update.completed as u64,
+                total: update.total.map(|value| value as u64),
+            });
+        };
+        let result = client
+            .hydrate_issue(&self.db, &issue_id, &workspace_id, Some(&progress))
+            .await
+            .map(Into::into)
+            .map_err(api_error);
+        self.set_sync_progress(None);
+        result
+    }
+
+    /// Hydrate a bounded deterministic background batch.
+    pub async fn hydrate_pending_issues(
+        &self,
+        team_key: String,
+        workspace_id: String,
+        limit: u32,
+        policy: RtHydrationPolicy,
+    ) -> Result<RtHydrationBatchResult, RectilinearError> {
+        let client = self.linear_client(&workspace_id).await?;
+        let _progress_reset = SyncProgressReset(&self.sync_progress);
+        let progress_state = &self.sync_progress;
+        let progress = move |update: crate::linear::SyncProgressUpdate| {
+            *progress_state.lock().unwrap() = Some(RtSyncProgress {
+                phase: rt_progress_phase(update.phase),
+                completed: update.completed as u64,
+                total: update.total.map(|value| value as u64),
+            });
+        };
+        let result = client
+            .hydrate_pending_issues(
+                &self.db,
+                &team_key,
+                &workspace_id,
+                limit as usize,
+                policy.into(),
+                Some(&progress),
+            )
+            .await
+            .map(Into::into)
+            .map_err(api_error);
+        self.set_sync_progress(None);
+        result
+    }
+
+    /// Read persisted hydration state without contacting Linear.
+    pub fn get_issue_hydration_state(
+        &self,
+        issue_id: String,
+        workspace_id: String,
+    ) -> Result<RtIssueHydrationResult, RectilinearError> {
+        let issue = self
+            .db
+            .get_issue(&issue_id)?
+            .ok_or_else(|| RectilinearError::NotFound {
+                key: issue_id.clone(),
+            })?;
+        let state = self
+            .db
+            .get_issue_hydration_state(&workspace_id, &issue.id)?;
+        Ok(RtIssueHydrationResult {
+            issue_id: issue.id,
+            status: state.status.into(),
+            hydrated_resources: state
+                .resources
+                .iter()
+                .filter(|resource| resource.status == crate::db::HydrationStatus::Hydrated)
+                .count() as u64,
+            retryable_failures: state
+                .resources
+                .iter()
+                .filter(|resource| resource.status == crate::db::HydrationStatus::Retryable)
+                .count() as u64,
+            permanent_failures: state
+                .resources
+                .iter()
+                .filter(|resource| {
+                    matches!(
+                        resource.status,
+                        crate::db::HydrationStatus::PermissionDenied
+                            | crate::db::HydrationStatus::Unavailable
+                    )
+                })
+                .count() as u64,
+            rate_limited: false,
+            resources: state.resources.into_iter().map(Into::into).collect(),
+        })
     }
 
     /// Hybrid search (FTS + vector via RRF). Requires embedder for vector component.
@@ -1240,8 +1588,7 @@ impl RectilinearEngine {
         workspace_id: String,
     ) -> Result<(), RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
         let state_id = if let Some(ref state_name) = state {
             // Need to resolve state name → ID. Get team from issue first.
@@ -1306,15 +1653,15 @@ impl RectilinearEngine {
         workspace_id: String,
     ) -> Result<RtCreateIssueResult, RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
-        let team_id = client
-            .get_team_id(&input.team_key)
-            .await
-            .map_err(|e| RectilinearError::Api {
-                message: e.to_string(),
-            })?;
+        let team_id =
+            client
+                .get_team_id(&input.team_key)
+                .await
+                .map_err(|e| RectilinearError::Api {
+                    message: e.to_string(),
+                })?;
         let project_id = match (
             input.project_id.as_deref(),
             input.project_milestone_id.as_deref(),
@@ -1358,8 +1705,7 @@ impl RectilinearEngine {
         workspace_id: String,
     ) -> Result<(), RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
         client
             .add_comment(&issue_id, &body)
             .await
@@ -1376,8 +1722,7 @@ impl RectilinearEngine {
         workspace_id: String,
     ) -> Result<Option<RtIssue>, RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
-        let client =
-            LinearClient::with_http_client(self.client().await.clone(), &api_key);
+        let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
 
         let result = if id_or_identifier.contains('-')
             && id_or_identifier
@@ -1543,10 +1888,7 @@ impl RectilinearEngine {
 // ── Private helpers ──────────────────────────────────────────────────
 
 impl RectilinearEngine {
-    async fn linear_client(
-        &self,
-        workspace_id: &str,
-    ) -> Result<LinearClient, RectilinearError> {
+    async fn linear_client(&self, workspace_id: &str) -> Result<LinearClient, RectilinearError> {
         let api_key = self.linear_api_key_for_workspace(workspace_id)?;
         Ok(LinearClient::with_http_client(
             self.client().await.clone(),

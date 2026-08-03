@@ -70,14 +70,31 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
         SearchMode::Vector => {
             let embedder =
                 embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
-            vector_search(db, query, team_key, limit * 2, embedder, workspace_id, label_ids).await?
+            vector_search(
+                db,
+                query,
+                team_key,
+                limit * 2,
+                embedder,
+                workspace_id,
+                label_ids,
+            )
+            .await?
         }
         SearchMode::Hybrid => {
             let fts_results = fts_search(db, query, limit * 3, workspace_id, label_ids)?;
 
             if let Some(embedder) = embedder {
-                let vec_results =
-                    vector_search(db, query, team_key, limit * 3, embedder, workspace_id, label_ids).await?;
+                let vec_results = vector_search(
+                    db,
+                    query,
+                    team_key,
+                    limit * 3,
+                    embedder,
+                    workspace_id,
+                    label_ids,
+                )
+                .await?;
                 reciprocal_rank_fusion(fts_results, vec_results, rrf_k, 0.3, 0.7)
             } else {
                 // Fall back to FTS-only if no embedder
@@ -281,7 +298,8 @@ pub async fn find_duplicates(
     .await?;
 
     // For duplicate finding, also do a pure vector search and merge
-    let _vec_results = vector_search(db, text, team_key, limit, embedder, workspace_id, None).await?;
+    let _vec_results =
+        vector_search(db, text, team_key, limit, embedder, workspace_id, None).await?;
 
     // Keep results above threshold
     results.retain(|r| r.similarity.unwrap_or(0.0) >= threshold || r.score > 0.01);

@@ -375,7 +375,8 @@ impl LinearClient {
                 after_cursor,
                 include_archived,
                 workspace_id,
-                self.sync_query_config().page_size(LinearOperation::Projects),
+                self.sync_query_config()
+                    .page_size(LinearOperation::Projects),
                 None,
             )
             .await?;
@@ -501,7 +502,11 @@ impl LinearClient {
                 .teams
                 .nodes
                 .into_iter()
-                .map(|team| db::ProjectTeam { id: team.id, key: team.key, name: team.name })
+                .map(|team| db::ProjectTeam {
+                    id: team.id,
+                    key: team.key,
+                    name: team.name,
+                })
                 .collect(),
             page_info: data.project.teams.page_info,
         })
@@ -541,7 +546,10 @@ impl LinearClient {
                 .members
                 .nodes
                 .into_iter()
-                .map(|member| db::ProjectMember { id: member.id, name: member.name })
+                .map(|member| db::ProjectMember {
+                    id: member.id,
+                    name: member.name,
+                })
                 .collect(),
             page_info: data.project.members.page_info,
         })
@@ -880,7 +888,7 @@ impl LinearClient {
             Some(team_key),
             include_archived,
         )
-            .await
+        .await
     }
 
     async fn sync_projects_scoped(
@@ -896,7 +904,10 @@ impl LinearClient {
         for (family, page_size) in [
             (
                 "projects",
-                Some(self.sync_query_config().page_size(LinearOperation::Projects)),
+                Some(
+                    self.sync_query_config()
+                        .page_size(LinearOperation::Projects),
+                ),
             ),
             (
                 "project milestones",
@@ -906,14 +917,7 @@ impl LinearClient {
                 ),
             ),
         ] {
-            db.mark_sync_family_running(
-                workspace_id,
-                scope,
-                family,
-                None,
-                page_size,
-                &sync_token,
-            )?;
+            db.mark_sync_family_running(workspace_id, scope, family, None, page_size, &sync_token)?;
         }
         let project_result = paginate(
             self.sync_query_config(),
@@ -955,13 +959,7 @@ impl LinearClient {
             Err(error) => {
                 let message = self.redacted_error_message(&error);
                 for family in ["projects", "project milestones"] {
-                    db.mark_sync_family_failed(
-                        workspace_id,
-                        scope,
-                        family,
-                        &sync_token,
-                        &message,
-                    )?;
+                    db.mark_sync_family_failed(workspace_id, scope, family, &sync_token, &message)?;
                 }
                 return Err(error);
             }
@@ -1001,13 +999,7 @@ impl LinearClient {
         if let Err(error) = hydration_result {
             let message = self.redacted_error_message(&error);
             for family in ["projects", "project milestones"] {
-                db.mark_sync_family_failed(
-                    workspace_id,
-                    scope,
-                    family,
-                    &sync_token,
-                    &message,
-                )?;
+                db.mark_sync_family_failed(workspace_id, scope, family, &sync_token, &message)?;
             }
             return Err(error);
         }
@@ -1021,7 +1013,10 @@ impl LinearClient {
             workspace_id,
             scope,
             "projects",
-            Some(self.sync_query_config().page_size(LinearOperation::Projects)),
+            Some(
+                self.sync_query_config()
+                    .page_size(LinearOperation::Projects),
+            ),
             &sync_token,
         )?;
         db.mark_sync_family_complete(
