@@ -42,8 +42,8 @@ pub fn handle_show(
     if let Some(ref assignee) = issue.assignee_name {
         println!("  {} {}", "Assignee:".dimmed(), assignee);
     }
-    if let Some(ref project) = issue.project_name {
-        println!("  {} {}", "Project:".dimmed(), project);
+    for (label, value) in membership_rows(&issue) {
+        println!("  {} {}", format!("{label}:").dimmed(), value);
     }
 
     let labels = issue.labels();
@@ -123,4 +123,81 @@ pub fn handle_show(
     }
 
     Ok(())
+}
+
+fn membership_rows(issue: &rectilinear_core::db::Issue) -> [(&'static str, String); 3] {
+    [
+        (
+            "Project",
+            issue.project_name.clone().unwrap_or_else(|| "None".to_string()),
+        ),
+        (
+            "Milestone",
+            issue
+                .project_milestone_name
+                .clone()
+                .unwrap_or_else(|| "None".to_string()),
+        ),
+        (
+            "Cycle",
+            issue.cycle_name.clone().unwrap_or_else(|| "None".to_string()),
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rectilinear_core::db::Issue;
+
+    fn issue() -> Issue {
+        Issue {
+            id: "issue-1".into(),
+            identifier: "ENG-1".into(),
+            team_key: "ENG".into(),
+            title: "Memberships".into(),
+            description: None,
+            state_name: "Todo".into(),
+            state_type: "unstarted".into(),
+            priority: 0,
+            assignee_name: None,
+            project_name: Some("API Reliability".into()),
+            labels_json: "[]".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            content_hash: String::new(),
+            synced_at: None,
+            url: String::new(),
+            branch_name: None,
+            workspace_id: "default".into(),
+            project_id: Some("project-1".into()),
+            project_milestone_id: Some("milestone-1".into()),
+            project_milestone_name: Some("Request tracing".into()),
+            cycle_id: Some("cycle-1".into()),
+            cycle_name: Some("Cycle 42".into()),
+        }
+    }
+
+    #[test]
+    fn show_memberships_include_project_milestone_and_cycle() {
+        assert_eq!(
+            membership_rows(&issue()),
+            [
+                ("Project", "API Reliability".into()),
+                ("Milestone", "Request tracing".into()),
+                ("Cycle", "Cycle 42".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn show_memberships_are_explicit_when_unassigned() {
+        let mut value = issue();
+        value.project_name = None;
+        value.project_milestone_name = None;
+        value.cycle_name = None;
+        assert!(membership_rows(&value)
+            .into_iter()
+            .all(|(_, value)| value == "None"));
+    }
 }

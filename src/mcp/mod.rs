@@ -1672,7 +1672,7 @@ IMPORTANT — Before calling this tool, you MUST:
 
     #[tool(
         name = "sync_team",
-        description = "Sync issues from Linear for a specific team. Use full=true for a complete re-sync; full syncs include archived issues by default so completed/canceled archived evidence issues are refreshed. Each synced issue also refreshes Linear comments and records comment sync diagnostics for get_issue(include_comments=true)."
+        description = "Synchronize a Linear team through bounded, adaptive pages: projects and milestones, labels, cycles, issues and memberships, relations, and comments. Use full=true for a complete re-sync; full syncs include archived entities by default. The team cursor advances only after every required entity family succeeds."
     )]
     async fn sync_team(&self, #[tool(aggr)] args: SyncTeamArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;

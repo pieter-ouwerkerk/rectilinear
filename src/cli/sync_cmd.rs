@@ -13,10 +13,13 @@ pub async fn handle_sync(
     full: bool,
     embed: bool,
     include_archived: bool,
+    verbose: bool,
     workspace: &str,
 ) -> Result<()> {
     let api_key = config.workspace_api_key(workspace)?;
-    let client = LinearClient::with_api_key(&api_key);
+    let mut sync_query_config = crate::linear::SyncQueryConfig::from_environment();
+    sync_query_config.verbose = verbose || sync_query_config.verbose;
+    let client = LinearClient::with_api_key(&api_key).with_sync_query_config(sync_query_config);
 
     let team_key = match team.or(config.workspace_default_team(workspace)?.as_deref()) {
         Some(t) => t.to_string(),
