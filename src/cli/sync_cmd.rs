@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::linear::LinearClient;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_sync(
     db: &Database,
     config: &Config,
@@ -14,6 +15,7 @@ pub async fn handle_sync(
     embed: bool,
     include_archived: bool,
     verbose: bool,
+    index_only: bool,
     workspace: &str,
 ) -> Result<()> {
     let api_key = config.workspace_api_key(workspace)?;
@@ -37,13 +39,20 @@ pub async fn handle_sync(
             } else {
                 println!("{}", "Available teams:".bold());
                 for (i, t) in teams.iter().enumerate() {
-                    println!("  {} {} — {}", format!("[{}]", i + 1).dimmed(), t.key.bold(), t.name);
+                    println!(
+                        "  {} {} — {}",
+                        format!("[{}]", i + 1).dimmed(),
+                        t.key.bold(),
+                        t.name
+                    );
                 }
                 print!("\nSelect team (1-{}): ", teams.len());
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
-                let idx: usize = input.trim().parse::<usize>()
+                let idx: usize = input
+                    .trim()
+                    .parse::<usize>()
                     .map_err(|_| anyhow::anyhow!("Invalid selection"))?;
                 if idx < 1 || idx > teams.len() {
                     anyhow::bail!("Selection out of range");
@@ -85,16 +94,34 @@ pub async fn handle_sync(
     let progress_cb = |total: usize| {
         pb.set_message(format!("{} issues synced", total));
     };
-    let count = client
-        .sync_team(
-            db,
-            &team_key,
-            workspace,
-            do_full,
-            do_include_archived,
-            Some(&progress_cb),
-        )
-        .await?;
+    let count = if index_only {
+        let progress = |update: crate::linear::SyncProgressUpdate| {
+            pb.set_message(format!("{} issues indexed", update.completed));
+        };
+        let result = client
+            .sync_team_index(db, &team_key, workspace, do_full, Some(&progress))
+            .await?;
+        println!(
+            "Indexed: {} ({} inserted, {} updated, {} unchanged; checkpoint {})",
+            result.indexed,
+            result.inserted,
+            result.updated,
+            result.unchanged,
+            result.committed_checkpoint
+        );
+        result.indexed
+    } else {
+        client
+            .sync_team(
+                db,
+                &team_key,
+                workspace,
+                do_full,
+                do_include_archived,
+                Some(&progress_cb),
+            )
+            .await?
+    };
 
     pb.finish_with_message(format!(
         "{} Synced {} issues for team {}",

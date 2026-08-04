@@ -160,10 +160,7 @@ impl Config {
             if let Ok(meta) = std::fs::metadata(&path) {
                 let mode = meta.permissions().mode() & 0o777;
                 if mode & 0o077 != 0 {
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
             }
         }

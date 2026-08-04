@@ -27,9 +27,7 @@ pub async fn handle_append(
             issue.identifier.bold()
         );
         client.add_comment(&issue.id, comment_text).await?;
-        let _ = client
-            .sync_issue_comments(db, &issue.id, workspace)
-            .await;
+        let _ = client.sync_issue_comments(db, &issue.id, workspace).await;
         println!("{} Comment added", "✓".green().bold());
     }
 

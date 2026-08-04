@@ -33,6 +33,7 @@ pub async fn handle_embed(
 ) -> Result<()> {
     let embedder = Embedder::new(config)?;
     let team_key = team.or(config.linear.default_team.as_deref());
+    let model_name = embedder.backend_name().to_string();
 
     println!(
         "{} Using {} backend ({} dimensions)",
@@ -54,7 +55,8 @@ pub async fn handle_embed(
         }
     }
 
-    let issues = db.get_issues_needing_embedding(team_key, force, workspace)?;
+    let issues =
+        db.get_issues_needing_embedding_for_model(team_key, force, workspace, Some(&model_name))?;
 
     if issues.is_empty() {
         println!("{}", "All issues already have embeddings.".dimmed());
@@ -91,6 +93,8 @@ pub async fn handle_embed(
     // How many chunks each issue has total
     let mut expected_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    let mut source_hashes: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     if debug {
         eprintln!("  RSS before loop: {}MB", rss_mb().unwrap_or(0));
@@ -120,6 +124,10 @@ pub async fn handle_embed(
             eprintln!("    chunked into {} pieces", chunks.len());
         }
         expected_counts.insert(issue.id.clone(), chunks.len());
+        source_hashes.insert(
+            issue.id.clone(),
+            embedding::issue_content_hash(&issue.title, issue.description.as_deref()),
+        );
 
         for (idx, text) in chunks.into_iter().enumerate() {
             let tokens = estimate_tokens(&text);
@@ -179,7 +187,15 @@ pub async fn handle_embed(
                 for id in done {
                     if let Some(chunks) = pending.remove(&id) {
                         total_chunks += chunks.len();
-                        db.upsert_chunks(&id, &chunks)?;
+                        db.upsert_chunks_with_model_and_hash(
+                            &id,
+                            &chunks,
+                            &model_name,
+                            source_hashes
+                                .get(&id)
+                                .map(String::as_str)
+                                .unwrap_or_default(),
+                        )?;
                         embedded_count += 1;
                         pb.set_position(embedded_count as u64);
                     }
@@ -230,7 +246,15 @@ pub async fn handle_embed(
     }
     for (id, chunks) in pending.drain() {
         total_chunks += chunks.len();
-        db.upsert_chunks(&id, &chunks)?;
+        db.upsert_chunks_with_model_and_hash(
+            &id,
+            &chunks,
+            &model_name,
+            source_hashes
+                .get(&id)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )?;
         embedded_count += 1;
         pb.set_position(embedded_count as u64);
     }

@@ -10,10 +10,14 @@ use crate::config::Config;
 use crate::db::{self, Database};
 
 mod cycles;
-mod projects;
 mod pagination;
+mod progressive;
+mod projects;
+pub use pagination::{
+    LinearErrorKind, LinearOperation, LinearOperationError, SyncEvent, SyncQueryConfig,
+};
+pub use progressive::*;
 pub use projects::*;
-pub use pagination::{LinearErrorKind, LinearOperation, LinearOperationError, SyncEvent, SyncQueryConfig};
 
 use pagination::{operation_error, paginate, ConnectionPage, PageInfo};
 
@@ -37,6 +41,14 @@ struct GraphQLResponse<T> {
 #[derive(Debug, Deserialize)]
 struct GraphQLError {
     message: String,
+    #[serde(default)]
+    extensions: Option<GraphQLErrorExtensions>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQLErrorExtensions {
+    #[serde(default)]
+    code: Option<String>,
 }
 
 // --- Query response types ---
@@ -65,6 +77,8 @@ struct LinearIssue {
     created_at: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    #[serde(rename = "archivedAt", default)]
+    archived_at: Option<String>,
     state: LinearState,
     team: LinearTeam,
     assignee: Option<LinearUser>,
@@ -477,7 +491,11 @@ impl LinearClient {
                 event.nodes_received,
                 event.page_size,
                 reduction,
-                if event.completed { "complete" } else { "running" }
+                if event.completed {
+                    "complete"
+                } else {
+                    "running"
+                }
             );
         }
     }
@@ -521,55 +539,68 @@ impl LinearClient {
             })?;
 
         let status = resp.status();
-        if !status.is_success() {
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let kind = classify_http_status(status.as_u16());
-            return Err(LinearOperationError::new(
-                kind,
+        let retry_after = retry_after_from_headers(resp.headers());
+        let body = resp.bytes().await.map_err(|error| {
+            LinearOperationError::new(
+                LinearErrorKind::Transport,
                 operation,
                 cursor,
-                format!("HTTP {status} (response body omitted)"),
+                format!("failed to read response: {error}"),
             )
-            .with_retry_after(retry_after)
-            .into());
-        }
+        })?;
+        let parsed: std::result::Result<GraphQLResponse<T>, _> = serde_json::from_slice(&body);
 
-        let response: GraphQLResponse<T> = resp
-            .json()
-            .await
-            .map_err(|error| {
+        if let Ok(response) = parsed {
+            if let Some(errors) = response.errors {
+                let message = errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let message = self.redacted_message(message);
+                let kind = classify_graphql_errors(&errors);
+                return Err(LinearOperationError::new(kind, operation, cursor, message)
+                    .with_retry_after(retry_after)
+                    .into());
+            }
+            if !status.is_success() {
+                return Err(LinearOperationError::new(
+                    classify_http_status(status.as_u16()),
+                    operation,
+                    cursor,
+                    format!("HTTP {status} (response body omitted)"),
+                )
+                .with_retry_after(retry_after)
+                .into());
+            }
+            return response.data.ok_or_else(|| {
                 LinearOperationError::new(
                     LinearErrorKind::Api,
                     operation,
                     cursor,
-                    format!("failed to parse response: {error}"),
+                    "response did not contain data",
                 )
-            })?;
-
-        if let Some(errors) = response.errors {
-            let message = errors
-                .iter()
-                .map(|error| error.message.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let kind = classify_graphql_message(&message);
-            return Err(LinearOperationError::new(kind, operation, cursor, message).into());
+                .into()
+            });
         }
 
-        response.data.ok_or_else(|| {
-            LinearOperationError::new(
-                LinearErrorKind::Api,
+        if !status.is_success() {
+            return Err(LinearOperationError::new(
+                classify_http_status(status.as_u16()),
                 operation,
                 cursor,
-                "response did not contain data",
+                format!("HTTP {status} (unparseable response body omitted)"),
             )
-            .into()
-        })
+            .with_retry_after(retry_after)
+            .into());
+        }
+        Err(LinearOperationError::new(
+            LinearErrorKind::Api,
+            operation,
+            cursor,
+            "failed to parse GraphQL response",
+        )
+        .into())
     }
 
     pub async fn list_teams(&self) -> Result<Vec<TeamNode>> {
@@ -645,7 +676,11 @@ impl LinearClient {
         after_cursor: Option<&str>,
         updated_after: Option<&str>,
         include_archived: bool,
-    ) -> Result<(Vec<(db::Issue, Vec<db::Relation>, Vec<String>)>, bool, Option<String>)> {
+    ) -> Result<(
+        Vec<(db::Issue, Vec<db::Relation>, Vec<String>)>,
+        bool,
+        Option<String>,
+    )> {
         let page = self
             .fetch_issues_page(
                 team_key,
@@ -686,7 +721,7 @@ impl LinearClient {
                 ) {{
                     nodes {{
                         id identifier url title description priority branchName
-                        createdAt updatedAt
+                        createdAt updatedAt archivedAt
                         state {{ name type }}
                         team {{ key }}
                         assignee {{ name }}
@@ -716,9 +751,14 @@ impl LinearClient {
             .map(Self::convert_linear_issue)
             .collect();
 
-        Ok(ConnectionPage { nodes: issues, page_info: data.issues.page_info })
+        Ok(ConnectionPage {
+            nodes: issues,
+            page_info: data.issues.page_info,
+        })
     }
 
+    /// Compatibility orchestration for existing clients. New clients should
+    /// call `sync_team_index` and then bounded hydration explicitly.
     pub async fn sync_team(
         &self,
         db: &Database,
@@ -728,238 +768,101 @@ impl LinearClient {
         include_archived: bool,
         progress: Option<&(dyn Fn(usize) + Send + Sync)>,
     ) -> Result<usize> {
-        self.sync_projects_for_team(db, workspace_id, team_key, include_archived).await.with_context(|| {
-            format!("project synchronization failed for workspace '{workspace_id}'")
-        })?;
+        self.sync_projects_for_team(db, workspace_id, team_key, include_archived)
+            .await
+            .with_context(|| {
+                format!("project synchronization failed for workspace '{workspace_id}'")
+            })?;
         self.sync_labels_catalog(db, workspace_id)
             .await
-            .with_context(|| format!("label synchronization failed for workspace '{workspace_id}'"))?;
+            .with_context(|| {
+                format!("label synchronization failed for workspace '{workspace_id}'")
+            })?;
         self.sync_cycles(db, team_key, workspace_id, include_archived)
             .await
             .with_context(|| format!("cycle synchronization failed for team '{team_key}'"))?;
 
-        let updated_after = if full {
-            None
-        } else {
-            db.get_sync_cursor(workspace_id, team_key)?
-        };
-
-        let sync_token = Uuid::new_v4().to_string();
-        let mut max_updated: Option<String> = None;
-        let mut persisted_total = 0;
-        db.mark_sync_family_running(
-            workspace_id,
-            team_key,
-            "issues",
-            None,
-            Some(self.sync_query_config.page_size(LinearOperation::Issues)),
-            &sync_token,
-        )?;
-        let issue_result = paginate(
-            &self.sync_query_config,
-            LinearOperation::Issues,
-            Some(team_key.to_string()),
-            |request| {
-                let updated_after = updated_after.clone();
-                async move {
-                    self.fetch_issues_page(
-                        team_key,
-                        request.cursor.as_deref(),
-                        updated_after.as_deref(),
-                        include_archived,
-                        request.page_size,
-                    )
-                    .await
+        let progress_adapter = |update: SyncProgressUpdate| {
+            if matches!(
+                update.phase,
+                SyncProgressPhase::IndexingIssues | SyncProgressPhase::IndexComplete
+            ) {
+                if let Some(callback) = progress {
+                    callback(update.completed);
                 }
-            },
-            |issues, context| {
-                let count = issues.len();
-                let result = (|| {
-                    for (mut issue, _relations, _label_ids) in issues {
-                        issue.workspace_id = workspace_id.to_string();
-                        if max_updated.is_none()
-                            || Some(&issue.updated_at) > max_updated.as_ref()
-                        {
-                            max_updated = Some(issue.updated_at.clone());
-                        }
-                        db.upsert_issue_preserving_labels(&issue)?;
-                        db.mark_issue_sync_token(&issue.id, &sync_token)?;
-                    }
-                    persisted_total += count;
-                    db.mark_sync_family_running(
-                        workspace_id,
-                        team_key,
-                        "issues",
-                        context.cursor.as_deref(),
-                        Some(context.page_size),
-                        &sync_token,
-                    )?;
-                    if let Some(callback) = progress {
-                        callback(persisted_total);
-                    }
-                    Ok(())
-                })();
-                ready(result)
-            },
-            |(issue, _, _)| issue.id.clone(),
-            |event| self.observe_sync_event(event),
-        )
-        .await;
-
-        let stats = match issue_result {
-            Ok(stats) => stats,
-            Err(error) => {
-                let message = self.redacted_error_message(&error);
-                db.mark_sync_family_failed(
-                    workspace_id,
-                    team_key,
-                    "issues",
-                    &sync_token,
-                    &message,
-                )?;
-                return Err(error);
             }
         };
+        let index = self
+            .sync_team_index(db, team_key, workspace_id, full, Some(&progress_adapter))
+            .await?;
+
         if full {
-            db.reconcile_full_issue_sync(workspace_id, team_key, &sync_token)?;
+            db.requeue_team_hydration(workspace_id, team_key, "legacy_full")?;
+        } else {
+            db.requeue_team_retryable_comments(workspace_id, team_key)?;
         }
-        db.mark_sync_family_complete(
-            workspace_id,
-            team_key,
-            "issues",
-            Some(self.sync_query_config.page_size(LinearOperation::Issues)),
-            &sync_token,
-        )?;
+        let issue_count = db.count_issues(Some(team_key), workspace_id)?;
+        let hydration = self
+            .hydrate_pending_issues(
+                db,
+                team_key,
+                workspace_id,
+                issue_count.max(1),
+                db::HydrationPolicy::All,
+                None,
+            )
+            .await?;
 
-        db.mark_sync_family_running(
-            workspace_id,
-            team_key,
-            "issue labels",
-            None,
-            None,
-            &sync_token,
-        )?;
-        let label_result: Result<()> = async {
-            let mut after_id = None;
-            loop {
-                let issue_refs = db.list_issue_sync_refs(
-                    workspace_id,
-                    team_key,
-                    &sync_token,
-                    after_id.as_deref(),
-                    100,
-                )?;
-                if issue_refs.is_empty() {
-                    break;
-                }
-                for issue in &issue_refs {
-                    self.sync_issue_labels(db, &issue.id)
-                        .await
-                        .with_context(|| {
-                            format!("label synchronization failed for {}", issue.identifier)
-                        })?;
-                }
-                after_id = issue_refs.last().map(|issue| issue.id.clone());
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = label_result {
-            let message = self.redacted_error_message(&error);
-            db.mark_sync_family_failed(
+        let family_token = Uuid::new_v4().to_string();
+        if hydration.required_failures == 0 {
+            db.mark_sync_family_complete(
                 workspace_id,
                 team_key,
                 "issue labels",
-                &sync_token,
-                &message,
+                None,
+                &family_token,
             )?;
-            return Err(error);
-        }
-        db.mark_sync_family_complete(workspace_id, team_key, "issue labels", None, &sync_token)?;
-
-        db.mark_sync_family_running(workspace_id, team_key, "relations", None, None, &sync_token)?;
-        let relation_result: Result<()> = async {
-            let mut after_id = None;
-            loop {
-                let issue_refs = db.list_issue_sync_refs(
-                    workspace_id,
-                    team_key,
-                    &sync_token,
-                    after_id.as_deref(),
-                    100,
-                )?;
-                if issue_refs.is_empty() {
-                    break;
-                }
-                for issue in &issue_refs {
-                    self.sync_issue_relations(db, &issue.id)
-                        .await
-                        .with_context(|| {
-                            format!("relation synchronization failed for {}", issue.identifier)
-                        })?;
-                }
-                after_id = issue_refs.last().map(|issue| issue.id.clone());
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = relation_result {
-            let message = self.redacted_error_message(&error);
-            db.mark_sync_family_failed(workspace_id, team_key, "relations", &sync_token, &message)?;
-            return Err(error);
-        }
-        db.mark_sync_family_complete(workspace_id, team_key, "relations", None, &sync_token)?;
-
-        db.mark_sync_family_running(workspace_id, team_key, "comments", None, None, &sync_token)?;
-        let mut comment_failures = Vec::new();
-        let mut after_id = None;
-        loop {
-            let issue_refs = db.list_comment_hydration_refs(
-                workspace_id,
-                team_key,
-                &sync_token,
-                after_id.as_deref(),
-                100,
-            )?;
-            if issue_refs.is_empty() {
-                break;
-            }
-            for issue in &issue_refs {
-                if let Err(error) = self
-                    .sync_issue_comments(db, &issue.id, workspace_id)
-                    .await
-                    .with_context(|| {
-                        format!("comment synchronization failed for {}", issue.identifier)
-                    })
-                {
-                    let message = self.redacted_error_message(&error);
-                    if self.sync_query_config.verbose {
-                        eprintln!(
-                            "sync operation=comments issue={} status=failed continuing=true error={}",
-                            issue.identifier, message
-                        );
-                    }
-                    comment_failures.push(issue.identifier.clone());
-                }
-            }
-            after_id = issue_refs.last().map(|issue| issue.id.clone());
-        }
-        if comment_failures.is_empty() {
-            db.mark_sync_family_complete(workspace_id, team_key, "comments", None, &sync_token)?;
+            db.mark_sync_family_complete(workspace_id, team_key, "relations", None, &family_token)?;
         } else {
             let summary = format!(
-                "{} comment hydration(s) failed: {}",
-                comment_failures.len(),
-                comment_failures.join(", ")
+                "{} required hydration resource(s) failed",
+                hydration.required_failures
             );
-            db.mark_sync_family_partial(workspace_id, team_key, "comments", &sync_token, &summary)?;
+            db.mark_sync_family_partial(
+                workspace_id,
+                team_key,
+                "issue labels",
+                &family_token,
+                &summary,
+            )?;
+            db.mark_sync_family_partial(
+                workspace_id,
+                team_key,
+                "relations",
+                &family_token,
+                &summary,
+            )?;
         }
-
-        let next_updated = max_updated
-            .or(updated_after)
-            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-        db.set_sync_cursor(workspace_id, team_key, &next_updated)?;
-        Ok(stats.nodes)
+        if hydration.comment_failures == 0 {
+            db.mark_sync_family_complete(workspace_id, team_key, "comments", None, &family_token)?;
+        } else {
+            let summary = format!("{} comment hydration(s) failed", hydration.comment_failures);
+            db.mark_sync_family_partial(
+                workspace_id,
+                team_key,
+                "comments",
+                &family_token,
+                &summary,
+            )?;
+        }
+        if hydration.required_failures > 0 || hydration.rate_limited {
+            anyhow::bail!(
+                "issue hydration incomplete after the issue index committed ({} required failures, rate_limited={})",
+                hydration.required_failures,
+                hydration.rate_limited
+            );
+        }
+        Ok(index.indexed)
     }
 
     pub async fn create_issue(&self, create: CreateIssueInput<'_>) -> Result<(String, String)> {
@@ -1106,12 +1009,7 @@ impl LinearClient {
                 for comment in &mut comments {
                     comment.workspace_id = workspace_id.to_string();
                 }
-                ready(db.upsert_comment_page(
-                    issue_id,
-                    workspace_id,
-                    &comments,
-                    &sync_token,
-                ))
+                ready(db.upsert_comment_page(issue_id, workspace_id, &comments, &sync_token))
             },
             |comment| comment.id.clone(),
             |event| self.observe_sync_event(event),
@@ -1172,11 +1070,7 @@ impl LinearClient {
         })
     }
 
-    pub async fn sync_issue_relations(
-        &self,
-        db: &Database,
-        issue_id: &str,
-    ) -> Result<usize> {
+    pub async fn sync_issue_relations(&self, db: &Database, issue_id: &str) -> Result<usize> {
         let sync_token = Uuid::new_v4().to_string();
         let stats = paginate(
             &self.sync_query_config,
@@ -1190,9 +1084,7 @@ impl LinearClient {
                 )
                 .await
             },
-            |relations, _| {
-                ready(db.upsert_relation_page(issue_id, &relations, &sync_token))
-            },
+            |relations, _| ready(db.upsert_relation_page(issue_id, &relations, &sync_token)),
             |relation| relation.id.clone(),
             |event| self.observe_sync_event(event),
         )
@@ -1236,6 +1128,20 @@ impl LinearClient {
     }
 
     pub async fn sync_issue_labels(&self, db: &Database, issue_id: &str) -> Result<usize> {
+        let workspace_id = db
+            .get_issue(issue_id)?
+            .with_context(|| format!("issue '{issue_id}' disappeared before label sync"))?
+            .workspace_id;
+        self.sync_issue_labels_in_workspace(db, issue_id, &workspace_id)
+            .await
+    }
+
+    pub async fn sync_issue_labels_in_workspace(
+        &self,
+        db: &Database,
+        issue_id: &str,
+        workspace_id: &str,
+    ) -> Result<usize> {
         let sync_token = Uuid::new_v4().to_string();
         let mut names = Vec::new();
         let stats = paginate(
@@ -1243,14 +1149,22 @@ impl LinearClient {
             LinearOperation::Labels,
             Some(issue_id.to_string()),
             |request| async move {
-                self.fetch_issue_labels_page(
-                    issue_id,
-                    request.cursor.as_deref(),
-                    request.page_size,
-                )
-                .await
+                self.fetch_issue_labels_page(issue_id, request.cursor.as_deref(), request.page_size)
+                    .await
             },
             |labels, _| {
+                let catalog_result = labels.iter().try_for_each(|label| {
+                    db.upsert_label(&db::Label {
+                        id: label.id.clone(),
+                        workspace_id: workspace_id.to_string(),
+                        name: label.name.clone(),
+                        color: None,
+                        parent_id: None,
+                    })
+                });
+                if let Err(error) = catalog_result {
+                    return ready(Err(error));
+                }
                 let ids = labels
                     .iter()
                     .map(|label| label.id.clone())
@@ -1284,12 +1198,8 @@ impl LinearClient {
             LinearOperation::Labels,
             Some(issue_id.to_string()),
             |request| async move {
-                self.fetch_issue_labels_page(
-                    issue_id,
-                    request.cursor.as_deref(),
-                    request.page_size,
-                )
-                .await
+                self.fetch_issue_labels_page(issue_id, request.cursor.as_deref(), request.page_size)
+                    .await
             },
             |nodes, _| {
                 labels.extend(nodes);
@@ -1302,10 +1212,7 @@ impl LinearClient {
         Ok(labels)
     }
 
-    async fn fetch_all_issue_relations_remote(
-        &self,
-        issue_id: &str,
-    ) -> Result<Vec<db::Relation>> {
+    async fn fetch_all_issue_relations_remote(&self, issue_id: &str) -> Result<Vec<db::Relation>> {
         let mut relations = Vec::new();
         paginate(
             &self.sync_query_config,
@@ -1360,11 +1267,7 @@ impl LinearClient {
         message.chars().take(500).collect()
     }
 
-    pub async fn update_issue(
-        &self,
-        issue_id: &str,
-        update: UpdateIssueInput<'_>,
-    ) -> Result<()> {
+    pub async fn update_issue(&self, issue_id: &str, update: UpdateIssueInput<'_>) -> Result<()> {
         let mut input = serde_json::Map::new();
         if let Some(t) = update.title {
             input.insert("title".into(), serde_json::Value::String(t.to_string()));
@@ -1567,6 +1470,7 @@ impl LinearClient {
             project_milestone_name,
             cycle_id,
             cycle_name,
+            archived_at: i.archived_at,
         };
 
         (issue, relations, label_ids)
@@ -1867,13 +1771,7 @@ impl LinearClient {
             }
             Err(error) => {
                 let message = self.redacted_error_message(&error);
-                db.mark_sync_family_failed(
-                    workspace_id,
-                    "*",
-                    "labels",
-                    &sync_token,
-                    &message,
-                )?;
+                db.mark_sync_family_failed(workspace_id, "*", "labels", &sync_token, &message)?;
                 Err(error)
             }
         }
@@ -2103,12 +2001,58 @@ fn classify_graphql_message(message: &str) -> LinearErrorKind {
     }
 }
 
+fn classify_graphql_errors(errors: &[GraphQLError]) -> LinearErrorKind {
+    if errors.iter().any(|error| {
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.code.as_deref())
+            .is_some_and(|code| code.eq_ignore_ascii_case("RATELIMITED"))
+    }) {
+        return LinearErrorKind::RateLimit;
+    }
+    let message = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    classify_graphql_message(&message)
+}
+
+fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    if let Some(seconds) = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return Some(Duration::from_secs(seconds).min(Duration::from_secs(6 * 60 * 60)));
+    }
+    for name in ["x-ratelimit-requests-reset", "x-ratelimit-reset"] {
+        let Some(value) = headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let value = if value > 1_000_000_000_000 {
+            value / 1_000
+        } else {
+            value
+        };
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let seconds = if value > now { value - now } else { value };
+        return Some(Duration::from_secs(seconds).min(Duration::from_secs(6 * 60 * 60)));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -2259,8 +2203,121 @@ mod tests {
         })
     }
 
+    fn project_node(id: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "slugId": id,
+            "name": name,
+            "description": "Project description",
+            "content": null,
+            "icon": null,
+            "color": "#123456",
+            "priority": 2,
+            "startDate": null,
+            "targetDate": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-02-01T00:00:00Z",
+            "archivedAt": null,
+            "url": format!("https://linear.app/project/{id}"),
+            "progress": 0.25,
+            "status": { "id": "status-1", "name": "Planned", "type": "planned", "color": "#abcdef" },
+            "lead": null
+        })
+    }
+
+    fn milestone_node(project_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("milestone-{project_id}"),
+            "name": format!("Milestone {project_id}"),
+            "description": null,
+            "targetDate": null,
+            "status": "next",
+            "progress": 0.5,
+            "sortOrder": 1.0,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-02-01T00:00:00Z",
+            "archivedAt": null,
+            "project": { "id": project_id, "name": format!("Project {project_id}") }
+        })
+    }
+
+    fn project_sync_response(
+        request: &serde_json::Value,
+        team_project_count: usize,
+    ) -> Option<MockResponse> {
+        let query = request["query"].as_str().unwrap_or_default();
+        if query.contains("teams(first:") && !query.contains("project(id:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "teams": {
+                    "nodes": [{ "id": "team-cut", "key": "CUT", "name": "Cuttlefish" }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        if query.contains("projects(") {
+            let team_scoped = request["variables"]["teamId"].is_string();
+            let count = if team_scoped { team_project_count } else { 2 };
+            let nodes = (1..=count)
+                .map(|number| {
+                    project_node(&format!("project-{number}"), &format!("Project {number}"))
+                })
+                .collect::<Vec<_>>();
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "projects": {
+                    "nodes": nodes,
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            })));
+        }
+        let project_id = request["variables"]["id"].as_str().unwrap_or("project-1");
+        if query.contains("projectMilestones(") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "project": { "projectMilestones": {
+                    "nodes": [milestone_node(project_id)],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        if query.contains("teams(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "project": { "teams": {
+                    "nodes": [{ "id": "team-cut", "key": "CUT", "name": "Cuttlefish" }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        if query.contains("members(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "project": { "members": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        if query.contains("labels(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "project": { "labels": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
+        None
+    }
+
     fn standard_sync_response(request: &serde_json::Value) -> Option<MockResponse> {
         let query = request["query"].as_str().unwrap_or_default();
+        if query.contains("issue(id: $id)") && query.contains("description priority") {
+            let issue_id = request["variables"]["id"].as_str().unwrap_or("issue-1");
+            let (identifier, updated_at) = if issue_id == "issue-2" {
+                ("CUT-2", "2026-02-02T00:00:00Z")
+            } else {
+                ("CUT-1", "2026-02-01T00:00:00Z")
+            };
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issue": issue_node(issue_id, identifier, updated_at) }
+            })));
+        }
         if query.contains("teams(first:") {
             return Some(MockResponse::json(serde_json::json!({
                 "data": { "teams": {
@@ -2294,7 +2351,9 @@ mod tests {
             })));
         }
         if query.contains("issues(") {
-            let nodes = if query.contains("updatedAt: { gt:") {
+            let nodes = if request["variables"]["lower"].is_string()
+                || query.contains("updatedAt: { gt:")
+            {
                 Vec::new()
             } else {
                 vec![
@@ -2505,12 +2564,9 @@ mod tests {
         assert_eq!(comments.status, "partial");
         assert_eq!(
             comments.error.as_deref(),
-            Some("1 comment hydration(s) failed: CUT-1")
+            Some("1 comment hydration(s) failed")
         );
-        assert_eq!(
-            db.get_sync_cursor("default", "CUT").unwrap().as_deref(),
-            Some("2026-02-02T00:00:00Z")
-        );
+        assert!(db.get_sync_cursor("default", "CUT").unwrap().is_some());
     }
 
     #[test]
@@ -2593,8 +2649,652 @@ mod tests {
         assert_eq!(recovered.status, "none_found");
         assert!(recovered.sync_error.is_none());
         assert_eq!(family_status(&db, "comments").status, "complete");
-        assert_eq!(db.get_sync_cursor("default", "CUT").unwrap(), first_cursor);
+        assert_ne!(db.get_sync_cursor("default", "CUT").unwrap(), first_cursor);
         assert_eq!(attempts.lock().unwrap().get("issue-1"), Some(&4));
+    }
+
+    #[test]
+    fn index_only_traverses_bounded_pages_without_supplemental_requests() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let server_requests = Arc::clone(&requests);
+        let server = MockLinearServer::start(move |request| {
+            server_requests.lock().unwrap().push(request.clone());
+            let after = request["variables"]["after"].as_str();
+            let (nodes, has_next_page, end_cursor) = if after.is_none() {
+                (
+                    vec![issue_node("issue-1", "CUT-1", "2026-02-01T00:00:00Z")],
+                    true,
+                    Some("cursor-1"),
+                )
+            } else {
+                (
+                    vec![issue_node("issue-2", "CUT-2", "2026-02-02T00:00:00Z")],
+                    false,
+                    None,
+                )
+            };
+            MockResponse::json(serde_json::json!({
+                "data": { "issues": {
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": has_next_page,
+                        "endCursor": end_cursor
+                    }
+                }}
+            }))
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let upper = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let result = runtime()
+            .block_on(client.sync_team_index_window(&db, "CUT", "default", true, upper, None))
+            .unwrap();
+
+        assert_eq!(result.indexed, 2);
+        assert_eq!(result.inserted, 2);
+        assert_eq!(result.queued_for_hydration, 2);
+        assert_eq!(result.committed_checkpoint, "2026-03-01T00:00:00+00:00");
+        assert_eq!(
+            db.list_all_issues(Some("CUT"), None, 10, 0, "default")
+                .unwrap()
+                .len(),
+            2
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| {
+            let query = request["query"].as_str().unwrap();
+            query.contains("$upper")
+                && query.contains("orderBy: updatedAt")
+                && !query.contains("description")
+                && !query.contains("comments(")
+                && !query.contains("relations(")
+                && !query.contains("labels(")
+        }));
+    }
+
+    #[test]
+    fn team_project_sync_is_scoped_and_returns_project_and_milestone_counts() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let project_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let server_requests = Arc::clone(&project_requests);
+        let server = MockLinearServer::start(move |request| {
+            if request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("projects("))
+            {
+                server_requests.lock().unwrap().push(request.clone());
+            }
+            project_sync_response(&request, 1).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        let result = runtime()
+            .block_on(client.sync_team_projects(&db, "CUT", "default"))
+            .unwrap();
+
+        assert_eq!(result.projects, 1);
+        assert_eq!(result.milestones, 1);
+        let projects = db.list_projects("default", true).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].teams[0].key, "CUT");
+        let requests = project_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["variables"]["teamId"], "team-cut");
+    }
+
+    #[test]
+    fn interrupted_team_project_sync_does_not_reconcile_missing_projects() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let fail_members = Arc::new(AtomicBool::new(false));
+        let server_fail_members = Arc::clone(&fail_members);
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or_default();
+            if server_fail_members.load(Ordering::Relaxed) && query.contains("members(first:") {
+                return MockResponse::status(500);
+            }
+            let count = if server_fail_members.load(Ordering::Relaxed) {
+                1
+            } else {
+                2
+            };
+            project_sync_response(&request, count).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let rt = runtime();
+
+        let initial = rt
+            .block_on(client.sync_team_projects(&db, "CUT", "default"))
+            .unwrap();
+        assert_eq!(initial.projects, 2);
+        fail_members.store(true, Ordering::Relaxed);
+        assert!(rt
+            .block_on(client.sync_team_projects(&db, "CUT", "default"))
+            .is_err());
+        let projects = db.list_projects("default", true).unwrap();
+        assert_eq!(projects.len(), 2);
+        assert!(projects.iter().any(|project| project.id == "project-2"));
+    }
+
+    #[test]
+    fn workspace_project_sync_compatibility_api_still_traverses_all_projects() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let server = MockLinearServer::start(move |request| {
+            project_sync_response(&request, 1).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        let (projects, milestones) = runtime()
+            .block_on(client.sync_projects(&db, "default"))
+            .unwrap();
+        assert_eq!((projects, milestones), (2, 2));
+        let stored = db.list_projects("default", true).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|project| project.teams[0].key == "CUT"));
+    }
+
+    #[test]
+    fn failed_index_page_leaves_checkpoint_unchanged() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let server = MockLinearServer::start(move |request| {
+            if request["variables"]["after"].is_null() {
+                MockResponse::json(serde_json::json!({
+                    "data": { "issues": {
+                        "nodes": [issue_node("issue-1", "CUT-1", "2026-02-01T00:00:00Z")],
+                        "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" }
+                    }}
+                }))
+            } else {
+                MockResponse::status(500)
+            }
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut stale = db::test_helpers::make_issue("CUT-99", "CUT");
+        stale.id = "stale-issue".into();
+        db.upsert_issue(&stale).unwrap();
+        db.set_sync_cursor("default", "CUT", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let upper = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert!(runtime()
+            .block_on(client.sync_team_index_window(&db, "CUT", "default", true, upper, None,))
+            .is_err());
+        assert_eq!(
+            db.get_synced_through_at("default", "CUT")
+                .unwrap()
+                .as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert!(db.get_issue("CUT-1").unwrap().is_some());
+        assert!(db.get_issue("CUT-99").unwrap().is_some());
+    }
+
+    #[test]
+    fn empty_index_window_advances_checkpoint_and_uses_overlap() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let lower = Arc::new(Mutex::new(None::<String>));
+        let server_lower = Arc::clone(&lower);
+        let server = MockLinearServer::start(move |request| {
+            *server_lower.lock().unwrap() = request["variables"]["lower"]
+                .as_str()
+                .map(ToString::to_string);
+            MockResponse::json(serde_json::json!({
+                "data": { "issues": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            }))
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        db.set_sync_cursor("default", "CUT", "2026-02-01T00:00:00Z")
+            .unwrap();
+        let upper = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let result = runtime()
+            .block_on(client.sync_team_index_window(&db, "CUT", "default", false, upper, None))
+            .unwrap();
+        assert_eq!(result.indexed, 0);
+        assert_eq!(
+            lower.lock().unwrap().as_deref(),
+            Some("2026-01-31T23:55:00+00:00")
+        );
+        assert_eq!(
+            db.get_synced_through_at("default", "CUT")
+                .unwrap()
+                .as_deref(),
+            Some("2026-03-01T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn subsequent_overlap_finds_an_issue_at_the_previous_upper_boundary() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server = MockLinearServer::start(move |_request| {
+            let call = server_calls.fetch_add(1, Ordering::Relaxed);
+            let nodes = if call == 0 {
+                Vec::new()
+            } else {
+                vec![issue_node(
+                    "issue-boundary",
+                    "CUT-9",
+                    "2026-01-01T00:00:00Z",
+                )]
+            };
+            MockResponse::json(serde_json::json!({
+                "data": { "issues": {
+                    "nodes": nodes,
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            }))
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let first_upper = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let second_upper = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rt = runtime();
+
+        let first = rt
+            .block_on(client.sync_team_index_window(
+                &db,
+                "CUT",
+                "default",
+                false,
+                first_upper,
+                None,
+            ))
+            .unwrap();
+        let second = rt
+            .block_on(client.sync_team_index_window(
+                &db,
+                "CUT",
+                "default",
+                false,
+                second_upper,
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(first.indexed, 0);
+        assert_eq!(second.indexed, 1);
+        assert!(db.get_issue("CUT-9").unwrap().is_some());
+    }
+
+    #[test]
+    fn issue_hydration_families_complete_independently() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or_default();
+            if query.contains("labels(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "errors": [{ "message": "Forbidden" }]
+                }));
+            }
+            if query.contains("relations(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "data": { "issue": { "relations": {
+                        "nodes": [],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }}}
+                }));
+            }
+            if query.contains("comments(") {
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        db.mark_hydration_complete(
+            "default",
+            "issue-1",
+            db::HydrationResource::Details,
+            &issue.updated_at,
+            "2026-01-03T00:00:00Z",
+        )
+        .unwrap();
+
+        let batch = runtime()
+            .block_on(client.hydrate_pending_issues(
+                &db,
+                "CUT",
+                "default",
+                1,
+                db::HydrationPolicy::OpenOnly,
+                None,
+            ))
+            .unwrap();
+        let result = db.get_issue_hydration_state("default", "issue-1").unwrap();
+        assert_eq!(
+            result.status,
+            db::HydrationStatus::Partial,
+            "{:?}",
+            result.resources
+        );
+        assert_eq!(batch.partial, 1);
+        assert_eq!(batch.permanent_failures, 1);
+        let status = |resource| {
+            result
+                .resources
+                .iter()
+                .find(|state| state.resource == resource)
+                .unwrap()
+                .status
+        };
+        assert_eq!(
+            status(db::HydrationResource::Details),
+            db::HydrationStatus::Hydrated
+        );
+        assert_eq!(
+            status(db::HydrationResource::Labels),
+            db::HydrationStatus::PermissionDenied
+        );
+        assert_eq!(
+            status(db::HydrationResource::Relations),
+            db::HydrationStatus::Hydrated
+        );
+        assert_eq!(
+            status(db::HydrationResource::Comments),
+            db::HydrationStatus::Hydrated
+        );
+    }
+
+    #[test]
+    fn http_400_ratelimited_is_persisted_and_stops_background_batch() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server = MockLinearServer::start(move |_request| {
+            server_calls.fetch_add(1, Ordering::Relaxed);
+            MockResponse {
+                status: 400,
+                body: serde_json::json!({
+                    "errors": [{
+                        "message": "request budget exhausted",
+                        "extensions": { "code": "RATELIMITED" }
+                    }]
+                })
+                .to_string(),
+            }
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        for number in 1..=2 {
+            let mut issue = db::test_helpers::make_issue(&format!("CUT-{number}"), "CUT");
+            issue.id = format!("issue-{number}");
+            db.upsert_issue(&issue).unwrap();
+            db.ensure_hydration_state_for_issue("default", &issue, "initial")
+                .unwrap();
+        }
+
+        let result = runtime()
+            .block_on(client.hydrate_pending_issues(
+                &db,
+                "CUT",
+                "default",
+                2,
+                db::HydrationPolicy::OpenOnly,
+                None,
+            ))
+            .unwrap();
+        assert!(result.rate_limited);
+        assert_eq!(result.deferred, 1);
+        assert!((1..=3).contains(&calls.load(Ordering::Relaxed)));
+        let state = db.get_issue_hydration_state("default", "issue-1").unwrap();
+        assert_eq!(
+            state
+                .resources
+                .iter()
+                .find(|resource| resource.resource == db::HydrationResource::Details)
+                .unwrap()
+                .status,
+            db::HydrationStatus::Retryable
+        );
+        assert!(state.resources[0].next_retry_at.is_some());
+    }
+
+    #[test]
+    fn permanent_permission_failure_is_not_background_retried() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server = MockLinearServer::start(move |_request| {
+            server_calls.fetch_add(1, Ordering::Relaxed);
+            MockResponse::json(serde_json::json!({
+                "errors": [{ "message": "Forbidden" }]
+            }))
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        for resource in [
+            db::HydrationResource::Labels,
+            db::HydrationResource::Relations,
+            db::HydrationResource::Comments,
+        ] {
+            db.mark_hydration_complete(
+                "default",
+                "issue-1",
+                resource,
+                &issue.updated_at,
+                "2026-01-03T00:00:00Z",
+            )
+            .unwrap();
+        }
+
+        let rt = runtime();
+        rt.block_on(client.hydrate_pending_issues(
+            &db,
+            "CUT",
+            "default",
+            1,
+            db::HydrationPolicy::OpenOnly,
+            None,
+        ))
+        .unwrap();
+        let first_calls = calls.load(Ordering::Relaxed);
+        let second = rt
+            .block_on(client.hydrate_pending_issues(
+                &db,
+                "CUT",
+                "default",
+                1,
+                db::HydrationPolicy::OpenOnly,
+                None,
+            ))
+            .unwrap();
+        assert_eq!(
+            db.get_issue_hydration_state("default", "issue-1")
+                .unwrap()
+                .resources
+                .iter()
+                .find(|resource| resource.resource == db::HydrationResource::Details)
+                .unwrap()
+                .attempt_count,
+            1
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), first_calls);
+        assert_eq!(second.requested, 0);
+    }
+
+    #[test]
+    fn if_needed_selected_hydration_skips_fresh_and_deferred_resources() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server_calls = Arc::clone(&calls);
+        let server = MockLinearServer::start(move |_request| {
+            server_calls.fetch_add(1, Ordering::Relaxed);
+            MockResponse::status(500)
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for resource in db::HYDRATION_RESOURCES {
+            db.mark_hydration_complete("default", &issue.id, resource, &issue.updated_at, &now)
+                .unwrap();
+        }
+        db.mark_hydration_failed(
+            "default",
+            &issue.id,
+            db::HydrationResource::Relations,
+            db::HydrationStatus::Retryable,
+            Some("2999-01-01T00:00:00Z"),
+            "later",
+        )
+        .unwrap();
+        db.mark_hydration_failed(
+            "default",
+            &issue.id,
+            db::HydrationResource::Labels,
+            db::HydrationStatus::PermissionDenied,
+            None,
+            "forbidden",
+        )
+        .unwrap();
+
+        let rt = runtime();
+        for _ in 0..2 {
+            rt.block_on(client.hydrate_issue_with_mode(
+                &db,
+                &issue.id,
+                "default",
+                db::HydrationMode::IfNeeded,
+                None,
+            ))
+            .unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let state = db.get_issue_hydration_state("default", &issue.id).unwrap();
+        assert_eq!(
+            state
+                .resources
+                .iter()
+                .find(|resource| resource.resource == db::HydrationResource::Relations)
+                .unwrap()
+                .attempt_count,
+            0
+        );
+    }
+
+    #[test]
+    fn if_needed_hydrates_pending_resources_without_refreshing_fresh_ones() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server_requests = Arc::clone(&requests);
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or_default().to_string();
+            server_requests.lock().unwrap().push(query);
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for resource in [
+            db::HydrationResource::Details,
+            db::HydrationResource::Relations,
+            db::HydrationResource::Comments,
+        ] {
+            db.mark_hydration_complete("default", &issue.id, resource, &issue.updated_at, &now)
+                .unwrap();
+        }
+
+        runtime()
+            .block_on(client.hydrate_issue_with_mode(
+                &db,
+                &issue.id,
+                "default",
+                db::HydrationMode::IfNeeded,
+                None,
+            ))
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("labels(first:"));
+    }
+
+    #[test]
+    fn force_refresh_requeues_all_resources_and_recovers_permanent_failures() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = MockLinearServer::start(move |request| {
+            server_requests.fetch_add(1, Ordering::Relaxed);
+            if request["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("comments("))
+            {
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        for resource in db::HYDRATION_RESOURCES {
+            db.mark_hydration_failed(
+                "default",
+                &issue.id,
+                resource,
+                db::HydrationStatus::PermissionDenied,
+                None,
+                "forbidden",
+            )
+            .unwrap();
+        }
+
+        let result = runtime()
+            .block_on(client.hydrate_issue_with_mode(
+                &db,
+                &issue.id,
+                "default",
+                db::HydrationMode::ForceRefresh,
+                None,
+            ))
+            .unwrap();
+        assert_eq!(result.status, db::HydrationStatus::Hydrated);
+        assert_eq!(result.hydrated_resources, 4);
+        assert!(requests.load(Ordering::Relaxed) >= 4);
     }
 
     #[test]

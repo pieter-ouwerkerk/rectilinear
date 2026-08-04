@@ -102,7 +102,11 @@ pub enum ProjectAction {
     /// Import a complete project with milestones and linked issues
     Import { id: String },
     /// Refresh the project and milestone cache
-    Sync,
+    Sync {
+        /// Limit synchronization and reconciliation to one team
+        #[arg(long)]
+        team: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -283,8 +287,13 @@ pub async fn handle_project_action(
         ProjectAction::Import { id } => {
             print_json(&client.import_project(db, workspace, &id).await?)
         }
-        ProjectAction::Sync => {
-            let (projects, milestones) = client.sync_projects(db, workspace).await?;
+        ProjectAction::Sync { team } => {
+            let (projects, milestones) = if let Some(team) = team {
+                let result = client.sync_team_projects(db, &team, workspace).await?;
+                (result.projects, result.milestones)
+            } else {
+                client.sync_projects(db, workspace).await?
+            };
             print_json(&serde_json::json!({
                 "projects": projects,
                 "milestones": milestones,

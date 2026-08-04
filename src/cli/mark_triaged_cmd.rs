@@ -184,9 +184,7 @@ pub async fn handle_mark_triaged(
     // Add comment if provided
     if let Some(comment_text) = comment {
         client.add_comment(&issue.id, comment_text).await?;
-        let _ = client
-            .sync_issue_comments(db, &issue.id, workspace)
-            .await;
+        let _ = client.sync_issue_comments(db, &issue.id, workspace).await;
     }
 
     // Sync back
