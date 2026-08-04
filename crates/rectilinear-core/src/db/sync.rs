@@ -137,8 +137,12 @@ impl Database {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "DELETE FROM project_teams
-                 WHERE team_key = ?1 AND COALESCE(sync_token, '') <> ?2",
-                rusqlite::params![team_key, sync_token],
+                 WHERE team_key = ?2
+                   AND project_id IN (
+                       SELECT id FROM projects WHERE workspace_id = ?1
+                   )
+                   AND COALESCE(sync_token, '') <> ?3",
+                rusqlite::params![workspace_id, team_key, sync_token],
             )?;
             let changed = tx.execute(
                 "DELETE FROM projects
@@ -723,6 +727,42 @@ impl Database {
 mod tests {
     use super::*;
     use crate::db::test_helpers::{make_issue, test_db};
+    use crate::db::Project;
+
+    fn project(id: &str, workspace_id: &str) -> Project {
+        Project {
+            id: id.into(),
+            workspace_id: workspace_id.into(),
+            slug_id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            content: None,
+            icon: None,
+            color: "#000000".into(),
+            status_id: "status-1".into(),
+            status_name: "Planned".into(),
+            status_type: "planned".into(),
+            status_color: "#000000".into(),
+            priority: 0,
+            start_date: None,
+            target_date: None,
+            lead_id: None,
+            lead_name: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            archived_at: None,
+            url: format!("https://linear.app/project/{id}"),
+            progress: 0.0,
+            synced_at: None,
+            teams: vec![ProjectTeam {
+                id: format!("team-{workspace_id}"),
+                key: "ENG".into(),
+                name: "Engineering".into(),
+            }],
+            members: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
 
     #[test]
     fn page_tokens_preserve_old_comments_until_completion() {
@@ -834,6 +874,31 @@ mod tests {
         let stored = db.get_issue(&issue.id).unwrap().unwrap();
         assert!(stored.cycle_id.is_none());
         assert!(stored.cycle_name.is_none());
+    }
+
+    #[test]
+    fn team_project_reconciliation_is_scoped_to_the_workspace() {
+        let (db, _dir) = test_db();
+        let current = project("current-a", "workspace-a");
+        let stale = project("stale-a", "workspace-a");
+        let other_workspace = project("current-b", "workspace-b");
+        db.upsert_project(&current).unwrap();
+        db.upsert_project(&stale).unwrap();
+        db.upsert_project(&other_workspace).unwrap();
+
+        db.upsert_project_team_page(&current.id, &current.teams, "run-a")
+            .unwrap();
+        db.reconcile_team_projects("workspace-a", "ENG", "run-a")
+            .unwrap();
+
+        assert!(db
+            .get_project("workspace-a", "current-a")
+            .unwrap()
+            .is_some());
+        assert!(db.get_project("workspace-a", "stale-a").unwrap().is_none());
+        let preserved = db.get_project("workspace-b", "current-b").unwrap().unwrap();
+        assert_eq!(preserved.teams.len(), 1);
+        assert_eq!(preserved.teams[0].key, "ENG");
     }
 
     #[test]
