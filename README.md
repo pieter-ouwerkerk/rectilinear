@@ -401,3 +401,7 @@ issue's context before asking questions.
 **Vector** — Embeds the query via Gemini API, computes cosine similarity against stored issue chunks, returns max similarity per issue.
 
 **Hybrid** (default) — Runs both FTS and vector search, combines results with Reciprocal Rank Fusion (`score = Σ 1/(k + rank)`). For duplicate detection, vector results are weighted 0.7 vs FTS 0.3.
+
+## Maintainer documentation
+
+- [Publishing a release](docs/releasing.md)
