@@ -402,6 +402,8 @@ issue's context before asking questions.
 
 **Hybrid** (default) — Runs both FTS and vector search, combines results with Reciprocal Rank Fusion (`score = Σ 1/(k + rank)`). For duplicate detection, vector results are weighted 0.7 vs FTS 0.3.
 
-## Maintainer documentation
+## Releases
+
+[`rectilinear`](https://crates.io/crates/rectilinear) and [`rectilinear-core`](https://crates.io/crates/rectilinear-core) are published to crates.io
 
 - [Publishing a release](docs/releasing.md)
