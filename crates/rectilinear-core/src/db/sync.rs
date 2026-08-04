@@ -409,6 +409,27 @@ impl Database {
         })
     }
 
+    /// Reconcile a full issue-index traversal as of its fixed upper bound.
+    /// Locally cached rows newer than that bound were intentionally outside the
+    /// traversal and must not be mistaken for hard deletions.
+    pub fn reconcile_full_issue_index(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        sync_token: &str,
+        upper_bound: &str,
+    ) -> Result<usize> {
+        self.with_conn(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM issues
+                 WHERE workspace_id = ?1 AND team_key = ?2
+                   AND COALESCE(sync_token, '') <> ?3
+                   AND julianday(updated_at) <= julianday(?4)",
+                rusqlite::params![workspace_id, team_key, sync_token, upper_bound],
+            )?)
+        })
+    }
+
     pub fn upsert_relation_page(
         &self,
         issue_id: &str,
@@ -907,7 +928,7 @@ mod tests {
         db.set_sync_cursor("default", "ENG", "2026-01-01T00:00:00Z")
             .unwrap();
         db.with_conn(|conn| {
-            conn.execute("DELETE FROM schema_version WHERE version = 11", [])?;
+            conn.execute("DELETE FROM schema_version WHERE version >= 11", [])?;
             crate::db::schema::run_migrations(conn)
         })
         .unwrap();

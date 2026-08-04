@@ -129,7 +129,10 @@ fn membership_rows(issue: &rectilinear_core::db::Issue) -> [(&'static str, Strin
     [
         (
             "Project",
-            issue.project_name.clone().unwrap_or_else(|| "None".to_string()),
+            issue
+                .project_name
+                .clone()
+                .unwrap_or_else(|| "None".to_string()),
         ),
         (
             "Milestone",
@@ -140,7 +143,10 @@ fn membership_rows(issue: &rectilinear_core::db::Issue) -> [(&'static str, Strin
         ),
         (
             "Cycle",
-            issue.cycle_name.clone().unwrap_or_else(|| "None".to_string()),
+            issue
+                .cycle_name
+                .clone()
+                .unwrap_or_else(|| "None".to_string()),
         ),
     ]
 }
@@ -175,6 +181,7 @@ mod tests {
             project_milestone_name: Some("Request tracing".into()),
             cycle_id: Some("cycle-1".into()),
             cycle_name: Some("Cycle 42".into()),
+            archived_at: None,
         }
     }
 

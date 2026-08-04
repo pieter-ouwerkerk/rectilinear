@@ -4,8 +4,11 @@ mod local;
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::config::{Config, EmbeddingBackend};
+
+const GEMINI_EMBEDDING_MODEL: &str = "gemini-embedding-2-preview";
 
 enum Backend {
     Gemini(GeminiBackend),
@@ -16,6 +19,15 @@ enum Backend {
 pub struct Embedder {
     backend: Backend,
     dimensions: usize,
+}
+
+/// Stable fingerprint of the exact issue fields passed to `chunk_text`.
+pub fn issue_content_hash(title: &str, description: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(title.as_bytes());
+    hasher.update([0]);
+    hasher.update(description.unwrap_or_default().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 // --- Gemini API backend ---
@@ -94,8 +106,8 @@ impl GeminiBackend {
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2-preview:batchEmbedContents?key={}",
-            self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_EMBEDDING_MODEL}:batchEmbedContents?key={}",
+            self.api_key,
         );
 
         let mut all_embeddings = Vec::new();
@@ -104,7 +116,7 @@ impl GeminiBackend {
                 .iter()
                 .map(|text| {
                     serde_json::json!({
-                        "model": "models/gemini-embedding-2-preview",
+                        "model": format!("models/{GEMINI_EMBEDDING_MODEL}"),
                         "content": {
                             "parts": [{"text": text}]
                         },
@@ -306,9 +318,9 @@ impl Embedder {
 
     pub fn backend_name(&self) -> &str {
         match &self.backend {
-            Backend::Gemini(_) => "gemini-api",
+            Backend::Gemini(_) => GEMINI_EMBEDDING_MODEL,
             #[cfg(feature = "local-embeddings")]
-            Backend::Local(_) => "local-gguf",
+            Backend::Local(_) => "embeddinggemma-300m-qat-q8_0",
         }
     }
 }

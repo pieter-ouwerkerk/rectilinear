@@ -57,6 +57,30 @@ enum Commands {
         /// Report each synchronization page and adaptive page-size reduction
         #[arg(long)]
         verbose: bool,
+        /// Stop after the fast authoritative issue index is available
+        #[arg(long)]
+        index_only: bool,
+    },
+    /// Hydrate rich issue details, labels, relations, and comments
+    Hydrate {
+        /// Team key for a background batch (e.g., ENG)
+        #[arg(short, long)]
+        team: Option<String>,
+        /// Hydrate this selected issue immediately (UUID or identifier)
+        #[arg(long)]
+        issue: Option<String>,
+        /// Maximum issues in a background batch
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Hydrate only non-completed/non-canceled issues
+        #[arg(long, conflicts_with = "all")]
+        open_only: bool,
+        /// Include old completed and canceled issues
+        #[arg(long)]
+        all: bool,
+        /// Re-fetch every resource, including previous permanent failures
+        #[arg(long, requires = "issue")]
+        force_refresh: bool,
     },
     /// Search issues
     Search {
@@ -333,6 +357,7 @@ async fn main() -> Result<()> {
                     embed,
                     include_archived,
                     verbose,
+                    index_only,
                 } => {
                     cli::sync_cmd::handle_sync(
                         &db,
@@ -342,6 +367,28 @@ async fn main() -> Result<()> {
                         embed,
                         include_archived,
                         verbose,
+                        index_only,
+                        &workspace,
+                    )
+                    .await?;
+                }
+                Commands::Hydrate {
+                    team,
+                    issue,
+                    limit,
+                    open_only,
+                    all,
+                    force_refresh,
+                } => {
+                    cli::hydrate_cmd::handle_hydrate(
+                        &db,
+                        &config,
+                        team.as_deref(),
+                        issue.as_deref(),
+                        limit,
+                        open_only,
+                        all,
+                        force_refresh,
                         &workspace,
                     )
                     .await?;
@@ -502,22 +549,12 @@ async fn main() -> Result<()> {
                     cli::teams_cmd::handle_teams(&config, &workspace).await?;
                 }
                 Commands::Projects { action } => {
-                    cli::projects_cmd::handle_project_action(
-                        action,
-                        &db,
-                        &config,
-                        &workspace,
-                    )
-                    .await?;
+                    cli::projects_cmd::handle_project_action(action, &db, &config, &workspace)
+                        .await?;
                 }
                 Commands::Milestones { action } => {
-                    cli::projects_cmd::handle_milestone_action(
-                        action,
-                        &db,
-                        &config,
-                        &workspace,
-                    )
-                    .await?;
+                    cli::projects_cmd::handle_milestone_action(action, &db, &config, &workspace)
+                        .await?;
                 }
                 Commands::Config { .. } | Commands::Workspace { .. } | Commands::Serve => {
                     unreachable!()
