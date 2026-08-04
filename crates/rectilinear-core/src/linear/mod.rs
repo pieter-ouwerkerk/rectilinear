@@ -2708,7 +2708,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|request| {
             let query = request["query"].as_str().unwrap();
-            query.contains("$upper")
+            query.contains("$upper: DateTimeOrDuration!")
                 && query.contains("orderBy: updatedAt")
                 && !query.contains("description")
                 && !query.contains("comments(")
@@ -2843,11 +2843,14 @@ mod tests {
     fn empty_index_window_advances_checkpoint_and_uses_overlap() {
         let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
         let lower = Arc::new(Mutex::new(None::<String>));
+        let query = Arc::new(Mutex::new(None::<String>));
         let server_lower = Arc::clone(&lower);
+        let server_query = Arc::clone(&query);
         let server = MockLinearServer::start(move |request| {
             *server_lower.lock().unwrap() = request["variables"]["lower"]
                 .as_str()
                 .map(ToString::to_string);
+            *server_query.lock().unwrap() = request["query"].as_str().map(ToString::to_string);
             MockResponse::json(serde_json::json!({
                 "data": { "issues": {
                     "nodes": [],
@@ -2871,6 +2874,10 @@ mod tests {
             lower.lock().unwrap().as_deref(),
             Some("2026-01-31T23:55:00+00:00")
         );
+        let query = query.lock().unwrap();
+        let query = query.as_deref().unwrap();
+        assert!(query.contains("$lower: DateTimeOrDuration"));
+        assert!(query.contains("$upper: DateTimeOrDuration!"));
         assert_eq!(
             db.get_synced_through_at("default", "CUT")
                 .unwrap()

@@ -283,12 +283,12 @@ impl LinearClient {
             "updatedAt: { lte: $upper }"
         };
         let lower_declaration = if lower.is_some() {
-            ", $lower: DateTime"
+            ", $lower: DateTimeOrDuration"
         } else {
             ""
         };
         let query = format!(
-            r#"query($first: Int!, $after: String, $teamKey: String!{lower_declaration}, $upper: DateTime!) {{
+            r#"query($first: Int!, $after: String, $teamKey: String!{lower_declaration}, $upper: DateTimeOrDuration!) {{
                 issues(
                     first: $first,
                     after: $after,
