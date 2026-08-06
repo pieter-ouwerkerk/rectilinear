@@ -2156,6 +2156,8 @@ mod tests {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Accepted sockets may inherit the listener's nonblocking mode.
+                            stream.set_nonblocking(false).unwrap();
                             if let Some(request) = read_json_request(&mut stream) {
                                 write_mock_response(&mut stream, handler(request));
                             }
