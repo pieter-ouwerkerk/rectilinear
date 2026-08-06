@@ -689,6 +689,31 @@ impl Database {
         })
     }
 
+    /// Mark a cancelled or dropped sync attempt as partial only if it still
+    /// owns the family's current running lease. A newer attempt may have
+    /// replaced the token by the time cleanup runs, in which case this is a
+    /// no-op.
+    pub(crate) fn mark_sync_family_interrupted(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        family: &str,
+        sync_token: &str,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE sync_family_state
+                 SET status='partial',
+                     error='sync interrupted before completion',
+                     updated_at=datetime('now')
+                 WHERE workspace_id=?1 AND team_key=?2 AND family=?3
+                   AND sync_token=?4 AND status='running'",
+                rusqlite::params![workspace_id, team_key, family, sync_token],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     pub fn get_sync_family_state(
         &self,
         workspace_id: &str,

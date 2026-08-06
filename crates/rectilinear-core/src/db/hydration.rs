@@ -314,6 +314,31 @@ impl Database {
         })
     }
 
+    /// Return a cancelled/dropped attempt to the retry queue, but only when it
+    /// still owns the current running attempt. The attempt count acts as a
+    /// lightweight lease so cleanup from an older task cannot clobber a newer
+    /// attempt or a completed resource.
+    pub(crate) fn requeue_interrupted_hydration(
+        &self,
+        workspace_id: &str,
+        issue_id: &str,
+        resource: HydrationResource,
+        attempt_count: u32,
+    ) -> Result<bool> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE issue_hydration_state
+                 SET status='retryable', queue_reason='retry',
+                     next_retry_at=NULL,
+                     last_error='hydration attempt interrupted before completion'
+                 WHERE workspace_id=?1 AND issue_id=?2 AND resource=?3
+                   AND status='running' AND attempt_count=?4",
+                rusqlite::params![workspace_id, issue_id, resource.as_str(), attempt_count],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     pub fn requeue_issue_hydration(
         &self,
         workspace_id: &str,
@@ -846,7 +871,7 @@ mod tests {
             .unwrap();
         assert_eq!(relations.status, HydrationStatus::Retryable);
         assert_eq!(relations.attempt_count, 1);
-        assert!(relations.next_retry_at.is_some());
+        assert!(relations.next_retry_at.is_none());
     }
 
     #[test]

@@ -5,10 +5,21 @@ use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 use crate::config::{Config, EmbeddingBackend};
 
 const GEMINI_EMBEDDING_MODEL: &str = "gemini-embedding-2-preview";
+const GEMINI_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const GEMINI_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(GEMINI_CONNECT_TIMEOUT)
+        .timeout(GEMINI_REQUEST_TIMEOUT)
+        .build()
+        .expect("static Gemini HTTP client configuration should be valid")
+}
 
 enum Backend {
     Gemini(GeminiBackend),
@@ -64,7 +75,7 @@ struct GeminiErrorBody {
 impl GeminiBackend {
     fn new(api_key: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client(),
             api_key: api_key.to_string(),
         }
     }

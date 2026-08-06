@@ -22,6 +22,16 @@ pub use projects::*;
 use pagination::{operation_error, paginate, ConnectionPage, PageInfo};
 
 const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
+const LINEAR_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LINEAR_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(LINEAR_CONNECT_TIMEOUT)
+        .timeout(LINEAR_REQUEST_TIMEOUT)
+        .build()
+        .expect("static Linear HTTP client configuration should be valid")
+}
 
 #[derive(Clone)]
 pub struct LinearClient {
@@ -30,6 +40,47 @@ pub struct LinearClient {
     api_url: String,
     viewer_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     sync_query_config: SyncQueryConfig,
+}
+
+/// A token-leased cleanup guard for sync-family state. Dropping an in-flight
+/// future (for example after an MCP cancellation) changes only the still-owned
+/// `running` row to `partial`; completed, failed, or superseded attempts are
+/// left untouched.
+struct SyncFamilyRunGuard {
+    db: Database,
+    workspace_id: String,
+    team_key: String,
+    family: String,
+    sync_token: String,
+}
+
+impl SyncFamilyRunGuard {
+    fn new(
+        db: &Database,
+        workspace_id: &str,
+        team_key: &str,
+        family: &str,
+        sync_token: &str,
+    ) -> Self {
+        Self {
+            db: db.clone(),
+            workspace_id: workspace_id.to_string(),
+            team_key: team_key.to_string(),
+            family: family.to_string(),
+            sync_token: sync_token.to_string(),
+        }
+    }
+}
+
+impl Drop for SyncFamilyRunGuard {
+    fn drop(&mut self) {
+        let _ = self.db.mark_sync_family_interrupted(
+            &self.workspace_id,
+            &self.team_key,
+            &self.family,
+            &self.sync_token,
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,7 +451,7 @@ struct SingleIssueData {
 impl LinearClient {
     pub fn new(config: &Config) -> Result<Self> {
         let api_key = config.linear_api_key()?.to_string();
-        let client = reqwest::Client::new();
+        let client = default_http_client();
         Ok(Self {
             client,
             api_key,
@@ -413,7 +464,7 @@ impl LinearClient {
     /// Create a client with an explicit API key (for FFI callers).
     pub fn with_api_key(api_key: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client(),
             api_key: api_key.to_string(),
             api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -1722,6 +1773,7 @@ impl LinearClient {
             Some(self.sync_query_config.page_size(LinearOperation::Labels)),
             &sync_token,
         )?;
+        let _family_guard = SyncFamilyRunGuard::new(db, workspace_id, "*", "labels", &sync_token);
         let result = paginate(
             &self.sync_query_config,
             LinearOperation::Labels,
@@ -2943,6 +2995,135 @@ mod tests {
         assert_eq!(first.indexed, 0);
         assert_eq!(second.indexed, 1);
         assert!(db.get_issue("CUT-9").unwrap().is_some());
+    }
+
+    #[test]
+    fn cancelled_hydration_requeues_the_inflight_resource() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let details_started = Arc::new(AtomicBool::new(false));
+        let server_details_started = Arc::clone(&details_started);
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or_default();
+            if query.contains("comments(") {
+                return successful_comments();
+            }
+            if query.contains("issue(id: $id)") && query.contains("description priority") {
+                server_details_started.store(true, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(500));
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+        let mut issue = db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "issue-1".into();
+        db.upsert_issue(&issue).unwrap();
+        db.ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+
+        runtime().block_on(async {
+            let task_client = client.clone();
+            let task_db = db.clone();
+            let task = tokio::spawn(async move {
+                task_client
+                    .hydrate_pending_issues(
+                        &task_db,
+                        "CUT",
+                        "default",
+                        1,
+                        db::HydrationPolicy::All,
+                        None,
+                    )
+                    .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !details_started.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("detail hydration did not start");
+
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        });
+
+        let state = db.get_issue_hydration_state("default", "issue-1").unwrap();
+        let details = state
+            .resources
+            .iter()
+            .find(|resource| resource.resource == db::HydrationResource::Details)
+            .unwrap();
+        assert_eq!(details.status, db::HydrationStatus::Retryable);
+        assert!(details.next_retry_at.is_none());
+        assert_eq!(
+            details.last_error.as_deref(),
+            Some("hydration attempt interrupted before completion")
+        );
+
+        let retry = runtime()
+            .block_on(client.hydrate_pending_issues(
+                &db,
+                "CUT",
+                "default",
+                1,
+                db::HydrationPolicy::All,
+                None,
+            ))
+            .unwrap();
+        assert_eq!(retry.hydrated, 1);
+        let retried = db.get_issue_hydration_state("default", "issue-1").unwrap();
+        assert!(retried
+            .resources
+            .iter()
+            .all(|resource| resource.status == db::HydrationStatus::Hydrated));
+    }
+
+    #[test]
+    fn cancelled_index_sync_marks_the_owned_family_partial() {
+        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let index_started = Arc::new(AtomicBool::new(false));
+        let server_index_started = Arc::clone(&index_started);
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or_default();
+            if query.contains("issues(") {
+                server_index_started.store(true, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(500));
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        runtime().block_on(async {
+            let task_client = client.clone();
+            let task_db = db.clone();
+            let task = tokio::spawn(async move {
+                task_client
+                    .sync_team_index(&task_db, "CUT", "default", false, None)
+                    .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !index_started.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("issue index synchronization did not start");
+
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        });
+
+        let state = family_status(&db, "issue index");
+        assert_eq!(state.status, "partial");
+        assert_eq!(
+            state.error.as_deref(),
+            Some("sync interrupted before completion")
+        );
+        assert!(db.get_sync_cursor("default", "CUT").unwrap().is_none());
     }
 
     #[test]
