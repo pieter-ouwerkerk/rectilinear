@@ -344,7 +344,7 @@ This exposes 25 tools to MCP clients:
 | `append_to_issue` | Add comment or extend description |
 | `sync_team` | Trigger sync for a team; full syncs include archived issues and refresh comments |
 | `issue_context` | Issue + its N most similar issues, comments, and comment sync diagnostics |
-| `get_triage_queue` | Batch of unprioritized issues enriched with similar issues and code search hints |
+| `get_triage_queue` | Local-snapshot batch of unprioritized issues with time-bounded similar-issue enrichment and code search hints |
 | `mark_triaged` | Set priority, state, labels, project/milestone + update title/description + add comment in one call |
 | `manage_relation` | Add or remove issue relations |
 
@@ -363,7 +363,7 @@ rectilinear sync --team CUT --embed
 #    "let's triage some random CUT issues"  (uses shuffle for variety)
 ```
 
-**What happens:** Claude calls `get_triage_queue`, which syncs from Linear to get fresh data. For each issue, Claude:
+**What happens:** Claude calls `get_triage_queue`, which reads the latest locally committed snapshot without waiting for Linear synchronization. Run `sync_team` separately first when you need a refresh. Similar-issue enrichment is best-effort and time-bounded, so the base queue can still return when the embedding service is slow or unavailable. For each issue, Claude:
 
 1. Explores the codebase using extracted `code_search_hints` (file paths, identifiers, labels) to understand the current implementation
 2. Presents the issue with code findings and similar issues, then asks clarifying questions from the perspective of a staff engineer who would implement it

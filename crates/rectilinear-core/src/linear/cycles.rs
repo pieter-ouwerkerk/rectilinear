@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::db::{self, Database};
 
 use super::pagination::{paginate, ConnectionPage, LinearOperation, PageInfo};
-use super::LinearClient;
+use super::{LinearClient, SyncFamilyRunGuard};
 
 #[derive(Debug, Deserialize)]
 struct CyclesData {
@@ -64,6 +64,8 @@ impl LinearClient {
             Some(self.sync_query_config.page_size(LinearOperation::Cycles)),
             &sync_token,
         )?;
+        let _family_guard =
+            SyncFamilyRunGuard::new(db, workspace_id, team_key, "cycles", &sync_token);
         let query = r#"
             query($teamKey: String!, $first: Int!, $after: String, $includeArchived: Boolean!) {
                 cycles(

@@ -49,7 +49,7 @@ impl Database {
         // permanently wedged.
         conn.execute(
             "UPDATE issue_hydration_state
-             SET status='retryable', next_retry_at=datetime('now'),
+             SET status='retryable', next_retry_at=NULL,
                  queue_reason='retry'
              WHERE status='running'",
             [],

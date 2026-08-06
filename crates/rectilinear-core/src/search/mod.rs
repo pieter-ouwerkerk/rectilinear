@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -66,7 +66,7 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
         workspace_id,
     } = params;
     let results = match mode {
-        SearchMode::Fts => fts_search(db, query, limit * 2, workspace_id, label_ids)?,
+        SearchMode::Fts => fts_search_async(db, query, limit * 2, workspace_id, label_ids).await?,
         SearchMode::Vector => {
             let embedder =
                 embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
@@ -82,7 +82,8 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
             .await?
         }
         SearchMode::Hybrid => {
-            let fts_results = fts_search(db, query, limit * 3, workspace_id, label_ids)?;
+            let fts_results =
+                fts_search_async(db, query, limit * 3, workspace_id, label_ids).await?;
 
             if let Some(embedder) = embedder {
                 let vec_results = vector_search(
@@ -128,6 +129,24 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
     Ok(results)
 }
 
+async fn fts_search_async(
+    db: &Database,
+    query: &str,
+    limit: usize,
+    workspace_id: &str,
+    label_ids: Option<&[String]>,
+) -> Result<Vec<SearchResult>> {
+    let db = db.clone();
+    let query = query.to_string();
+    let workspace_id = workspace_id.to_string();
+    let label_ids = label_ids.map(<[String]>::to_vec);
+    tokio::task::spawn_blocking(move || {
+        fts_search(&db, &query, limit, &workspace_id, label_ids.as_deref())
+    })
+    .await
+    .context("FTS search worker stopped")?
+}
+
 fn fts_search(
     db: &Database,
     query: &str,
@@ -166,6 +185,32 @@ async fn vector_search(
 ) -> Result<Vec<SearchResult>> {
     let query_embedding = embedder.embed_single(query).await?;
 
+    let db = db.clone();
+    let team_key = team_key.map(ToString::to_string);
+    let workspace_id = workspace_id.to_string();
+    let label_ids = label_ids.map(<[String]>::to_vec);
+    tokio::task::spawn_blocking(move || {
+        vector_search_from_embedding(
+            &db,
+            &query_embedding,
+            team_key.as_deref(),
+            limit,
+            &workspace_id,
+            label_ids.as_deref(),
+        )
+    })
+    .await
+    .context("vector search worker stopped")?
+}
+
+fn vector_search_from_embedding(
+    db: &Database,
+    query_embedding: &[f32],
+    team_key: Option<&str>,
+    limit: usize,
+    workspace_id: &str,
+    label_ids: Option<&[String]>,
+) -> Result<Vec<SearchResult>> {
     let chunks = if let Some(team) = team_key {
         db.get_chunks_for_team(team, workspace_id)?
     } else {
@@ -177,7 +222,7 @@ async fn vector_search(
 
     for chunk in &chunks {
         let chunk_embedding = embedding::bytes_to_embedding(&chunk.embedding);
-        let sim = embedding::cosine_similarity(&query_embedding, &chunk_embedding);
+        let sim = embedding::cosine_similarity(query_embedding, &chunk_embedding);
 
         let entry = issue_max_sim
             .entry(chunk.issue_id.clone())
@@ -297,10 +342,6 @@ pub async fn find_duplicates(
     )
     .await?;
 
-    // For duplicate finding, also do a pure vector search and merge
-    let _vec_results =
-        vector_search(db, text, team_key, limit, embedder, workspace_id, None).await?;
-
     // Keep results above threshold
     results.retain(|r| r.similarity.unwrap_or(0.0) >= threshold || r.score > 0.01);
 
@@ -330,5 +371,59 @@ fn build_fts_query(input: &str) -> String {
         "\"\"".to_string()
     } else {
         words.join(" OR ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn fts_search_timeout_is_preemptible_while_database_is_busy() {
+        let (db, _directory) = crate::db::test_helpers::test_db();
+        let held_db = db.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            held_db
+                .with_conn(|_| {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let blocked = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                fts_search_async(&db, "queue", 5, "default", None),
+            )
+            .await
+        });
+        assert!(blocked.is_err(), "database contention ignored the deadline");
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    fts_search_async(&db, "queue", 5, "default", None),
+                )
+                .await
+            })
+            .expect("FTS worker did not recover after the database lock was released")
+            .unwrap();
     }
 }

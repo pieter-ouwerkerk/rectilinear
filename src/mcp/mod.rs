@@ -3,6 +3,10 @@ use rmcp::model::*;
 use rmcp::schemars::JsonSchema;
 use rmcp::{tool, ServerHandler};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::db::Database;
@@ -10,6 +14,9 @@ use crate::embedding::{self, Embedder};
 use crate::linear::LinearClient;
 use crate::search::{self, SearchMode};
 use crate::triage_policy::was_prioritized_since_sync;
+
+const TRIAGE_SIMILARITY_BUDGET: Duration = Duration::from_secs(5);
+type WorkspaceSyncLocks = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
 /// Scan a JSON value for issue identifiers (e.g. "CUT-42") and add a `referenced_issues`
 /// field with their URLs so agents can render them as clickable links.
@@ -240,6 +247,7 @@ fn suggest_label_names(db: &Database, workspace: &str, unknown: &[String]) -> Ve
 pub struct RectilinearMcp {
     db: Database,
     config: Config,
+    sync_locks: WorkspaceSyncLocks,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -620,7 +628,22 @@ struct ManageRelationArgs {
 #[tool(tool_box)]
 impl RectilinearMcp {
     pub fn new(db: Database, config: Config) -> Self {
-        Self { db, config }
+        Self {
+            db,
+            config,
+            sync_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn workspace_sync_lock(&self, workspace: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+        let mut locks = self
+            .sync_locks
+            .lock()
+            .map_err(|_| "workspace synchronization lock registry was poisoned".to_string())?;
+        Ok(locks
+            .entry(workspace.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone())
     }
 
     #[tool(
@@ -1686,23 +1709,37 @@ IMPORTANT — Before calling this tool, you MUST:
         name = "sync_team",
         description = "Synchronize a Linear team through bounded, adaptive pages: projects and milestones, labels, cycles, issues and memberships, relations, and comments. Use full=true for a complete re-sync; full syncs include archived entities by default. The team cursor advances only after every required entity family succeeds."
     )]
-    async fn sync_team(&self, #[tool(aggr)] args: SyncTeamArgs) -> Result<String, String> {
+    async fn sync_team(
+        &self,
+        cancellation: CancellationToken,
+        #[tool(aggr)] args: SyncTeamArgs,
+    ) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
         let client = self.client_for_workspace(&workspace)?;
         let full = args.full.unwrap_or(false);
         let include_archived = args.include_archived.unwrap_or(full);
 
-        let count = client
-            .sync_team(
-                &self.db,
-                &args.team,
-                &workspace,
-                full,
-                include_archived,
-                None,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        // Team sync includes a workspace-wide label reconciliation, so no two
+        // teams in one workspace may sync concurrently. The guard is scoped
+        // only to synchronization; local reads continue from committed SQLite.
+        let sync_lock = self.workspace_sync_lock(&workspace)?;
+        let _sync_guard = tokio::select! {
+            guard = sync_lock.lock() => guard,
+            _ = cancellation.cancelled() => return Err("sync_team cancelled".into()),
+        };
+
+        let sync = client.sync_team(
+            &self.db,
+            &args.team,
+            &workspace,
+            full,
+            include_archived,
+            None,
+        );
+        let count = tokio::select! {
+            result = sync => result.map_err(|e| e.to_string())?,
+            _ = cancellation.cancelled() => return Err("sync_team cancelled".into()),
+        };
 
         let total = self
             .db
@@ -1780,19 +1817,22 @@ IMPORTANT — Before calling this tool, you MUST:
 
     #[tool(
         name = "get_triage_queue",
-        description = "Get a batch of unprioritized issues for triage. Returns enriched issues with similar issues and code_search_hints. IMPORTANT: For each issue, BEFORE presenting it to the user, you MUST search the codebase using the code_search_hints (via Grep, Glob, Read, or Cuttlefish MCP tools like get_symbols/find_references). Spend 2-4 tool calls per issue exploring relevant code, then include your findings when asking the user questions."
+        description = "Get a batch of unprioritized issues for triage from the latest committed local snapshot. This tool does not synchronize with Linear; call sync_team separately when a refresh is required. Similar-issue enrichment is best-effort and time-bounded. IMPORTANT: For each issue, BEFORE presenting it to the user, you MUST search the codebase using the code_search_hints (via Grep, Glob, Read, or Cuttlefish MCP tools like get_symbols/find_references). Spend 2-4 tool calls per issue exploring relevant code, then include your findings when asking the user questions."
     )]
     async fn get_triage_queue(
         &self,
+        cancellation: CancellationToken,
         #[tool(aggr)] args: GetTriageQueueArgs,
     ) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
-        // Incremental sync to pick up changes made by other users
-        if let Ok(client) = self.client_for_workspace(&workspace) {
-            let _ = client
-                .sync_team(&self.db, &args.team, &workspace, false, false, None)
-                .await;
-        }
+        let snapshot_synced_through = self
+            .db
+            .get_synced_through_at(&workspace, &args.team)
+            .map_err(|e| e.to_string())?;
+        let issue_index_state = self
+            .db
+            .get_sync_family_state(&workspace, &args.team, "issue index")
+            .map_err(|e| e.to_string())?;
 
         let label_ids = if let Some(ref names) = args.labels {
             let (resolved, unknown) = self
@@ -1870,7 +1910,23 @@ IMPORTANT — Before calling this tool, you MUST:
 
         let total_remaining = filtered.len();
 
-        let embedder = Embedder::new(&self.config).ok();
+        // Local model initialization/inference is synchronous and cannot be
+        // preempted by Tokio's deadline. Keep this latency-sensitive read
+        // bounded by reserving inline enrichment for the async API backend.
+        let use_api_enrichment = matches!(
+            &self.config.embedding.backend,
+            crate::config::EmbeddingBackend::Api
+        );
+        let embedder = use_api_enrichment
+            .then(|| Embedder::new(&self.config).ok())
+            .flatten();
+        let unavailable_status = if use_api_enrichment {
+            "unavailable"
+        } else {
+            "skipped_local_backend"
+        };
+        let similarity_deadline = tokio::time::Instant::now() + TRIAGE_SIMILARITY_BUDGET;
+        let mut similarity_budget_exhausted = false;
 
         let mut enriched = Vec::new();
         for issue in &batch {
@@ -1886,26 +1942,46 @@ IMPORTANT — Before calling this tool, you MUST:
                 }
             });
 
-            let similar = if let Some(ref embedder) = embedder {
-                let search_text = format!("{}\n\n{}", issue.title, description.unwrap_or(""));
-                search::find_duplicates(
-                    &self.db,
-                    &search_text,
-                    Some(&args.team),
-                    0.3,
-                    4,
-                    embedder,
-                    self.config.search.rrf_k,
-                    &workspace,
-                )
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| r.issue_id != issue.id)
-                .take(3)
-                .collect::<Vec<_>>()
+            let (similar, similar_issues_status) = if let Some(ref embedder) = embedder {
+                if similarity_budget_exhausted || tokio::time::Instant::now() >= similarity_deadline
+                {
+                    (Vec::new(), "budget_exhausted")
+                } else {
+                    let search_text = format!("{}\n\n{}", issue.title, description.unwrap_or(""));
+                    let lookup = search::find_duplicates(
+                        &self.db,
+                        &search_text,
+                        Some(&args.team),
+                        0.3,
+                        4,
+                        embedder,
+                        self.config.search.rrf_k,
+                        &workspace,
+                    );
+                    let lookup_result = tokio::select! {
+                        result = tokio::time::timeout_at(similarity_deadline, lookup) => result,
+                        _ = cancellation.cancelled() => {
+                            return Err("get_triage_queue cancelled".into());
+                        }
+                    };
+                    match lookup_result {
+                        Ok(Ok(results)) => (
+                            results
+                                .into_iter()
+                                .filter(|r| r.issue_id != issue.id)
+                                .take(3)
+                                .collect::<Vec<_>>(),
+                            "complete",
+                        ),
+                        Ok(Err(_)) => (Vec::new(), unavailable_status),
+                        Err(_) => {
+                            similarity_budget_exhausted = true;
+                            (Vec::new(), "timed_out")
+                        }
+                    }
+                }
             } else {
-                Vec::new()
+                (Vec::new(), unavailable_status)
             };
 
             let relations = self
@@ -1928,6 +2004,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 "labels": issue.labels(),
                 "created_at": issue.created_at,
                 "similar_issues": similar,
+                "similar_issues_status": similar_issues_status,
                 "relations": relations,
                 "code_search_hints": code_search_hints,
             }));
@@ -1938,6 +2015,16 @@ IMPORTANT — Before calling this tool, you MUST:
             "queue": enriched,
             "total_remaining": total_remaining,
             "team": args.team,
+            "snapshot": {
+                "source": "local",
+                "synced_through": snapshot_synced_through,
+                "issue_index_status": issue_index_state.as_ref().map(|state| state.status.as_str()),
+                "issue_index_error": issue_index_state.as_ref().and_then(|state| state.error.as_deref()),
+            },
+            "enrichment": {
+                "similarity_budget_ms": TRIAGE_SIMILARITY_BUDGET.as_millis() as u64,
+                "partial_results_possible": true,
+            },
         });
 
         enrich_with_issue_links(&mut result, &self.db);
@@ -2642,6 +2729,100 @@ pub async fn serve(db: Database, config: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_sync_lock_is_shared_across_team_syncs() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("locks.db")).unwrap();
+        let handler = RectilinearMcp::new(db, Config::default());
+
+        let first_team = handler.workspace_sync_lock("default").unwrap();
+        let second_team = handler.workspace_sync_lock("default").unwrap();
+        let other_workspace = handler.workspace_sync_lock("other").unwrap();
+
+        assert!(Arc::ptr_eq(&first_team, &second_team));
+        assert!(!Arc::ptr_eq(&first_team, &other_workspace));
+    }
+
+    #[tokio::test]
+    async fn triage_queue_reads_the_local_snapshot_without_refreshing_linear() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("triage.db")).unwrap();
+        db.upsert_workspace("default", None, Some("Default"))
+            .unwrap();
+        db.upsert_issue(&crate::db::Issue {
+            id: "issue-1".into(),
+            identifier: "CUT-1".into(),
+            team_key: "CUT".into(),
+            title: "Triage from snapshot".into(),
+            description: Some("No remote refresh is needed".into()),
+            state_name: "Backlog".into(),
+            state_type: "backlog".into(),
+            priority: 0,
+            assignee_name: None,
+            project_name: None,
+            labels_json: "[]".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-02T00:00:00Z".into(),
+            content_hash: String::new(),
+            synced_at: None,
+            url: "https://linear.app/cut/issue/CUT-1".into(),
+            branch_name: None,
+            workspace_id: "default".into(),
+            project_id: None,
+            project_milestone_id: None,
+            project_milestone_name: None,
+            cycle_id: None,
+            cycle_name: None,
+            archived_at: None,
+        })
+        .unwrap();
+        db.set_sync_cursor("default", "CUT", "2026-01-03T00:00:00Z")
+            .unwrap();
+
+        let config = Config {
+            linear: crate::config::LinearConfig {
+                api_key: Some("must-not-be-used".into()),
+                default_team: Some("CUT".into()),
+            },
+            embedding: crate::config::EmbeddingConfig {
+                backend: crate::config::EmbeddingBackend::Local,
+                gemini_api_key: None,
+            },
+            ..Config::default()
+        };
+        let handler = RectilinearMcp::new(db, config);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler.get_triage_queue(
+                CancellationToken::new(),
+                GetTriageQueueArgs {
+                    workspace: Some("default".into()),
+                    team: "CUT".into(),
+                    limit: Some(1),
+                    exclude: None,
+                    shuffle: None,
+                    include_completed: None,
+                    labels: None,
+                },
+            ),
+        )
+        .await
+        .expect("local queue read exceeded one second")
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["queue"][0]["identifier"], "CUT-1");
+        assert_eq!(
+            response["queue"][0]["similar_issues_status"],
+            "skipped_local_backend"
+        );
+        assert_eq!(response["snapshot"]["source"], "local");
+        assert_eq!(
+            response["snapshot"]["synced_through"],
+            "2026-01-03T00:00:00Z"
+        );
+    }
 
     #[test]
     fn test_extract_image_references() {

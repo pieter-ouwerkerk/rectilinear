@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::db::{self, Database};
 
 use super::pagination::{paginate, ConnectionPage, LinearOperation, PageInfo};
-use super::{IssueConnection, LinearClient};
+use super::{IssueConnection, LinearClient, SyncFamilyRunGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectSyncResult {
@@ -922,6 +922,7 @@ impl LinearClient {
     ) -> Result<(usize, usize)> {
         let sync_token = Uuid::new_v4().to_string();
         let scope = team_key.unwrap_or("*");
+        let mut _family_guards = Vec::new();
         for (family, page_size) in [
             (
                 "projects",
@@ -939,6 +940,13 @@ impl LinearClient {
             ),
         ] {
             db.mark_sync_family_running(workspace_id, scope, family, None, page_size, &sync_token)?;
+            _family_guards.push(SyncFamilyRunGuard::new(
+                db,
+                workspace_id,
+                scope,
+                family,
+                &sync_token,
+            ));
         }
         let project_result = paginate(
             self.sync_query_config(),

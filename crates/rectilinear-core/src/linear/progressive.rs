@@ -14,7 +14,8 @@ use crate::db::{
 
 use super::pagination::{operation_error, LinearErrorKind};
 use super::{
-    paginate, ConnectionPage, LinearClient, LinearIssue, LinearOperation, PageInfo, SingleIssueData,
+    paginate, ConnectionPage, LinearClient, LinearIssue, LinearOperation, PageInfo,
+    SingleIssueData, SyncFamilyRunGuard,
 };
 
 const INDEX_OVERLAP_SECONDS: i64 = 300;
@@ -110,6 +111,51 @@ enum ResourceRun {
     Permanent,
 }
 
+struct HydrationAttemptGuard {
+    db: Database,
+    workspace_id: String,
+    issue_id: String,
+    resource: HydrationResource,
+    attempt_count: u32,
+    armed: bool,
+}
+
+impl HydrationAttemptGuard {
+    fn new(
+        db: &Database,
+        workspace_id: &str,
+        issue_id: &str,
+        resource: HydrationResource,
+        attempt_count: u32,
+    ) -> Self {
+        Self {
+            db: db.clone(),
+            workspace_id: workspace_id.to_string(),
+            issue_id: issue_id.to_string(),
+            resource,
+            attempt_count,
+            armed: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HydrationAttemptGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.db.requeue_interrupted_hydration(
+                &self.workspace_id,
+                &self.issue_id,
+                self.resource,
+                self.attempt_count,
+            );
+        }
+    }
+}
+
 impl LinearClient {
     /// Synchronize only the authoritative issue list fields. Relay cursors are
     /// used only inside this fixed timestamp window and are never persisted as
@@ -163,6 +209,8 @@ impl LinearClient {
             Some(self.sync_query_config().page_size(LinearOperation::Issues)),
             &sync_token,
         )?;
+        let _family_guard =
+            SyncFamilyRunGuard::new(db, workspace_id, team_key, "issue index", &sync_token);
 
         let pagination = paginate(
             self.sync_query_config(),
@@ -491,6 +539,13 @@ impl LinearClient {
                 resource_state.resource,
                 &attempted_at,
             )?;
+            let mut attempt_guard = HydrationAttemptGuard::new(
+                db,
+                workspace_id,
+                issue_id,
+                resource_state.resource,
+                attempts,
+            );
             let operation = match resource_state.resource {
                 HydrationResource::Details => match self.fetch_issue_details_only(issue_id).await {
                     Ok(mut issue) => {
@@ -518,6 +573,7 @@ impl LinearClient {
                         &source_updated_at,
                         &Utc::now().to_rfc3339(),
                     )?;
+                    attempt_guard.finish();
                     hydrated_resources += 1;
                     ResourceRun::Hydrated
                 }
@@ -557,6 +613,7 @@ impl LinearClient {
                         next_retry.as_deref(),
                         &message,
                     )?;
+                    attempt_guard.finish();
                     if status == HydrationStatus::Retryable {
                         retryable_failures += 1;
                         if is_rate_limit {
