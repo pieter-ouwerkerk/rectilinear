@@ -38,6 +38,9 @@ pub fn handle_show(
 
     println!("  {} {}", "State:".dimmed(), issue.state_name);
     println!("  {} {}", "Priority:".dimmed(), issue.priority_label());
+    if let Some(ref due_date) = issue.due_date {
+        println!("  {} {}", "Due:".dimmed(), due_date);
+    }
 
     if let Some(ref assignee) = issue.assignee_name {
         println!("  {} {}", "Assignee:".dimmed(), assignee);
@@ -182,6 +185,7 @@ mod tests {
             cycle_id: Some("cycle-1".into()),
             cycle_name: Some("Cycle 42".into()),
             archived_at: None,
+            due_date: None,
         }
     }
 

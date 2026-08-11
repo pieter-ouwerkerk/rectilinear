@@ -52,6 +52,7 @@ async fn create_issue_with_resolved_labels(
             title: params.title,
             description: params.description,
             priority: params.priority,
+            due_date: None,
             label_ids: &label_ids,
             assignee_id: None,
             parent_id: None,

@@ -96,7 +96,7 @@ const ISSUE_COLUMNS: &str =
     "id, identifier, team_key, title, description, state_name, state_type, \
      priority, assignee_name, project_name, labels_json, created_at, updated_at, \
      content_hash, synced_at, url, branch_name, workspace_id, project_id, \
-     project_milestone_id, project_milestone_name, cycle_id, cycle_name";
+     project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, due_date";
 
 impl Database {
     pub fn upsert_project_metadata(&self, project: &Project) -> Result<()> {

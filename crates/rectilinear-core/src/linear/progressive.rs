@@ -94,6 +94,8 @@ struct LinearIssueIndex {
     identifier: String,
     title: String,
     url: String,
+    #[serde(rename = "dueDate", default)]
+    due_date: Option<String>,
     team: super::LinearTeam,
     state: super::LinearState,
     #[serde(rename = "createdAt")]
@@ -245,6 +247,7 @@ impl LinearClient {
                                 updated_at: issue.updated_at,
                                 archived_at: issue.archived_at,
                                 url: issue.url,
+                                due_date: issue.due_date,
                             },
                             workspace_id,
                             &sync_token,
@@ -345,7 +348,7 @@ impl LinearClient {
                     orderBy: updatedAt
                 ) {{
                     nodes {{
-                        id identifier title url createdAt updatedAt archivedAt
+                        id identifier title url dueDate createdAt updatedAt archivedAt
                         team {{ key }}
                         state {{ name type }}
                     }}
@@ -664,7 +667,7 @@ impl LinearClient {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
-                    id identifier url title description priority branchName
+                    id identifier url title description priority dueDate branchName
                     createdAt updatedAt archivedAt
                     state { name type }
                     team { key }

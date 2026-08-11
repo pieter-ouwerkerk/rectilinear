@@ -138,6 +138,7 @@ pub struct IssueIndexEntry {
     pub updated_at: String,
     pub archived_at: Option<String>,
     pub url: String,
+    pub due_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +161,7 @@ impl Database {
             let existing = conn
                 .query_row(
                     "SELECT identifier, team_key, title, state_name, state_type,
-                            created_at, updated_at, archived_at, url, description
+                            created_at, updated_at, archived_at, url, due_date, description
                      FROM issues WHERE id = ?1",
                     rusqlite::params![issue.id],
                     |row| {
@@ -175,6 +176,7 @@ impl Database {
                             row.get::<_, Option<String>>(7)?,
                             row.get::<_, String>(8)?,
                             row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<String>>(10)?,
                         ))
                     },
                 )
@@ -192,6 +194,7 @@ impl Database {
                         && current.6 == issue.updated_at
                         && current.7 == issue.archived_at
                         && current.8 == issue.url
+                        && current.9 == issue.due_date
                     =>
                 {
                     IndexUpsertOutcome::Unchanged
@@ -200,7 +203,7 @@ impl Database {
             };
             let preserved_description = existing
                 .as_ref()
-                .and_then(|current| current.9.as_deref());
+                .and_then(|current| current.10.as_deref());
             let embedding_content_hash =
                 crate::embedding::issue_content_hash(&issue.title, preserved_description);
 
@@ -210,11 +213,11 @@ impl Database {
                     id, identifier, team_key, title, description, state_name,
                     state_type, priority, assignee_name, project_name,
                     labels_json, created_at, updated_at, content_hash, synced_at,
-                    url, branch_name, workspace_id, archived_at, sync_token,
+                    url, branch_name, workspace_id, archived_at, due_date, sync_token,
                     embedding_content_hash
                  ) VALUES (
                     ?1, ?2, ?3, ?4, NULL, ?5, ?6, 0, NULL, NULL, '[]', ?7,
-                    ?8, '', datetime('now'), ?9, NULL, ?10, ?11, ?12, ?13
+                    ?8, '', datetime('now'), ?9, NULL, ?10, ?11, ?12, ?13, ?14
                  ) ON CONFLICT(id) DO UPDATE SET
                     identifier=excluded.identifier,
                     team_key=excluded.team_key,
@@ -224,6 +227,7 @@ impl Database {
                     created_at=excluded.created_at,
                     updated_at=excluded.updated_at,
                     archived_at=excluded.archived_at,
+                    due_date=excluded.due_date,
                     url=excluded.url,
                     workspace_id=excluded.workspace_id,
                     sync_token=excluded.sync_token,
@@ -241,6 +245,7 @@ impl Database {
                     issue.url,
                     workspace_id,
                     issue.archived_at,
+                    issue.due_date,
                     sync_token,
                     embedding_content_hash,
                 ],
@@ -764,6 +769,7 @@ mod tests {
                     updated_at: "2026-01-03T00:00:00Z".into(),
                     archived_at: None,
                     url: rich.url.clone(),
+                    due_date: Some("2026-08-19".into()),
                 },
                 "default",
                 "run-1",
@@ -775,6 +781,7 @@ mod tests {
         assert_eq!(stored.title, "new index title");
         assert_eq!(stored.description.as_deref(), Some("hydrated description"));
         assert_eq!(stored.labels_json, r#"["bug"]"#);
+        assert_eq!(stored.due_date.as_deref(), Some("2026-08-19"));
         let state = db.get_issue_hydration_state("default", "issue-1").unwrap();
         assert!(state
             .resources
