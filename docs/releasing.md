@@ -114,8 +114,6 @@ If `cargo publish` times out while waiting for the index, check crates.io with
 ```sh
 cargo info "rectilinear-core@${release_version}"
 cargo info "rectilinear@${release_version}"
-cargo install rectilinear --version "${release_version}" --locked --force
-rectilinear --version
 ```
 
 ## 7. Tag the release
@@ -146,6 +144,16 @@ Finally, verify the release and remote tag:
 ```sh
 gh release view "v${release_version}"
 git ls-remote --tags origin "v${release_version}"
+```
+
+## 9. Optional: update the local CLI
+
+Install the published version through Cargo so the local `rectilinear` command
+points to the new release:
+
+```sh
+cargo install rectilinear --version "${release_version}" --locked --force
+rectilinear --version
 ```
 
 Useful references:
