@@ -10,6 +10,10 @@ become available in the crates.io index, and then publish `rectilinear`.
 Published crate versions cannot be replaced, so inspect and verify the packages
 before uploading them.
 
+All `cargo publish` commands, including dry runs, must run from a clean release
+commit. Do not use `--allow-dirty` to bypass Cargo's check: commit and merge the
+version bump first so the reviewed commit is exactly what gets packaged.
+
 ## 1. Prepare the release
 
 Start from a clean branch based on the latest `main`. Choose the new version and
@@ -43,19 +47,6 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 ```
 
-Inspect exactly what will be uploaded. In particular, check for local settings,
-credentials, large fixtures, and internal-only files:
-
-```sh
-cargo package -p rectilinear-core --list
-cargo package -p rectilinear --list
-cargo publish -p rectilinear-core --dry-run --locked
-```
-
-The CLI's full dry run may not resolve its registry dependency until the matching
-`rectilinear-core` version has been published. The workspace tests still validate
-the CLI against the local core crate before anything is uploaded.
-
 ## 3. Commit and merge the version bump
 
 ```sh
@@ -74,7 +65,23 @@ git status --short --branch
 
 All remaining commands must run from this exact release commit.
 
-## 4. Publish to crates.io
+## 4. Validate the release packages
+
+From the clean release commit, inspect exactly what will be uploaded. In
+particular, check for local settings, credentials, large fixtures, and
+internal-only files:
+
+```sh
+cargo package -p rectilinear-core --list
+cargo package -p rectilinear --list
+cargo publish -p rectilinear-core --dry-run --locked
+```
+
+The CLI's full dry run may not resolve its registry dependency until the matching
+`rectilinear-core` version has been published. The workspace tests still validate
+the CLI against the local core crate before anything is uploaded.
+
+## 5. Publish to crates.io
 
 Authenticate with `cargo login` first if this machine does not already have a
 crates.io token.
@@ -102,7 +109,7 @@ cargo publish -p rectilinear --locked
 If `cargo publish` times out while waiting for the index, check crates.io with
 `cargo info` before retrying; the upload may already have succeeded.
 
-## 5. Verify the published crates
+## 6. Verify the published crates
 
 ```sh
 cargo info "rectilinear-core@${release_version}"
@@ -111,7 +118,7 @@ cargo install rectilinear --version "${release_version}" --locked --force
 rectilinear --version
 ```
 
-## 6. Tag the release
+## 7. Tag the release
 
 Create an annotated tag on the exact commit used for publishing and push it:
 
@@ -123,7 +130,7 @@ git push origin "refs/tags/v${release_version}"
 Do not let GitHub create an implicit tag: explicitly pushing the annotated tag
 ensures the release points to the reviewed and published commit.
 
-## 7. Create the GitHub release
+## 8. Create the GitHub release
 
 ```sh
 gh release create "v${release_version}" \
