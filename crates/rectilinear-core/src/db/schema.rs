@@ -94,6 +94,24 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         run_migration_13(conn)?;
     }
 
+    if current_version < 14 {
+        run_migration_14(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (14)", [])?;
+    }
+
+    Ok(())
+}
+
+fn run_migration_14(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "issues", "due_date", "TEXT")?;
+    // The authoritative issue index now includes due dates. Existing cursors
+    // must replay once so cached issues receive the new field.
+    conn.execute(
+        "UPDATE sync_state
+         SET full_sync_done = 0, last_updated_at = '1970-01-01T00:00:00Z',
+             synced_through_at = NULL",
+        [],
+    )?;
     Ok(())
 }
 

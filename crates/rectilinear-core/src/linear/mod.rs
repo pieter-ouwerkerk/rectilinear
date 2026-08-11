@@ -124,6 +124,8 @@ struct LinearIssue {
     title: String,
     description: Option<String>,
     priority: i32,
+    #[serde(rename = "dueDate", default)]
+    due_date: Option<String>,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
@@ -335,6 +337,7 @@ pub struct CreateIssueInput<'a> {
     pub title: &'a str,
     pub description: Option<&'a str>,
     pub priority: Option<i32>,
+    pub due_date: Option<&'a str>,
     pub label_ids: &'a [String],
     pub assignee_id: Option<&'a str>,
     pub parent_id: Option<&'a str>,
@@ -403,6 +406,7 @@ pub struct UpdateIssueInput<'a> {
     pub title: Option<&'a str>,
     pub description: Option<&'a str>,
     pub priority: Option<i32>,
+    pub due_date: Option<&'a str>,
     pub state_id: Option<&'a str>,
     pub label_ids: Option<&'a [String]>,
     pub project_id: Option<&'a str>,
@@ -771,7 +775,7 @@ impl LinearClient {
                     orderBy: updatedAt
                 ) {{
                     nodes {{
-                        id identifier url title description priority branchName
+                        id identifier url title description priority dueDate branchName
                         createdAt updatedAt archivedAt
                         state {{ name type }}
                         team {{ key }}
@@ -1319,49 +1323,7 @@ impl LinearClient {
     }
 
     pub async fn update_issue(&self, issue_id: &str, update: UpdateIssueInput<'_>) -> Result<()> {
-        let mut input = serde_json::Map::new();
-        if let Some(t) = update.title {
-            input.insert("title".into(), serde_json::Value::String(t.to_string()));
-        }
-        if let Some(d) = update.description {
-            input.insert(
-                "description".into(),
-                serde_json::Value::String(d.to_string()),
-            );
-        }
-        if let Some(p) = update.priority {
-            input.insert("priority".into(), serde_json::Value::Number(p.into()));
-        }
-        if let Some(sid) = update.state_id {
-            input.insert("stateId".into(), serde_json::Value::String(sid.to_string()));
-        }
-        if let Some(lids) = update.label_ids {
-            input.insert("labelIds".into(), serde_json::json!(lids));
-        }
-        if let Some(pid) = update.project_id {
-            let value = if pid.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(pid.to_string())
-            };
-            input.insert("projectId".into(), value);
-        }
-        if let Some(aid) = update.assignee_id {
-            let value = if aid.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(aid.to_string())
-            };
-            input.insert("assigneeId".into(), value);
-        }
-        if let Some(mid) = update.project_milestone_id {
-            let value = if mid.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(mid.to_string())
-            };
-            input.insert("projectMilestoneId".into(), value);
-        }
+        let input = update_issue_value(&update);
 
         let query = r#"
             mutation($id: String!, $input: IssueUpdateInput!) {
@@ -1389,7 +1351,7 @@ impl LinearClient {
         let query = r#"
             query($id: String!) {
                 issue(id: $id) {
-                    id identifier url title description priority branchName
+                    id identifier url title description priority dueDate branchName
                     createdAt updatedAt
                     state { name type }
                     team { key }
@@ -1442,7 +1404,7 @@ impl LinearClient {
                     includeArchived: true
                 ) {{
                     nodes {{
-                        id identifier url title description priority branchName
+                        id identifier url title description priority dueDate branchName
                         createdAt updatedAt
                         state {{ name type }}
                         team {{ key }}
@@ -1507,6 +1469,7 @@ impl LinearClient {
             state_name: i.state.name,
             state_type: i.state.state_type,
             priority: i.priority,
+            due_date: i.due_date,
             assignee_name: i.assignee.map(|a| a.name),
             project_name,
             labels_json,
@@ -1912,6 +1875,9 @@ fn create_issue_value(create: &CreateIssueInput<'_>) -> serde_json::Value {
     if let Some(priority) = create.priority {
         input["priority"] = serde_json::Value::Number(priority.into());
     }
+    if let Some(due_date) = create.due_date {
+        input["dueDate"] = serde_json::Value::String(due_date.to_string());
+    }
     if !create.label_ids.is_empty() {
         input["labelIds"] = serde_json::json!(create.label_ids);
     }
@@ -1926,6 +1892,57 @@ fn create_issue_value(create: &CreateIssueInput<'_>) -> serde_json::Value {
     }
     if let Some(milestone_id) = create.project_milestone_id {
         input["projectMilestoneId"] = serde_json::Value::String(milestone_id.to_string());
+    }
+    input
+}
+
+fn update_issue_value(update: &UpdateIssueInput<'_>) -> serde_json::Map<String, serde_json::Value> {
+    let mut input = serde_json::Map::new();
+    if let Some(title) = update.title {
+        input.insert("title".into(), serde_json::Value::String(title.to_string()));
+    }
+    if let Some(description) = update.description {
+        input.insert(
+            "description".into(),
+            serde_json::Value::String(description.to_string()),
+        );
+    }
+    if let Some(priority) = update.priority {
+        input.insert(
+            "priority".into(),
+            serde_json::Value::Number(priority.into()),
+        );
+    }
+    if let Some(due_date) = update.due_date {
+        let value = if due_date.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(due_date.to_string())
+        };
+        input.insert("dueDate".into(), value);
+    }
+    if let Some(state_id) = update.state_id {
+        input.insert(
+            "stateId".into(),
+            serde_json::Value::String(state_id.to_string()),
+        );
+    }
+    if let Some(label_ids) = update.label_ids {
+        input.insert("labelIds".into(), serde_json::json!(label_ids));
+    }
+    for (key, value) in [
+        ("projectId", update.project_id),
+        ("assigneeId", update.assignee_id),
+        ("projectMilestoneId", update.project_milestone_id),
+    ] {
+        if let Some(value) = value {
+            let value = if value.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(value.to_string())
+            };
+            input.insert(key.into(), value);
+        }
     }
     input
 }
@@ -2245,6 +2262,7 @@ mod tests {
             "title": format!("Issue {identifier}"),
             "description": "Mock issue",
             "priority": 2,
+            "dueDate": "2026-08-19",
             "branchName": null,
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": updated_at,
@@ -2494,6 +2512,7 @@ mod tests {
             title: "Add request tracing",
             description: None,
             priority: Some(2),
+            due_date: Some("2026-08-19"),
             label_ids: &labels,
             assignee_id: None,
             parent_id: None,
@@ -2506,6 +2525,39 @@ mod tests {
             serde_json::json!("milestone-1")
         );
         assert_eq!(value["labelIds"], serde_json::json!(["label-1"]));
+        assert_eq!(value["dueDate"], serde_json::json!("2026-08-19"));
+    }
+
+    #[test]
+    fn issue_create_omits_due_date_when_not_provided() {
+        let value = create_issue_value(&CreateIssueInput {
+            team_id: "team-1",
+            title: "No deadline",
+            description: None,
+            priority: None,
+            due_date: None,
+            label_ids: &[],
+            assignee_id: None,
+            parent_id: None,
+            project_id: None,
+            project_milestone_id: None,
+        });
+        assert!(value.get("dueDate").is_none());
+    }
+
+    #[test]
+    fn issue_update_sets_and_clears_due_date() {
+        let set = update_issue_value(&UpdateIssueInput {
+            due_date: Some("2026-08-19"),
+            ..Default::default()
+        });
+        assert_eq!(set["dueDate"], serde_json::json!("2026-08-19"));
+
+        let clear = update_issue_value(&UpdateIssueInput {
+            due_date: Some(""),
+            ..Default::default()
+        });
+        assert_eq!(clear["dueDate"], serde_json::Value::Null);
     }
 
     #[test]
@@ -2996,7 +3048,8 @@ mod tests {
 
         assert_eq!(first.indexed, 0);
         assert_eq!(second.indexed, 1);
-        assert!(db.get_issue("CUT-9").unwrap().is_some());
+        let stored = db.get_issue("CUT-9").unwrap().unwrap();
+        assert_eq!(stored.due_date.as_deref(), Some("2026-08-19"));
     }
 
     #[test]

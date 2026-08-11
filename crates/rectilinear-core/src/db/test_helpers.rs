@@ -37,6 +37,7 @@ pub fn make_issue(identifier: &str, team_key: &str) -> Issue {
         cycle_id: None,
         cycle_name: None,
         archived_at: None,
+        due_date: None,
     }
 }
 

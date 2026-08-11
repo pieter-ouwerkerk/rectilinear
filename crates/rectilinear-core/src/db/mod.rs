@@ -337,15 +337,15 @@ impl Database {
             crate::embedding::issue_content_hash(&issue.title, issue.description.as_deref());
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, embedding_content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                "INSERT INTO issues (id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, due_date, embedding_content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'), ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
                  ON CONFLICT(id) DO UPDATE SET
                    identifier=excluded.identifier, team_key=excluded.team_key, title=excluded.title,
                    description=excluded.description, state_name=excluded.state_name, state_type=excluded.state_type,
                    priority=excluded.priority, assignee_name=excluded.assignee_name, project_name=excluded.project_name,
-                   labels_json=CASE WHEN ?25 THEN issues.labels_json ELSE excluded.labels_json END,
+                   labels_json=CASE WHEN ?26 THEN issues.labels_json ELSE excluded.labels_json END,
                    updated_at=excluded.updated_at,
-                   content_hash=CASE WHEN ?25 THEN issues.content_hash ELSE excluded.content_hash END,
+                   content_hash=CASE WHEN ?26 THEN issues.content_hash ELSE excluded.content_hash END,
                    embedding_content_hash=excluded.embedding_content_hash,
                    url=excluded.url, branch_name=excluded.branch_name,
                    workspace_id=excluded.workspace_id, project_id=excluded.project_id,
@@ -354,6 +354,7 @@ impl Database {
                    cycle_id=excluded.cycle_id,
                    cycle_name=excluded.cycle_name,
                    archived_at=excluded.archived_at,
+                   due_date=excluded.due_date,
                    synced_at=datetime('now')",
                 rusqlite::params![
                     issue.id, issue.identifier, issue.team_key, issue.title, issue.description,
@@ -363,6 +364,7 @@ impl Database {
                     issue.project_id, issue.project_milestone_id, issue.project_milestone_name,
                     issue.cycle_id, issue.cycle_name,
                     issue.archived_at,
+                    issue.due_date,
                     embedding_content_hash,
                     preserve_labels,
                 ],
@@ -374,7 +376,7 @@ impl Database {
     pub fn get_issue(&self, id_or_identifier: &str) -> Result<Option<Issue>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, due_date
                  FROM issues WHERE id = ?1 OR identifier = ?1"
             )?;
             let mut rows = stmt.query(rusqlite::params![id_or_identifier])?;
@@ -459,7 +461,7 @@ impl Database {
             };
 
             let sql = format!(
-                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name
+                "SELECT id, identifier, team_key, title, description, state_name, state_type, priority, assignee_name, project_name, labels_json, created_at, updated_at, content_hash, synced_at, url, branch_name, workspace_id, project_id, project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, due_date
                  FROM issues WHERE priority = 0{state_filter} AND {base_where}{label_clause}
                  ORDER BY created_at DESC"
             );
@@ -488,7 +490,7 @@ impl Database {
                 "SELECT id, identifier, team_key, title, description, state_name, state_type, \
                  priority, assignee_name, project_name, labels_json, created_at, updated_at, \
                  content_hash, synced_at, url, branch_name, workspace_id, project_id, \
-                 project_milestone_id, project_milestone_name, cycle_id, cycle_name \
+                 project_milestone_id, project_milestone_name, cycle_id, cycle_name, archived_at, due_date \
                  FROM issues WHERE team_key = ?1 AND workspace_id = ?2 AND state_type IN ({placeholders}) \
                  ORDER BY priority ASC, created_at DESC"
             );
@@ -684,7 +686,8 @@ impl Database {
                 "SELECT i.id, i.identifier, i.team_key, i.title, i.state_name, i.state_type,
                         i.priority, i.project_name, i.labels_json, i.updated_at, i.url,
                         i.description IS NOT NULL AND i.description != '' AS has_desc,
-                        EXISTS(SELECT 1 FROM chunks c WHERE c.issue_id = i.id) AS has_emb
+                        EXISTS(SELECT 1 FROM chunks c WHERE c.issue_id = i.id) AS has_emb,
+                        i.due_date
                  FROM issues i
                  {where_clause}
                  ORDER BY i.updated_at DESC
@@ -713,6 +716,7 @@ impl Database {
                     url: row.get(10)?,
                     has_description: row.get(11)?,
                     has_embedding: row.get(12)?,
+                    due_date: row.get(13)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -994,7 +998,7 @@ impl Database {
                         i.content_hash, i.synced_at, i.url, i.branch_name,
                         i.workspace_id, i.project_id, i.project_milestone_id,
                         i.project_milestone_name, i.cycle_id, i.cycle_name,
-                        i.archived_at, i.embedding_content_hash,
+                        i.archived_at, i.due_date, i.embedding_content_hash,
                         c.model_name, c.source_content_hash, c.issue_id
                  FROM issues i
                  JOIN issue_hydration_state h
@@ -1011,10 +1015,10 @@ impl Database {
             let rows = stmt.query_map(rusqlite::params![workspace_id, team_key], |row| {
                 Ok((
                     Issue::from_row(row)?,
-                    row.get::<_, String>(24)?,
-                    row.get::<_, Option<String>>(25)?,
+                    row.get::<_, String>(25)?,
                     row.get::<_, Option<String>>(26)?,
                     row.get::<_, Option<String>>(27)?,
+                    row.get::<_, Option<String>>(28)?,
                 ))
             })?;
             let mut issues = Vec::new();
@@ -1335,7 +1339,7 @@ impl Database {
             };
 
             let sql = format!(
-                "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, bm25(issues_fts) as rank
+                "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, i.due_date, bm25(issues_fts) as rank
                  FROM issues_fts f
                  JOIN issues i ON f.rowid = i.rowid
                  WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3{label_clause}
@@ -1351,7 +1355,8 @@ impl Database {
                     title: row.get(2)?,
                     state_name: row.get(3)?,
                     priority: row.get(4)?,
-                    bm25_score: row.get(5)?,
+                    due_date: row.get(5)?,
+                    bm25_score: row.get(6)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1392,6 +1397,7 @@ pub struct Issue {
     pub cycle_id: Option<String>,
     pub cycle_name: Option<String>,
     pub archived_at: Option<String>,
+    pub due_date: Option<String>,
 }
 
 impl Issue {
@@ -1421,6 +1427,7 @@ impl Issue {
             cycle_id: row.get(21).unwrap_or(None),
             cycle_name: row.get(22).unwrap_or(None),
             archived_at: row.get(23).unwrap_or(None),
+            due_date: row.get(24).unwrap_or(None),
         })
     }
 
@@ -1504,6 +1511,7 @@ pub struct FtsResult {
     pub title: String,
     pub state_name: String,
     pub priority: i32,
+    pub due_date: Option<String>,
     pub bm25_score: f64,
 }
 
@@ -1522,6 +1530,7 @@ pub struct IssueSummary {
     pub url: String,
     pub has_description: bool,
     pub has_embedding: bool,
+    pub due_date: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2062,7 +2071,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
 
         crate::db::schema::run_migrations(&conn).unwrap();
 
@@ -2375,6 +2384,7 @@ mod tests {
                 updated_at: issue.updated_at.clone(),
                 archived_at: None,
                 url: issue.url.clone(),
+                due_date: None,
             },
             "default",
             "index-1",
@@ -2481,6 +2491,7 @@ mod tests {
                 updated_at: new_updated_at.into(),
                 archived_at: None,
                 url: issue.url.clone(),
+                due_date: None,
             },
             "default",
             "index-2",
@@ -2553,5 +2564,69 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn migration_14_adds_due_date_and_replays_the_issue_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-due-date.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute("ALTER TABLE issues DROP COLUMN due_date", [])
+            .unwrap();
+        conn.execute("DELETE FROM schema_version WHERE version=14", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sync_state (
+                workspace_id, team_key, last_updated_at, full_sync_done,
+                last_synced_at, synced_through_at
+             ) VALUES (
+                'default', 'CUT', '2026-08-01T00:00:00Z', 1,
+                '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        crate::db::schema::run_migrations(&conn).unwrap();
+
+        let has_due_date: bool = conn
+            .prepare("PRAGMA table_info(issues)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .any(|column| column.unwrap() == "due_date");
+        assert!(has_due_date);
+        let sync_state: (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT full_sync_done, last_updated_at, synced_through_at
+                 FROM sync_state WHERE workspace_id='default' AND team_key='CUT'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sync_state, (0, "1970-01-01T00:00:00Z".into(), None));
+    }
+
+    #[test]
+    fn due_date_round_trips_through_issue_reads_and_search() {
+        let (db, _dir) = test_db();
+        let mut issue = make_issue("CUT-99", "CUT");
+        issue.due_date = Some("2026-08-19".into());
+        db.upsert_issue(&issue).unwrap();
+
+        let fetched = db.get_issue("CUT-99").unwrap().unwrap();
+        assert_eq!(fetched.due_date.as_deref(), Some("2026-08-19"));
+        assert_eq!(
+            serde_json::to_value(&fetched).unwrap()["due_date"],
+            "2026-08-19"
+        );
+
+        let results = db.fts_search("test", 10, "default").unwrap();
+        let result = results
+            .iter()
+            .find(|result| result.identifier == "CUT-99")
+            .unwrap();
+        assert_eq!(result.due_date.as_deref(), Some("2026-08-19"));
     }
 }

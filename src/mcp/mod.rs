@@ -497,6 +497,8 @@ struct CreateIssueArgs {
     description: Option<String>,
     /// Priority: 1=Urgent, 2=High, 3=Medium, 4=Low
     priority: Option<i32>,
+    /// Due date in YYYY-MM-DD format.
+    due_date: Option<String>,
     /// Parent issue identifier to create as sub-issue (e.g., "CUT-42")
     parent: Option<String>,
     /// Set labels by name (case-insensitive). Use list_labels to discover.
@@ -521,6 +523,8 @@ struct UpdateIssueArgs {
     description: Option<String>,
     /// New priority
     priority: Option<i32>,
+    /// New due date in YYYY-MM-DD format. Pass "none" to clear.
+    due_date: Option<String>,
     /// Set issue state by name (e.g., "Done", "Cancelled", "In Progress")
     state: Option<String>,
     /// Set labels by name (replaces all existing labels)
@@ -543,6 +547,35 @@ struct AppendArgs {
     comment: Option<String>,
     /// Text to append to description
     description: Option<String>,
+}
+
+fn validate_due_date(value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let exact_shape = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit());
+    if exact_shape && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Invalid due_date '{value}'. Expected a valid calendar date in YYYY-MM-DD format."
+        ))
+    }
+}
+
+fn normalize_update_due_date(value: Option<&str>) -> Result<Option<String>, String> {
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("none") => Ok(Some(String::new())),
+        Some(value) => {
+            validate_due_date(value)?;
+            Ok(Some(value.to_string()))
+        }
+        None => Ok(None),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1383,7 +1416,7 @@ impl RectilinearMcp {
 
     #[tool(
         name = "create_issue",
-        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low), labels (list of names), assignee ('me' for self-assign, or a user's display name), project, and project milestone.
+        description = "Create a new issue in Linear. Specify team (key like 'ENG'), title, and optionally description, priority (1=Urgent, 2=High, 3=Medium, 4=Low), due date (YYYY-MM-DD), labels (list of names), assignee ('me' for self-assign, or a user's display name), project, and project milestone.
 
 IMPORTANT — Before calling this tool, you MUST:
 
@@ -1395,6 +1428,9 @@ IMPORTANT — Before calling this tool, you MUST:
     )]
     async fn create_issue(&self, #[tool(aggr)] args: CreateIssueArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
+        if let Some(due_date) = args.due_date.as_deref() {
+            validate_due_date(due_date)?;
+        }
         let client = self.client_for_workspace(&workspace)?;
 
         let team_id = client
@@ -1465,6 +1501,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 title: &args.title,
                 description: args.description.as_deref(),
                 priority: args.priority,
+                due_date: args.due_date.as_deref(),
                 label_ids: &label_ids,
                 assignee_id: assignee_id.as_deref(),
                 parent_id: parent_id.as_deref(),
@@ -1497,10 +1534,11 @@ IMPORTANT — Before calling this tool, you MUST:
 
     #[tool(
         name = "update_issue",
-        description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update. Prefer append_to_issue for adding context. Image references in the original description are automatically preserved when updating."
+        description = "Update an existing Linear issue. Provide the issue ID/identifier and fields to update. Due dates use YYYY-MM-DD; pass 'none' to clear. Prefer append_to_issue for adding context. Image references in the original description are automatically preserved when updating."
     )]
     async fn update_issue(&self, #[tool(aggr)] args: UpdateIssueArgs) -> Result<String, String> {
         let workspace = self.require_workspace(&args.workspace)?;
+        let due_date = normalize_update_due_date(args.due_date.as_deref())?;
         let issue = self
             .db
             .get_issue(&args.id)
@@ -1610,6 +1648,7 @@ IMPORTANT — Before calling this tool, you MUST:
                     title: args.title.as_deref(),
                     description: safe_description.as_deref(),
                     priority: args.priority,
+                    due_date: due_date.as_deref(),
                     state_id: state_id.as_deref(),
                     label_ids: label_ids.as_deref(),
                     project_id: project_id.as_deref(),
@@ -1999,6 +2038,7 @@ IMPORTANT — Before calling this tool, you MUST:
                 "title": issue.title,
                 "description": description,
                 "state_name": issue.state_name,
+                "due_date": issue.due_date,
                 "assignee_name": issue.assignee_name,
                 "project_name": issue.project_name,
                 "labels": issue.labels(),
@@ -2221,6 +2261,7 @@ IMPORTANT — Before calling this tool, you MUST:
                     title: args.title.as_deref(),
                     description: safe_description.as_deref(),
                     priority: Some(args.priority),
+                    due_date: None,
                     state_id: state_id.as_deref(),
                     label_ids: label_ids.as_deref(),
                     project_id: project_id.as_deref(),
@@ -2775,6 +2816,7 @@ mod tests {
             cycle_id: None,
             cycle_name: None,
             archived_at: None,
+            due_date: Some("2026-08-19".into()),
         })
         .unwrap();
         db.set_sync_cursor("default", "CUT", "2026-01-03T00:00:00Z")
@@ -2813,6 +2855,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["queue"][0]["identifier"], "CUT-1");
+        assert_eq!(response["queue"][0]["due_date"], "2026-08-19");
         assert_eq!(
             response["queue"][0]["similar_issues_status"],
             "skipped_local_backend"
@@ -2821,6 +2864,45 @@ mod tests {
         assert_eq!(
             response["snapshot"]["synced_through"],
             "2026-01-03T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn due_date_validation_requires_an_exact_calendar_date() {
+        assert!(validate_due_date("2026-08-19").is_ok());
+        assert!(validate_due_date("2024-02-29").is_ok());
+
+        for invalid in [
+            "2026-02-29",
+            "2026-8-19",
+            "2026-08-19T00:00:00Z",
+            "2026-08-19Z",
+            "none",
+        ] {
+            let error = validate_due_date(invalid).unwrap_err();
+            assert!(error.contains("due_date"));
+            assert!(error.contains("YYYY-MM-DD"));
+        }
+
+        assert_eq!(
+            normalize_update_due_date(Some("NoNe")).unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(normalize_update_due_date(None).unwrap(), None);
+    }
+
+    #[test]
+    fn issue_tool_schemas_document_due_date_semantics() {
+        let create = serde_json::to_value(schemars::schema_for!(CreateIssueArgs)).unwrap();
+        let update = serde_json::to_value(schemars::schema_for!(UpdateIssueArgs)).unwrap();
+
+        assert_eq!(
+            create["properties"]["due_date"]["description"],
+            "Due date in YYYY-MM-DD format."
+        );
+        assert_eq!(
+            update["properties"]["due_date"]["description"],
+            "New due date in YYYY-MM-DD format. Pass \"none\" to clear."
         );
     }
 

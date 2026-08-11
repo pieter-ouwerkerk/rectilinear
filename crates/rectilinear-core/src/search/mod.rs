@@ -31,6 +31,7 @@ pub struct SearchResult {
     pub title: String,
     pub state_name: String,
     pub priority: i32,
+    pub due_date: Option<String>,
     pub score: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fts_rank: Option<usize>,
@@ -166,6 +167,7 @@ fn fts_search(
             title: r.title,
             state_name: r.state_name,
             priority: r.priority,
+            due_date: r.due_date,
             score: -r.bm25_score, // BM25 returns negative scores, lower = better
             fts_rank: Some(rank + 1),
             vector_rank: None,
@@ -249,6 +251,7 @@ fn vector_search_from_embedding(
                 title: issue.title,
                 state_name: issue.state_name,
                 priority: issue.priority,
+                due_date: issue.due_date,
                 score: sim as f64,
                 fts_rank: None,
                 vector_rank: Some(rank + 1),

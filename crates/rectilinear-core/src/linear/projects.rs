@@ -37,7 +37,7 @@ const MILESTONE_FIELDS: &str = r#"
 "#;
 
 const ISSUE_FIELDS: &str = r#"
-    id identifier url title description priority branchName
+    id identifier url title description priority dueDate branchName
     createdAt updatedAt
     state { name type }
     team { key }
