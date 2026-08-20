@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug)]
 pub struct BlockerRow {
     pub issue_id: String,
     pub identifier: String,
@@ -550,7 +551,13 @@ impl Database {
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 params.iter().map(|p| p.as_ref()).collect();
 
-            for sql in [&sql_fwd, &sql_inv] {
+            // One Linear edge can be stored from both sides (the blocked
+            // issue's blocked_by row and the blocker's blocks row), so dedupe
+            // on (blocked issue, blocker identifier). The inverse join runs
+            // first because it carries the blocker's state; the forward row
+            // only fills in blockers that are not synced locally.
+            let mut seen = std::collections::HashSet::new();
+            for sql in [&sql_inv, &sql_fwd] {
                 let mut stmt = conn.prepare(sql)?;
                 let rows = stmt.query_map(param_refs.as_slice(), |row| {
                     Ok(BlockerRow {
@@ -562,7 +569,10 @@ impl Database {
                     })
                 })?;
                 for row in rows {
-                    results.push(row?);
+                    let row = row?;
+                    if seen.insert((row.issue_id.clone(), row.identifier.clone())) {
+                        results.push(row);
+                    }
                 }
             }
             Ok(results)
@@ -798,9 +808,31 @@ impl Database {
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            let mut all = forward;
-            all.extend(inverse);
-            Ok(all)
+            // The same edge can appear as a forward row here and a flipped
+            // inverse row (both sides synced). Dedupe on (semantic type,
+            // counterpart), keeping whichever entry carries issue details.
+            let mut seen: std::collections::HashMap<(String, String), EnrichedRelation> =
+                std::collections::HashMap::new();
+            let mut order = Vec::new();
+            for relation in forward.into_iter().chain(inverse) {
+                let key = (
+                    relation.relation_type.clone(),
+                    relation.issue_identifier.clone(),
+                );
+                match seen.get(&key) {
+                    None => {
+                        order.push(key.clone());
+                        seen.insert(key, relation);
+                    }
+                    Some(existing)
+                        if existing.issue_title.is_empty() && !relation.issue_title.is_empty() =>
+                    {
+                        seen.insert(key, relation);
+                    }
+                    Some(_) => {}
+                }
+            }
+            Ok(order.into_iter().filter_map(|k| seen.remove(&k)).collect())
         })
     }
 
@@ -817,10 +849,23 @@ impl Database {
             )?;
             let mut rows = stmt.query(rusqlite::params![issue_id, related_issue_id, relation_type])?;
             if let Some(row) = rows.next()? {
-                Ok(Some(row.get(0)?))
-            } else {
-                Ok(None)
+                return Ok(Some(row.get(0)?));
             }
+            // A "blocks" edge whose source issue is not synced locally still
+            // exists as the target's inverse-derived blocked_by row. Recover
+            // the real Linear relation id by stripping the synthetic suffix.
+            if relation_type == "blocks" {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM issue_relations
+                     WHERE issue_id = ?1 AND related_issue_id = ?2 AND relation_type = 'blocked_by'",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![related_issue_id, issue_id])?;
+                if let Some(row) = rows.next()? {
+                    let id: String = row.get(0)?;
+                    return Ok(Some(id.strip_suffix(":inv").unwrap_or(&id).to_string()));
+                }
+            }
+            Ok(None)
         })
     }
 
@@ -2137,7 +2182,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
 
         crate::db::schema::run_migrations(&conn).unwrap();
 
@@ -2652,7 +2697,7 @@ mod tests {
         crate::db::schema::run_migrations(&conn).unwrap();
         conn.execute("ALTER TABLE issues DROP COLUMN due_date", [])
             .unwrap();
-        conn.execute("DELETE FROM schema_version WHERE version=14", [])
+        conn.execute("DELETE FROM schema_version WHERE version>=14", [])
             .unwrap();
         conn.execute(
             "INSERT INTO sync_state (
@@ -2768,5 +2813,94 @@ mod tests {
             .get_chunks_filtered("default", None, &super::DateFilters::default())
             .unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    fn seed_relation(
+        db: &super::Database,
+        id: &str,
+        issue_id: &str,
+        related_id: &str,
+        related_ident: &str,
+        rtype: &str,
+    ) {
+        db.upsert_relation_page(
+            issue_id,
+            &[super::Relation {
+                id: id.to_string(),
+                issue_id: issue_id.to_string(),
+                related_issue_id: related_id.to_string(),
+                related_issue_identifier: related_ident.to_string(),
+                relation_type: rtype.to_string(),
+            }],
+            "seed-token",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blocked_by_row_surfaces_blocker_that_is_not_synced_locally() {
+        let (db, _dir) = test_db();
+        let x = make_issue("CUT-1", "CUT");
+        db.upsert_issue(&x).unwrap();
+        // Cross-team blocker ENG-9 has no row in `issues` at all.
+        seed_relation(&db, "rel-9:inv", &x.id, "eng-9-uuid", "ENG-9", "blocked_by");
+
+        let blockers = db.get_blockers_for_issues(&[x.id.clone()]).unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].identifier, "ENG-9");
+        assert_eq!(
+            blockers[0].state_type, "",
+            "unknown state for unsynced blocker"
+        );
+    }
+
+    #[test]
+    fn blockers_are_deduped_when_both_sides_of_the_edge_are_synced() {
+        let (db, _dir) = test_db();
+        let x = make_issue("CUT-1", "CUT");
+        let y = make_issue("CUT-2", "CUT");
+        db.upsert_issue(&x).unwrap();
+        db.upsert_issue(&y).unwrap();
+        // Same Linear edge seen from both sides: Y blocks X.
+        seed_relation(&db, "rel-9", &y.id, &x.id, "CUT-1", "blocks");
+        seed_relation(&db, "rel-9:inv", &x.id, &y.id, "CUT-2", "blocked_by");
+
+        let blockers = db.get_blockers_for_issues(&[x.id.clone()]).unwrap();
+        assert_eq!(blockers.len(), 1, "one edge must yield one blocker");
+        assert_eq!(blockers[0].identifier, "CUT-2");
+    }
+
+    #[test]
+    fn enriched_relations_are_deduped_when_both_sides_of_the_edge_are_synced() {
+        let (db, _dir) = test_db();
+        let x = make_issue("CUT-1", "CUT");
+        let y = make_issue("CUT-2", "CUT");
+        db.upsert_issue(&x).unwrap();
+        db.upsert_issue(&y).unwrap();
+        seed_relation(&db, "rel-9", &y.id, &x.id, "CUT-1", "blocks");
+        seed_relation(&db, "rel-9:inv", &x.id, &y.id, "CUT-2", "blocked_by");
+
+        let relations = db.get_relations_enriched(&x.id).unwrap();
+        assert_eq!(
+            relations.len(),
+            1,
+            "one edge must render once, got {relations:?}"
+        );
+        assert_eq!(relations[0].relation_type, "blocked_by");
+        assert_eq!(relations[0].issue_identifier, "CUT-2");
+    }
+
+    #[test]
+    fn find_relation_id_falls_back_to_the_inverse_row_and_strips_its_suffix() {
+        let (db, _dir) = test_db();
+        let x = make_issue("CUT-1", "CUT");
+        db.upsert_issue(&x).unwrap();
+        // Only the inverse-derived row exists (blocker never synced). Removal
+        // looks up the reversed edge (blocker, blocked, "blocks") and must
+        // recover the real Linear relation id, not the synthetic ":inv" id.
+        seed_relation(&db, "rel-9:inv", &x.id, "eng-9-uuid", "ENG-9", "blocked_by");
+
+        let found = db.find_relation_id("eng-9-uuid", &x.id, "blocks").unwrap();
+        assert_eq!(found.as_deref(), Some("rel-9"));
     }
 }

@@ -22,6 +22,7 @@ pub enum LinearOperation {
     Issues,
     Comments,
     Relations,
+    InverseRelations,
 }
 
 impl LinearOperation {
@@ -38,6 +39,7 @@ impl LinearOperation {
             Self::Issues => "issues",
             Self::Comments => "comments",
             Self::Relations => "issue relations",
+            Self::InverseRelations => "issue inverse relations",
         }
     }
 
@@ -54,6 +56,7 @@ impl LinearOperation {
             Self::Issues => "ISSUES",
             Self::Comments => "COMMENTS",
             Self::Relations => "RELATIONS",
+            Self::InverseRelations => "INVERSE_RELATIONS",
         }
     }
 
@@ -63,7 +66,7 @@ impl LinearOperation {
             Self::Issues => 50,
             Self::ProjectMembers | Self::ProjectLabels => 50,
             Self::ProjectTeams => 25,
-            Self::Comments | Self::Relations => 100,
+            Self::Comments | Self::Relations | Self::InverseRelations => 100,
             Self::Teams | Self::Labels | Self::ProjectMilestones | Self::Cycles => 100,
         }
     }
@@ -78,7 +81,7 @@ impl LinearOperation {
             Self::ProjectMembers | Self::ProjectLabels => (50, 80),
             Self::ProjectTeams => (50, 120),
             Self::Comments => (50, 45),
-            Self::Relations => (50, 55),
+            Self::Relations | Self::InverseRelations => (50, 55),
             Self::ProjectMilestones => (50, 60),
             Self::Cycles => (50, 45),
             Self::Labels => (50, 35),
@@ -101,6 +104,7 @@ impl LinearOperation {
             }
             Self::Comments => "comment body, author, timestamps, parent, and URL",
             Self::Relations => "relation type and related issue identity",
+            Self::InverseRelations => "inverse relation type and source issue identity",
         }
     }
 }
@@ -151,6 +155,7 @@ impl SyncQueryConfig {
             LinearOperation::Issues,
             LinearOperation::Comments,
             LinearOperation::Relations,
+            LinearOperation::InverseRelations,
         ] {
             let key = format!(
                 "RECTILINEAR_LINEAR_{}_PAGE_SIZE",
@@ -795,6 +800,7 @@ mod tests {
             LinearOperation::Issues,
             LinearOperation::Comments,
             LinearOperation::Relations,
+            LinearOperation::InverseRelations,
         ] {
             let size = config.page_size(operation);
             assert!(
