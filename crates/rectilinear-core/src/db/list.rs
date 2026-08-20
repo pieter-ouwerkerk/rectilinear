@@ -124,12 +124,15 @@ impl Database {
                 clauses.push(frag);
             }
 
+            // Trailing `id` makes ordering total: timestamps and priorities tie
+            // constantly, and without a deterministic final key LIMIT/OFFSET
+            // pages could reorder, duplicate, or skip tied records.
             let order = match params.order {
-                ListOrder::UpdatedDesc => "updated_at DESC",
-                ListOrder::CreatedDesc => "created_at DESC",
+                ListOrder::UpdatedDesc => "updated_at DESC, id",
+                ListOrder::CreatedDesc => "created_at DESC, id",
                 // Priority 0 means "no priority" in Linear; sort it after 1..4.
                 ListOrder::Priority => {
-                    "CASE WHEN priority = 0 THEN 5 ELSE priority END ASC, updated_at DESC"
+                    "CASE WHEN priority = 0 THEN 5 ELSE priority END ASC, updated_at DESC, id"
                 }
             };
 
@@ -365,5 +368,42 @@ mod tests {
         params.offset = 2;
         let page2 = db.list_issues(&params).unwrap();
         assert_eq!(ids(&page2), vec!["HPN-1"]);
+    }
+
+    #[test]
+    fn pagination_is_stable_when_timestamps_tie() {
+        let (db, _dir) = test_db();
+        for n in 1..=6 {
+            // identical created_at AND updated_at across all six issues
+            seed(&db, &format!("HPN-{n}"), "HPN", "2026-08-01T00:00:00Z", "2026-08-10T00:00:00Z");
+        }
+
+        let mut params = base_params("default");
+        params.limit = 100;
+        let full: Vec<String> = db.list_issues(&params).unwrap().iter().map(|i| i.identifier.clone()).collect();
+
+        let mut paged = Vec::new();
+        for offset in [0, 2, 4] {
+            let mut p = base_params("default");
+            p.limit = 2;
+            p.offset = offset;
+            paged.extend(db.list_issues(&p).unwrap().iter().map(|i| i.identifier.clone()));
+        }
+        assert_eq!(paged, full, "paged reads must neither duplicate nor skip tied records");
+
+        // Same guarantee under priority ordering (all priorities equal here too).
+        let mut p = base_params("default");
+        p.order = ListOrder::Priority;
+        p.limit = 100;
+        let full_prio: Vec<String> = db.list_issues(&p).unwrap().iter().map(|i| i.identifier.clone()).collect();
+        let mut paged_prio = Vec::new();
+        for offset in [0, 3] {
+            let mut p = base_params("default");
+            p.order = ListOrder::Priority;
+            p.limit = 3;
+            p.offset = offset;
+            paged_prio.extend(db.list_issues(&p).unwrap().iter().map(|i| i.identifier.clone()));
+        }
+        assert_eq!(paged_prio, full_prio);
     }
 }
