@@ -1981,10 +1981,13 @@ IMPORTANT — Before calling this tool, you MUST:
             .map_err(|e| e.to_string())?;
         let issue_id = issue.id.clone();
 
+        let (is_blocked, blockers) = self.blocked_status(&issue.id);
         let mut result = serde_json::json!({
             "issue": issue,
             "similar_issues": similar,
             "relations": relations,
+            "is_blocked": is_blocked,
+            "blockers": blockers,
         });
         attach_comments_payload(&mut result, &self.db, &issue_id)?;
 
@@ -2170,8 +2173,11 @@ IMPORTANT — Before calling this tool, you MUST:
             let code_search_hints =
                 extract_code_hints(&issue.title, description.unwrap_or(""), &issue.labels());
 
+            let (is_blocked, blockers) = self.blocked_status(&issue.id);
             enriched.push(serde_json::json!({
                 "identifier": issue.identifier,
+                "is_blocked": is_blocked,
+                "blockers": blockers,
                 "url": issue.url,
                 "title": issue.title,
                 "description": description,
@@ -2613,6 +2619,32 @@ impl RectilinearMcp {
             })
             .collect();
         Ok(serde_json::Value::Array(entries))
+    }
+
+    /// Blocker summary for one issue: the blockers array plus an is_blocked
+    /// flag that is true when any blocker is not completed/canceled. A blocker
+    /// with unknown state (not synced locally, e.g. cross-team) counts as
+    /// blocking — conservative — and renders with state: null so the caller
+    /// can see why.
+    fn blocked_status(&self, issue_id: &str) -> (bool, Vec<serde_json::Value>) {
+        let blockers = self
+            .db
+            .get_blockers_for_issues(&[issue_id.to_string()])
+            .unwrap_or_default();
+        let is_blocked = blockers
+            .iter()
+            .any(|b| !matches!(b.state_type.as_str(), "completed" | "canceled"));
+        let blockers = blockers
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "identifier": b.identifier,
+                    "title": if b.title.is_empty() { serde_json::Value::Null } else { b.title.clone().into() },
+                    "state": if b.state_name.is_empty() { serde_json::Value::Null } else { b.state_name.clone().into() },
+                })
+            })
+            .collect();
+        (is_blocked, blockers)
     }
 
     fn require_workspace(&self, workspace: &Option<String>) -> Result<String, String> {
@@ -3331,5 +3363,163 @@ mod tests {
             "teams should carry the sync timestamp: {response}"
         );
         assert_eq!(teams[0]["issue_count"], 2);
+    }
+
+    fn blocked_test_handler() -> (RectilinearMcp, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("blocked.db")).unwrap();
+        std::mem::forget(directory);
+        db.upsert_workspace("default", None, Some("Default"))
+            .unwrap();
+
+        let mut issue = crate::db::Issue {
+            id: "cut-1-uuid".into(),
+            identifier: "CUT-1".into(),
+            team_key: "CUT".into(),
+            title: "Blocked work".into(),
+            description: Some("desc".into()),
+            state_name: "Backlog".into(),
+            state_type: "backlog".into(),
+            priority: 0,
+            assignee_name: None,
+            project_name: None,
+            labels_json: "[]".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-02T00:00:00Z".into(),
+            content_hash: String::new(),
+            synced_at: None,
+            url: "https://linear.app/cut/issue/CUT-1".into(),
+            branch_name: None,
+            workspace_id: "default".into(),
+            project_id: None,
+            project_milestone_id: None,
+            project_milestone_name: None,
+            cycle_id: None,
+            cycle_name: None,
+            archived_at: None,
+            due_date: None,
+        };
+        db.upsert_issue(&issue).unwrap();
+        // A completed local blocker...
+        issue.id = "cut-2-uuid".into();
+        issue.identifier = "CUT-2".into();
+        issue.title = "Shipped blocker".into();
+        issue.state_name = "Done".into();
+        issue.state_type = "completed".into();
+        issue.priority = 2;
+        db.upsert_issue(&issue).unwrap();
+        db.upsert_relation_page(
+            "cut-2-uuid",
+            &[crate::db::Relation {
+                id: "rel-1".into(),
+                issue_id: "cut-2-uuid".into(),
+                related_issue_id: "cut-1-uuid".into(),
+                related_issue_identifier: "CUT-1".into(),
+                relation_type: "blocks".into(),
+            }],
+            "seed",
+        )
+        .unwrap();
+        db.set_sync_cursor("default", "CUT", "2026-01-03T00:00:00Z")
+            .unwrap();
+
+        let config = Config {
+            linear: crate::config::LinearConfig {
+                api_key: Some("unused".into()),
+                default_team: Some("CUT".into()),
+            },
+            embedding: crate::config::EmbeddingConfig {
+                backend: crate::config::EmbeddingBackend::Local,
+                gemini_api_key: None,
+            },
+            ..Config::default()
+        };
+        (RectilinearMcp::new(db, config), "cut-1-uuid".to_string())
+    }
+
+    fn add_unknown_state_blocker(handler: &RectilinearMcp, blocked_id: &str) {
+        // Cross-team blocker with no local issue row: state is unknown.
+        handler
+            .db
+            .upsert_relation_page(
+                blocked_id,
+                &[crate::db::Relation {
+                    id: "rel-2:inv".into(),
+                    issue_id: blocked_id.into(),
+                    related_issue_id: "eng-9-uuid".into(),
+                    related_issue_identifier: "ENG-9".into(),
+                    relation_type: "blocked_by".into(),
+                }],
+                "seed2",
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn issue_context_reports_not_blocked_when_all_blockers_are_done() {
+        let (handler, _) = blocked_test_handler();
+        let response = handler
+            .issue_context(IssueContextArgs {
+                workspace: Some("default".into()),
+                id: "CUT-1".into(),
+                similar_count: Some(0),
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["is_blocked"], false);
+        assert_eq!(response["blockers"].as_array().unwrap().len(), 1);
+        assert_eq!(response["blockers"][0]["identifier"], "CUT-2");
+        assert_eq!(response["blockers"][0]["state"], "Done");
+    }
+
+    #[tokio::test]
+    async fn issue_context_treats_unknown_state_blockers_as_blocking() {
+        let (handler, blocked_id) = blocked_test_handler();
+        add_unknown_state_blocker(&handler, &blocked_id);
+        let response = handler
+            .issue_context(IssueContextArgs {
+                workspace: Some("default".into()),
+                id: "CUT-1".into(),
+                similar_count: Some(0),
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["is_blocked"], true);
+        let blockers = response["blockers"].as_array().unwrap();
+        assert_eq!(blockers.len(), 2);
+        let unknown = blockers
+            .iter()
+            .find(|b| b["identifier"] == "ENG-9")
+            .unwrap();
+        assert_eq!(unknown["state"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn triage_queue_flags_blocked_issues() {
+        let (handler, blocked_id) = blocked_test_handler();
+        add_unknown_state_blocker(&handler, &blocked_id);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler.get_triage_queue(
+                CancellationToken::new(),
+                GetTriageQueueArgs {
+                    workspace: Some("default".into()),
+                    team: "CUT".into(),
+                    limit: Some(1),
+                    exclude: None,
+                    shuffle: None,
+                    include_completed: None,
+                    labels: None,
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["queue"][0]["identifier"], "CUT-1");
+        assert_eq!(response["queue"][0]["is_blocked"], true);
     }
 }
