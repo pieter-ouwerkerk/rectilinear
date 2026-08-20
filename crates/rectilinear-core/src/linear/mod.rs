@@ -163,6 +163,34 @@ struct IssueRelationsNode {
 }
 
 #[derive(Debug, Deserialize)]
+struct IssueInverseRelationsData {
+    issue: IssueInverseRelationsNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueInverseRelationsNode {
+    #[serde(rename = "inverseRelations")]
+    inverse_relations: PaginatedInverseRelationConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaginatedInverseRelationConnection {
+    nodes: Vec<LinearInverseRelation>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+/// An edge where the fetched issue is the TARGET. Linear stores "X blocked by
+/// Y" as Y →blocks→ X, so blocked-by is only visible through this connection.
+#[derive(Debug, Deserialize)]
+struct LinearInverseRelation {
+    id: String,
+    #[serde(rename = "type")]
+    relation_type: String,
+    issue: LinearRelatedIssue,
+}
+
+#[derive(Debug, Deserialize)]
 struct PaginatedRelationConnection {
     nodes: Vec<LinearRelation>,
     #[serde(rename = "pageInfo")]
@@ -495,8 +523,8 @@ impl LinearClient {
         self
     }
 
-    #[cfg(test)]
-    fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+    /// Override the GraphQL endpoint (tests and self-hosted proxies).
+    pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = api_url.into();
         self
     }
@@ -713,6 +741,27 @@ impl LinearClient {
                 relation_type: r.relation_type.clone(),
             })
             .collect()
+    }
+
+    /// Convert an inverse edge into a local row under the fetched issue.
+    /// Only "blocks" is kept (as blocked_by): symmetric types like related
+    /// would merely duplicate what the forward connection already reports.
+    /// The synthetic ":inv" id suffix keeps the row from colliding with the
+    /// forward-side row for the same Linear relation when both are synced.
+    fn convert_inverse_relation(
+        issue_id: &str,
+        relation: LinearInverseRelation,
+    ) -> Option<db::Relation> {
+        if relation.relation_type != "blocks" {
+            return None;
+        }
+        Some(db::Relation {
+            id: format!("{}:inv", relation.id),
+            issue_id: issue_id.to_string(),
+            related_issue_id: relation.issue.id,
+            related_issue_identifier: relation.issue.identifier,
+            relation_type: "blocked_by".to_string(),
+        })
     }
 
     fn convert_linear_relation(issue_id: &str, relation: LinearRelation) -> db::Relation {
@@ -1125,6 +1174,46 @@ impl LinearClient {
         })
     }
 
+    async fn fetch_issue_inverse_relations_page(
+        &self,
+        issue_id: &str,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<ConnectionPage<db::Relation>> {
+        let query = r#"
+            query($issueId: String!, $first: Int!, $after: String) {
+                issue(id: $issueId) {
+                    inverseRelations(first: $first, after: $after) {
+                        nodes { id type issue { id identifier } }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+        "#;
+        let data: IssueInverseRelationsData = self
+            .query_operation(
+                LinearOperation::InverseRelations.name(),
+                cursor,
+                query,
+                serde_json::json!({
+                    "issueId": issue_id,
+                    "first": page_size,
+                    "after": cursor,
+                }),
+            )
+            .await?;
+        Ok(ConnectionPage {
+            nodes: data
+                .issue
+                .inverse_relations
+                .nodes
+                .into_iter()
+                .filter_map(|relation| Self::convert_inverse_relation(issue_id, relation))
+                .collect(),
+            page_info: data.issue.inverse_relations.page_info,
+        })
+    }
+
     pub async fn sync_issue_relations(&self, db: &Database, issue_id: &str) -> Result<usize> {
         let sync_token = Uuid::new_v4().to_string();
         let stats = paginate(
@@ -1144,8 +1233,27 @@ impl LinearClient {
             |event| self.observe_sync_event(event),
         )
         .await?;
+        // Inverse edges land under the same sync token so the cleanup below
+        // treats both connections as one atomic refresh of this issue's rows.
+        let inverse_stats = paginate(
+            &self.sync_query_config,
+            LinearOperation::InverseRelations,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_inverse_relations_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |relations, _| ready(db.upsert_relation_page(issue_id, &relations, &sync_token)),
+            |relation| relation.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
         db.complete_relation_sync(issue_id, &sync_token)?;
-        Ok(stats.nodes)
+        Ok(stats.nodes + inverse_stats.nodes)
     }
 
     async fn fetch_issue_labels_page(
@@ -1269,6 +1377,7 @@ impl LinearClient {
 
     async fn fetch_all_issue_relations_remote(&self, issue_id: &str) -> Result<Vec<db::Relation>> {
         let mut relations = Vec::new();
+        let mut inverse_relations = Vec::new();
         paginate(
             &self.sync_query_config,
             LinearOperation::Relations,
@@ -1289,6 +1398,27 @@ impl LinearClient {
             |event| self.observe_sync_event(event),
         )
         .await?;
+        paginate(
+            &self.sync_query_config,
+            LinearOperation::InverseRelations,
+            Some(issue_id.to_string()),
+            |request| async move {
+                self.fetch_issue_inverse_relations_page(
+                    issue_id,
+                    request.cursor.as_deref(),
+                    request.page_size,
+                )
+                .await
+            },
+            |nodes, _| {
+                inverse_relations.extend(nodes);
+                ready(Ok(()))
+            },
+            |relation| relation.id.clone(),
+            |event| self.observe_sync_event(event),
+        )
+        .await?;
+        relations.extend(inverse_relations);
         Ok(relations)
     }
 
@@ -2132,6 +2262,15 @@ mod tests {
 
     static SYNC_HTTP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialize mock-HTTP tests without letting one test's panic poison the
+    /// lock and cascade into every later test: each test owns its server and
+    /// database, so a previous failure is irrelevant to the next one.
+    fn serial_http_test() -> std::sync::MutexGuard<'static, ()> {
+        SYNC_HTTP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     struct MockResponse {
         status: u16,
         body: String,
@@ -2448,6 +2587,14 @@ mod tests {
                 }}}
             })));
         }
+        if query.contains("inverseRelations(first:") {
+            return Some(MockResponse::json(serde_json::json!({
+                "data": { "issue": { "inverseRelations": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}}
+            })));
+        }
         if query.contains("relations(first:") {
             return Some(MockResponse::json(serde_json::json!({
                 "data": { "issue": { "relations": {
@@ -2480,7 +2627,15 @@ mod tests {
         let mut config = SyncQueryConfig::default();
         config.max_retry_attempts = 2;
         config.retry_base_delay = Duration::ZERO;
-        LinearClient::with_api_key("test-api-key")
+        // no_proxy: workspace builds unify reqwest features with the binary
+        // crate, which enables macOS system-proxy support. A proxy configured
+        // on the machine (e.g. a debugging proxy on 127.0.0.1:8080) would
+        // swallow every request to the mock server. Tests always dial direct.
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client configuration should be valid");
+        LinearClient::with_http_client(http, "test-api-key")
             .with_api_url(api_url)
             .with_sync_query_config(config)
     }
@@ -2596,7 +2751,7 @@ mod tests {
 
     #[test]
     fn team_sync_retries_http_500_comments_then_completes() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2629,7 +2784,7 @@ mod tests {
 
     #[test]
     fn exhausted_comment_retries_are_partial_and_do_not_block_later_issues_or_cursor() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2677,7 +2832,7 @@ mod tests {
 
     #[test]
     fn permission_comment_failure_is_not_retried_and_other_issues_continue() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2717,7 +2872,7 @@ mod tests {
 
     #[test]
     fn later_incremental_sync_recovers_failed_comment_state_and_clears_error() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let should_fail = Arc::new(AtomicBool::new(true));
         let server_should_fail = Arc::clone(&should_fail);
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
@@ -2761,7 +2916,7 @@ mod tests {
 
     #[test]
     fn index_only_traverses_bounded_pages_without_supplemental_requests() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -2825,7 +2980,7 @@ mod tests {
 
     #[test]
     fn team_project_sync_is_scoped_and_returns_project_and_milestone_counts() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let project_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let server_requests = Arc::clone(&project_requests);
         let server = MockLinearServer::start(move |request| {
@@ -2856,7 +3011,7 @@ mod tests {
 
     #[test]
     fn interrupted_team_project_sync_does_not_reconcile_missing_projects() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let fail_members = Arc::new(AtomicBool::new(false));
         let server_fail_members = Arc::clone(&fail_members);
         let server = MockLinearServer::start(move |request| {
@@ -2890,7 +3045,7 @@ mod tests {
 
     #[test]
     fn workspace_project_sync_compatibility_api_still_traverses_all_projects() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             project_sync_response(&request, 1).expect("unexpected GraphQL operation")
         });
@@ -2908,7 +3063,7 @@ mod tests {
 
     #[test]
     fn failed_index_page_leaves_checkpoint_unchanged() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             if request["variables"]["after"].is_null() {
                 MockResponse::json(serde_json::json!({
@@ -2947,7 +3102,7 @@ mod tests {
 
     #[test]
     fn empty_index_window_advances_checkpoint_and_uses_overlap() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let lower = Arc::new(Mutex::new(None::<String>));
         let query = Arc::new(Mutex::new(None::<String>));
         let server_lower = Arc::clone(&lower);
@@ -2994,7 +3149,7 @@ mod tests {
 
     #[test]
     fn subsequent_overlap_finds_an_issue_at_the_previous_upper_boundary() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3054,7 +3209,7 @@ mod tests {
 
     #[test]
     fn cancelled_hydration_requeues_the_inflight_resource() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let details_started = Arc::new(AtomicBool::new(false));
         let server_details_started = Arc::clone(&details_started);
         let server = MockLinearServer::start(move |request| {
@@ -3092,7 +3247,7 @@ mod tests {
                     .await
             });
 
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 while !details_started.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -3137,7 +3292,7 @@ mod tests {
 
     #[test]
     fn cancelled_index_sync_marks_the_owned_family_partial() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let index_started = Arc::new(AtomicBool::new(false));
         let server_index_started = Arc::clone(&index_started);
         let server = MockLinearServer::start(move |request| {
@@ -3183,12 +3338,20 @@ mod tests {
 
     #[test]
     fn issue_hydration_families_complete_independently() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             let query = request["query"].as_str().unwrap_or_default();
             if query.contains("labels(first:") {
                 return MockResponse::json(serde_json::json!({
                     "errors": [{ "message": "Forbidden" }]
+                }));
+            }
+            if query.contains("inverseRelations(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "data": { "issue": { "inverseRelations": {
+                        "nodes": [],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }}}
                 }));
             }
             if query.contains("relations(first:") {
@@ -3267,7 +3430,7 @@ mod tests {
 
     #[test]
     fn http_400_ratelimited_is_persisted_and_stops_background_batch() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3321,7 +3484,7 @@ mod tests {
 
     #[test]
     fn permanent_permission_failure_is_not_background_retried() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3389,7 +3552,7 @@ mod tests {
 
     #[test]
     fn if_needed_selected_hydration_skips_fresh_and_deferred_resources() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3453,7 +3616,7 @@ mod tests {
 
     #[test]
     fn if_needed_hydrates_pending_resources_without_refreshing_fresh_ones() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -3494,7 +3657,7 @@ mod tests {
 
     #[test]
     fn force_refresh_requeues_all_resources_and_recovers_permanent_failures() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -3562,5 +3725,73 @@ mod tests {
         assert!(diagnostic.contains("[REDACTED]"));
         assert!(!diagnostic.contains("top-secret-api-key"));
         assert!(diagnostic.chars().count() <= 500);
+    }
+
+    #[test]
+    fn sync_issue_relations_captures_inverse_blocks_as_blocked_by() {
+        let _serial = serial_http_test();
+        let server = MockLinearServer::start(move |request| {
+            let query = request["query"].as_str().unwrap_or("");
+            if query.contains("inverseRelations(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "data": { "issue": { "inverseRelations": {
+                        "nodes": [
+                            { "id": "rel-9", "type": "blocks",
+                              "issue": { "id": "eng-9-uuid", "identifier": "ENG-9" } },
+                            { "id": "rel-10", "type": "related",
+                              "issue": { "id": "eng-10-uuid", "identifier": "ENG-10" } }
+                        ],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }}}
+                }));
+            }
+            if query.contains("inverseRelations(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "data": { "issue": { "inverseRelations": {
+                        "nodes": [],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }}}
+                }));
+            }
+            if query.contains("relations(first:") {
+                return MockResponse::json(serde_json::json!({
+                    "data": { "issue": { "relations": {
+                        "nodes": [
+                            { "id": "rel-1", "type": "related",
+                              "relatedIssue": { "id": "cut-2-uuid", "identifier": "CUT-2" } }
+                        ],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }}}
+                }));
+            }
+            panic!("unexpected GraphQL operation: {query}");
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = crate::db::test_helpers::test_db();
+        let mut issue = crate::db::test_helpers::make_issue("CUT-1", "CUT");
+        issue.id = "cut-1-uuid".to_string();
+        db.upsert_issue(&issue).unwrap();
+
+        runtime()
+            .block_on(client.sync_issue_relations(&db, "cut-1-uuid"))
+            .unwrap();
+
+        let mut relations = db.get_relations_enriched("cut-1-uuid").unwrap();
+        relations.sort_by(|a, b| a.issue_identifier.cmp(&b.issue_identifier));
+        // Forward "related" edge plus the inverse "blocks" edge as blocked_by.
+        // The inverse "related" edge is skipped: symmetric types would only
+        // duplicate what the forward connection already reports.
+        assert_eq!(relations.len(), 2, "got {relations:?}");
+        assert_eq!(relations[0].relation_type, "related");
+        assert_eq!(relations[0].issue_identifier, "CUT-2");
+        assert_eq!(relations[1].relation_type, "blocked_by");
+        assert_eq!(relations[1].issue_identifier, "ENG-9");
+        assert_eq!(relations[1].relation_id, "rel-9:inv");
+
+        // Re-running must not strand stale rows: same data, same two relations.
+        runtime()
+            .block_on(client.sync_issue_relations(&db, "cut-1-uuid"))
+            .unwrap();
+        assert_eq!(db.get_relations_enriched("cut-1-uuid").unwrap().len(), 2);
     }
 }

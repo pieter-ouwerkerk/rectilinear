@@ -99,6 +99,26 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO schema_version (version) VALUES (14)", [])?;
     }
 
+    if current_version < 15 {
+        run_migration_15(conn)?;
+        conn.execute("INSERT INTO schema_version (version) VALUES (15)", [])?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn run_migration_15(conn: &Connection) -> Result<()> {
+    // Relation sync now also captures inverse "blocks" edges (blocked_by).
+    // Issues hydrated before this change are missing those rows, so their
+    // relations resource must re-hydrate once. Other resources are untouched.
+    conn.execute(
+        "UPDATE issue_hydration_state
+         SET status = 'pending', queue_reason = 'blocked_by_backfill',
+             hydrated_at = NULL, attempt_count = 0,
+             next_retry_at = NULL, last_error = NULL
+         WHERE resource = 'relations'",
+        [],
+    )?;
     Ok(())
 }
 
@@ -603,3 +623,52 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_15_requeues_only_relations_hydration() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO workspaces (id) VALUES ('default');
+             INSERT INTO issues (id, identifier, team_key, title, state_name, state_type,
+                 priority, labels_json, created_at, updated_at, content_hash, url, workspace_id)
+             VALUES ('i1', 'CUT-1', 'CUT', 't', 'Todo', 'unstarted', 0, '[]',
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '', 'u', 'default');
+             INSERT INTO issue_hydration_state
+                 (workspace_id, issue_id, resource, status, source_updated_at, hydrated_at)
+             VALUES ('default', 'i1', 'relations', 'hydrated', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'),
+                    ('default', 'i1', 'labels', 'hydrated', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z');",
+        )
+        .unwrap();
+
+        run_migration_15(&conn).unwrap();
+
+        let (status, reason): (String, String) = conn
+            .query_row(
+                "SELECT status, queue_reason FROM issue_hydration_state
+                 WHERE issue_id = 'i1' AND resource = 'relations'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(reason, "blocked_by_backfill");
+
+        let labels_status: String = conn
+            .query_row(
+                "SELECT status FROM issue_hydration_state
+                 WHERE issue_id = 'i1' AND resource = 'labels'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            labels_status, "hydrated",
+            "other resources must not be requeued"
+        );
+    }
+}
