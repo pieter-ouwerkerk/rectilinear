@@ -16,3 +16,9 @@ target
 # Profiling artifacts
 *.trace/
 *.profraw
+
+# Local agent and worktree configuration
+/.claude/settings-local.json
+/.worktreeinclude
+/AGENTS.md
+/docs/superpowers/
