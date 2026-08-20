@@ -1,8 +1,10 @@
 pub mod append_cmd;
 pub mod config_cmd;
 pub mod create_cmd;
+pub mod date_args;
 pub mod embed_cmd;
 pub mod hydrate_cmd;
+pub mod list_cmd;
 pub mod mark_triaged_cmd;
 pub mod projects_cmd;
 pub mod search_cmd;

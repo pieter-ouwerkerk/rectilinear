@@ -1,8 +1,10 @@
 mod hydration;
+mod list;
 mod projects;
 pub mod schema;
 mod sync;
 pub use hydration::*;
+pub use list::*;
 pub use projects::*;
 pub use sync::*;
 #[cfg(test)]
@@ -951,6 +953,55 @@ impl Database {
         })
     }
 
+    /// Chunk candidates restricted by team and date window, so vector search
+    /// ranks only issues inside the filter instead of post-filtering after
+    /// truncation.
+    pub fn get_chunks_filtered(
+        &self,
+        workspace_id: &str,
+        team_key: Option<&str>,
+        dates: &DateFilters,
+    ) -> Result<Vec<Chunk>> {
+        let dates = dates.clone();
+        let team_key = team_key.map(ToString::to_string);
+        self.with_conn(move |conn| {
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(workspace_id.to_string())];
+            let mut clause = String::new();
+            if let Some(team) = &team_key {
+                params.push(Box::new(team.clone()));
+                clause.push_str(&format!(" AND i.team_key = ?{}", params.len()));
+            }
+            for (column, op, value) in [
+                ("updated_at", ">=", &dates.updated_after),
+                ("updated_at", "<", &dates.updated_before),
+                ("created_at", ">=", &dates.created_after),
+                ("created_at", "<", &dates.created_before),
+            ] {
+                if let Some(v) = value {
+                    params.push(Box::new(v.clone()));
+                    clause.push_str(&format!(" AND i.{column} {op} ?{}", params.len()));
+                }
+            }
+            let sql = format!(
+                "SELECT c.issue_id, c.embedding, i.identifier
+                 FROM chunks c JOIN issues i ON c.issue_id = i.id
+                 WHERE i.workspace_id = ?1{clause}"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok(Chunk {
+                    issue_id: row.get(0)?,
+                    embedding: row.get(1)?,
+                    identifier: row.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     pub fn count_embedded_issues(
         &self,
         team_key: Option<&str>,
@@ -1313,7 +1364,7 @@ impl Database {
         limit: usize,
         workspace_id: &str,
     ) -> Result<Vec<FtsResult>> {
-        self.fts_search_filtered(query, limit, workspace_id, None)
+        self.fts_search_filtered(query, limit, workspace_id, None, &DateFilters::default())
     }
 
     pub fn fts_search_filtered(
@@ -1322,7 +1373,9 @@ impl Database {
         limit: usize,
         workspace_id: &str,
         label_ids: Option<&[String]>,
+        dates: &DateFilters,
     ) -> Result<Vec<FtsResult>> {
+        let dates = dates.clone();
         self.with_conn(|conn| {
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
                 Box::new(query.to_string()),
@@ -1338,11 +1391,24 @@ impl Database {
                 String::new()
             };
 
+            let mut date_clause = String::new();
+            for (column, op, value) in [
+                ("updated_at", ">=", &dates.updated_after),
+                ("updated_at", "<", &dates.updated_before),
+                ("created_at", ">=", &dates.created_after),
+                ("created_at", "<", &dates.created_before),
+            ] {
+                if let Some(v) = value {
+                    params.push(Box::new(v.clone()));
+                    date_clause.push_str(&format!(" AND i.{column} {op} ?{}", params.len()));
+                }
+            }
+
             let sql = format!(
                 "SELECT i.id, i.identifier, i.title, i.state_name, i.priority, i.due_date, bm25(issues_fts) as rank
                  FROM issues_fts f
                  JOIN issues i ON f.rowid = i.rowid
-                 WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3{label_clause}
+                 WHERE issues_fts MATCH ?1 AND i.workspace_id = ?3{label_clause}{date_clause}
                  ORDER BY rank
                  LIMIT ?2"
             );
@@ -2344,13 +2410,25 @@ mod tests {
 
         // Without filter, both match "audit"
         let r = db
-            .fts_search_filtered("\"audit\"", 10, "default", None)
+            .fts_search_filtered(
+                "\"audit\"",
+                10,
+                "default",
+                None,
+                &super::DateFilters::default(),
+            )
             .unwrap();
         assert_eq!(r.len(), 2);
 
         // With Vanta filter, only `a`
         let r = db
-            .fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()]))
+            .fts_search_filtered(
+                "\"audit\"",
+                10,
+                "default",
+                Some(&["vanta".to_string()]),
+                &super::DateFilters::default(),
+            )
             .unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].identifier, "ENG-20");
@@ -2628,5 +2706,67 @@ mod tests {
             .find(|result| result.identifier == "CUT-99")
             .unwrap();
         assert_eq!(result.due_date.as_deref(), Some("2026-08-19"));
+    }
+
+    #[test]
+    fn fts_search_filtered_applies_date_window_before_ranking() {
+        let (db, _dir) = test_db();
+        let mut stale = make_issue("CUT-1", "CUT");
+        stale.title = "authentication timeout bug".to_string();
+        stale.updated_at = "2026-01-01T00:00:00Z".to_string();
+        db.upsert_issue(&stale).unwrap();
+        let mut fresh = make_issue("CUT-2", "CUT");
+        fresh.title = "authentication flow cleanup".to_string();
+        fresh.updated_at = "2026-08-18T00:00:00Z".to_string();
+        db.upsert_issue(&fresh).unwrap();
+
+        let dates = super::DateFilters {
+            updated_after: Some("2026-08-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let results = db
+            .fts_search_filtered("\"authentication\"", 10, "default", None, &dates)
+            .unwrap();
+        let identifiers: Vec<_> = results.iter().map(|r| r.identifier.as_str()).collect();
+        assert_eq!(identifiers, vec!["CUT-2"]);
+    }
+
+    #[test]
+    fn get_chunks_filtered_applies_team_and_date_window() {
+        let (db, _dir) = test_db();
+        let mut stale = make_issue("CUT-1", "CUT");
+        stale.updated_at = "2026-01-01T00:00:00Z".to_string();
+        db.upsert_issue(&stale).unwrap();
+        db.upsert_chunks(&stale.id, &[(0, "chunk".to_string(), fake_embedding(4))])
+            .unwrap();
+        let mut fresh = make_issue("CUT-2", "CUT");
+        fresh.updated_at = "2026-08-18T00:00:00Z".to_string();
+        db.upsert_issue(&fresh).unwrap();
+        db.upsert_chunks(&fresh.id, &[(0, "chunk".to_string(), fake_embedding(4))])
+            .unwrap();
+        let mut other_team = make_issue("ENG-1", "ENG");
+        other_team.updated_at = "2026-08-18T00:00:00Z".to_string();
+        db.upsert_issue(&other_team).unwrap();
+        db.upsert_chunks(
+            &other_team.id,
+            &[(0, "chunk".to_string(), fake_embedding(4))],
+        )
+        .unwrap();
+
+        let dates = super::DateFilters {
+            updated_after: Some("2026-08-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let chunks = db
+            .get_chunks_filtered("default", Some("CUT"), &dates)
+            .unwrap();
+        let identifiers: Vec<_> = chunks.iter().map(|c| c.identifier.as_str()).collect();
+        assert_eq!(identifiers, vec!["CUT-2"]);
+
+        // No filters returns everything in the workspace.
+        let all = db
+            .get_chunks_filtered("default", None, &super::DateFilters::default())
+            .unwrap();
+        assert_eq!(all.len(), 3);
     }
 }

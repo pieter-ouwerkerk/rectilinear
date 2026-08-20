@@ -457,6 +457,42 @@ struct SearchArgs {
     limit: Option<usize>,
     /// Filter to issues that have ALL of these labels (case-insensitive).
     labels: Option<Vec<String>>,
+    /// Only issues updated at or after this time. Accepts YYYY-MM-DD, RFC 3339, or a relative duration like "7d", "24h", "90m".
+    updated_after: Option<String>,
+    /// Only issues updated before this time. Same formats as updated_after.
+    updated_before: Option<String>,
+    /// Only issues created at or after this time. Same formats as updated_after.
+    created_after: Option<String>,
+    /// Only issues created before this time. Same formats as updated_after.
+    created_before: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ListIssuesArgs {
+    /// Workspace name (required). Use list_workspaces to see available workspaces.
+    workspace: Option<String>,
+    /// Filter by team key (e.g., "ENG")
+    team: Option<String>,
+    /// Filter by state name (case-insensitive substring, e.g. "progress")
+    state: Option<String>,
+    /// Filter to issues that have ALL of these labels (case-insensitive).
+    labels: Option<Vec<String>>,
+    /// Only issues updated at or after this time. Accepts YYYY-MM-DD, RFC 3339, or a relative duration like "7d", "24h", "90m".
+    updated_after: Option<String>,
+    /// Only issues updated before this time. Same formats as updated_after.
+    updated_before: Option<String>,
+    /// Only issues created at or after this time. Same formats as updated_after.
+    created_after: Option<String>,
+    /// Only issues created before this time. Same formats as updated_after.
+    created_before: Option<String>,
+    /// Sort order: "updated" (default, most recently updated first), "created", or "priority"
+    order: Option<String>,
+    /// Maximum number of results (default 25)
+    limit: Option<usize>,
+    /// Number of results to skip, for pagination
+    offset: Option<usize>,
+    /// Include archived issues (excluded by default)
+    include_archived: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -697,11 +733,23 @@ impl RectilinearMcp {
                 .workspace_config(name)
                 .map_err(|e| e.to_string())?;
             let db_info = self.db.get_workspace(name).map_err(|e| e.to_string())?;
+            let teams = self.db.list_synced_teams(name).map_err(|e| e.to_string())?;
+            let teams: Vec<_> = teams
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "key": t.key,
+                        "issue_count": t.issue_count,
+                        "last_synced_at": t.last_synced_at,
+                    })
+                })
+                .collect();
             workspaces.push(serde_json::json!({
                 "name": name,
                 "active": active.as_deref() == Some(name.as_str()),
                 "default_team": ws.default_team,
                 "org_name": db_info.as_ref().and_then(|w| w.display_name.clone()),
+                "teams": teams,
             }));
         }
 
@@ -1258,6 +1306,12 @@ impl RectilinearMcp {
             .map_err(|e: anyhow::Error| e.to_string())?;
 
         let limit = args.limit.unwrap_or(self.config.search.default_limit);
+        let dates = Self::resolve_date_filters(
+            &args.updated_after,
+            &args.updated_before,
+            &args.created_after,
+            &args.created_before,
+        )?;
 
         let embedder = if mode != SearchMode::Fts {
             Embedder::new(&self.config).ok()
@@ -1312,6 +1366,7 @@ impl RectilinearMcp {
                 team_key: args.team.as_deref(),
                 state_filter: args.state.as_deref(),
                 label_ids: label_ids.as_deref(),
+                dates,
                 limit,
                 embedder: embedder.as_ref(),
                 rrf_k: self.config.search.rrf_k,
@@ -1321,7 +1376,90 @@ impl RectilinearMcp {
         .await
         .map_err(|e| e.to_string())?;
 
-        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+        let freshness = self.freshness_json(&workspace, args.team.as_deref())?;
+        serde_json::to_string_pretty(&serde_json::json!({
+            "results": results,
+            "freshness": freshness,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "list_issues",
+        description = "Browse issues from the local store without a search query — filter by team, state, labels, and date windows (updated_after/created_after etc.), ordered by recency. Use this instead of search_issues for time-window questions like 'what changed this week': search requires query text, this does not. Dates accept YYYY-MM-DD, RFC 3339, or relative durations like '7d'/'24h'. Pure local read; the freshness field states what the snapshot is current as of."
+    )]
+    async fn list_issues(&self, #[tool(aggr)] args: ListIssuesArgs) -> Result<String, String> {
+        let workspace = self.require_workspace(&args.workspace)?;
+        let dates = Self::resolve_date_filters(
+            &args.updated_after,
+            &args.updated_before,
+            &args.created_after,
+            &args.created_before,
+        )?;
+        let order: crate::db::ListOrder = args
+            .order
+            .as_deref()
+            .unwrap_or("updated")
+            .parse()
+            .map_err(|e: anyhow::Error| e.to_string())?;
+
+        let label_ids = if let Some(ref names) = args.labels {
+            let (resolved, unknown) = self
+                .db
+                .resolve_label_ids_local(&workspace, names)
+                .map_err(|e| e.to_string())?;
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "Unknown label(s): {}. Use list_labels to see available labels.",
+                    unknown.join(", ")
+                ));
+            }
+            Some(resolved)
+        } else {
+            None
+        };
+
+        let params = crate::db::ListIssuesParams {
+            workspace_id: &workspace,
+            team_key: args.team.as_deref(),
+            state_filter: args.state.as_deref(),
+            label_ids: label_ids.as_deref(),
+            dates,
+            order,
+            limit: args.limit.unwrap_or(25),
+            offset: args.offset.unwrap_or(0),
+            include_archived: args.include_archived.unwrap_or(false),
+        };
+        let issues = self.db.list_issues(&params).map_err(|e| e.to_string())?;
+
+        let projected: Vec<_> = issues
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "identifier": i.identifier,
+                    "title": i.title,
+                    "state": i.state_name,
+                    "priority": i.priority,
+                    "assignee": i.assignee_name,
+                    "project": i.project_name,
+                    "labels": serde_json::from_str::<serde_json::Value>(&i.labels_json)
+                        .unwrap_or(serde_json::Value::Null),
+                    "created_at": i.created_at,
+                    "updated_at": i.updated_at,
+                    "due_date": i.due_date,
+                    "url": i.url,
+                })
+            })
+            .collect();
+
+        let freshness = self.freshness_json(&workspace, args.team.as_deref())?;
+        let mut response = serde_json::json!({
+            "count": projected.len(),
+            "issues": projected,
+            "freshness": freshness,
+        });
+        enrich_with_issue_links(&mut response, &self.db);
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -2430,6 +2568,53 @@ IMPORTANT — Before calling this tool, you MUST:
 }
 
 impl RectilinearMcp {
+    /// Normalize the four optional date-filter inputs, rejecting anything unparseable.
+    fn resolve_date_filters(
+        updated_after: &Option<String>,
+        updated_before: &Option<String>,
+        created_after: &Option<String>,
+        created_before: &Option<String>,
+    ) -> Result<crate::db::DateFilters, String> {
+        let now = chrono::Utc::now();
+        let resolve = |input: &Option<String>| -> Result<Option<String>, String> {
+            input
+                .as_ref()
+                .map(|v| crate::dates::resolve_date_input(v, now).map_err(|e| e.to_string()))
+                .transpose()
+        };
+        Ok(crate::db::DateFilters {
+            updated_after: resolve(updated_after)?,
+            updated_before: resolve(updated_before)?,
+            created_after: resolve(created_after)?,
+            created_before: resolve(created_before)?,
+        })
+    }
+
+    /// Per-team sync freshness for a workspace, so recency answers can state
+    /// what the local snapshot is current as of.
+    fn freshness_json(
+        &self,
+        workspace: &str,
+        team: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let teams = self
+            .db
+            .list_synced_teams(workspace)
+            .map_err(|e| e.to_string())?;
+        let entries: Vec<_> = teams
+            .iter()
+            .filter(|t| team.is_none_or(|key| t.key.eq_ignore_ascii_case(key)))
+            .map(|t| {
+                serde_json::json!({
+                    "team": t.key,
+                    "last_synced_at": t.last_synced_at,
+                    "issue_count": t.issue_count,
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(entries))
+    }
+
     fn require_workspace(&self, workspace: &Option<String>) -> Result<String, String> {
         match workspace {
             Some(ws) if !ws.is_empty() => {
@@ -2958,5 +3143,193 @@ mod tests {
         let new_desc = "New text ![img](url)";
         let result = preserve_images(original, new_desc);
         assert_eq!(result, "New text ![img](url)");
+    }
+
+    fn recency_test_handler() -> RectilinearMcp {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("recency.db")).unwrap();
+        std::mem::forget(directory); // keep the tempdir alive for the test process
+        db.upsert_workspace("default", None, Some("Default"))
+            .unwrap();
+
+        let mut stale = crate::db::Issue {
+            id: "issue-stale".into(),
+            identifier: "CUT-1".into(),
+            team_key: "CUT".into(),
+            title: "stale payment bug".into(),
+            description: Some("old".into()),
+            state_name: "Backlog".into(),
+            state_type: "backlog".into(),
+            priority: 3,
+            assignee_name: None,
+            project_name: None,
+            labels_json: "[]".into(),
+            created_at: "2020-01-01T00:00:00Z".into(),
+            updated_at: "2020-01-02T00:00:00Z".into(),
+            content_hash: String::new(),
+            synced_at: None,
+            url: "https://linear.app/cut/issue/CUT-1".into(),
+            branch_name: None,
+            workspace_id: "default".into(),
+            project_id: None,
+            project_milestone_id: None,
+            project_milestone_name: None,
+            cycle_id: None,
+            cycle_name: None,
+            archived_at: None,
+            due_date: None,
+        };
+        db.upsert_issue(&stale).unwrap();
+        stale.id = "issue-fresh".into();
+        stale.identifier = "CUT-2".into();
+        stale.title = "fresh payment bug".into();
+        stale.created_at = "2050-01-01T00:00:00Z".into();
+        stale.updated_at = "2050-01-02T00:00:00Z".into();
+        db.upsert_issue(&stale).unwrap();
+        db.set_sync_cursor("default", "CUT", "2026-08-20T17:54:00Z")
+            .unwrap();
+
+        let config = Config {
+            linear: crate::config::LinearConfig {
+                api_key: Some("unused".into()),
+                default_team: Some("CUT".into()),
+            },
+            embedding: crate::config::EmbeddingConfig {
+                backend: crate::config::EmbeddingBackend::Local,
+                gemini_api_key: None,
+            },
+            ..Config::default()
+        };
+        RectilinearMcp::new(db, config)
+    }
+
+    #[tokio::test]
+    async fn list_issues_browses_by_relative_updated_window_with_freshness() {
+        let handler = recency_test_handler();
+        let response = handler
+            .list_issues(ListIssuesArgs {
+                workspace: Some("default".into()),
+                team: Some("CUT".into()),
+                state: None,
+                labels: None,
+                updated_after: Some("7d".into()),
+                updated_before: None,
+                created_after: None,
+                created_before: None,
+                order: None,
+                limit: None,
+                offset: None,
+                include_archived: None,
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["count"], 1);
+        assert_eq!(response["issues"][0]["identifier"], "CUT-2");
+        assert!(
+            response["freshness"][0]["last_synced_at"].is_string(),
+            "freshness should carry the sync timestamp: {response}"
+        );
+        assert_eq!(response["freshness"][0]["team"], "CUT");
+        assert_eq!(response["freshness"][0]["issue_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_issues_defaults_to_most_recently_updated_first() {
+        let handler = recency_test_handler();
+        let response = handler
+            .list_issues(ListIssuesArgs {
+                workspace: Some("default".into()),
+                team: None,
+                state: None,
+                labels: None,
+                updated_after: None,
+                updated_before: None,
+                created_after: None,
+                created_before: None,
+                order: None,
+                limit: None,
+                offset: None,
+                include_archived: None,
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["issues"][0]["identifier"], "CUT-2");
+        assert_eq!(response["issues"][1]["identifier"], "CUT-1");
+    }
+
+    #[tokio::test]
+    async fn list_issues_rejects_invalid_date_input_naming_accepted_forms() {
+        let handler = recency_test_handler();
+        let error = handler
+            .list_issues(ListIssuesArgs {
+                workspace: Some("default".into()),
+                team: None,
+                state: None,
+                labels: None,
+                updated_after: Some("next tuesday".into()),
+                updated_before: None,
+                created_after: None,
+                created_before: None,
+                order: None,
+                limit: None,
+                offset: None,
+                include_archived: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("next tuesday"), "should echo input: {error}");
+        assert!(
+            error.contains("YYYY-MM-DD") || error.contains("7d"),
+            "should name accepted forms: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_issues_applies_date_window_and_reports_freshness() {
+        let handler = recency_test_handler();
+        let response = handler
+            .search_issues(SearchArgs {
+                workspace: Some("default".into()),
+                query: "payment".into(),
+                team: Some("CUT".into()),
+                state: None,
+                mode: Some("fts".into()),
+                limit: None,
+                labels: None,
+                updated_after: Some("2026-01-01T00:00:00Z".into()),
+                updated_before: None,
+                created_after: None,
+                created_before: None,
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let results = response["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["identifier"], "CUT-2");
+        assert!(
+            response["freshness"][0]["last_synced_at"].is_string(),
+            "freshness should carry the sync timestamp: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_workspaces_reports_per_team_sync_freshness() {
+        let handler = recency_test_handler();
+        let response = handler
+            .list_workspaces(ListWorkspacesArgs {})
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let teams = response["workspaces"][0]["teams"].as_array().unwrap();
+        assert_eq!(teams[0]["key"], "CUT");
+        assert!(
+            teams[0]["last_synced_at"].is_string(),
+            "teams should carry the sync timestamp: {response}"
+        );
+        assert_eq!(teams[0]["issue_count"], 2);
     }
 }

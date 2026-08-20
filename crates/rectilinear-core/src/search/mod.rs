@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::db::Database;
+use crate::db::{Database, DateFilters};
 use crate::embedding::{self, Embedder};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +47,7 @@ pub struct SearchParams<'a> {
     pub team_key: Option<&'a str>,
     pub state_filter: Option<&'a str>,
     pub label_ids: Option<&'a [String]>,
+    pub dates: DateFilters,
     pub limit: usize,
     pub embedder: Option<&'a Embedder>,
     pub rrf_k: u32,
@@ -61,13 +62,16 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
         team_key,
         state_filter,
         label_ids,
+        dates,
         limit,
         embedder,
         rrf_k,
         workspace_id,
     } = params;
     let results = match mode {
-        SearchMode::Fts => fts_search_async(db, query, limit * 2, workspace_id, label_ids).await?,
+        SearchMode::Fts => {
+            fts_search_async(db, query, limit * 2, workspace_id, label_ids, &dates).await?
+        }
         SearchMode::Vector => {
             let embedder =
                 embedder.ok_or_else(|| anyhow::anyhow!("Embedder required for vector search"))?;
@@ -79,12 +83,13 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
                 embedder,
                 workspace_id,
                 label_ids,
+                &dates,
             )
             .await?
         }
         SearchMode::Hybrid => {
             let fts_results =
-                fts_search_async(db, query, limit * 3, workspace_id, label_ids).await?;
+                fts_search_async(db, query, limit * 3, workspace_id, label_ids, &dates).await?;
 
             if let Some(embedder) = embedder {
                 let vec_results = vector_search(
@@ -95,6 +100,7 @@ pub async fn search(db: &Database, params: SearchParams<'_>) -> Result<Vec<Searc
                     embedder,
                     workspace_id,
                     label_ids,
+                    &dates,
                 )
                 .await?;
                 reciprocal_rank_fusion(fts_results, vec_results, rrf_k, 0.3, 0.7)
@@ -136,13 +142,22 @@ async fn fts_search_async(
     limit: usize,
     workspace_id: &str,
     label_ids: Option<&[String]>,
+    dates: &DateFilters,
 ) -> Result<Vec<SearchResult>> {
     let db = db.clone();
     let query = query.to_string();
     let workspace_id = workspace_id.to_string();
     let label_ids = label_ids.map(<[String]>::to_vec);
+    let dates = dates.clone();
     tokio::task::spawn_blocking(move || {
-        fts_search(&db, &query, limit, &workspace_id, label_ids.as_deref())
+        fts_search(
+            &db,
+            &query,
+            limit,
+            &workspace_id,
+            label_ids.as_deref(),
+            &dates,
+        )
     })
     .await
     .context("FTS search worker stopped")?
@@ -154,9 +169,10 @@ fn fts_search(
     limit: usize,
     workspace_id: &str,
     label_ids: Option<&[String]>,
+    dates: &DateFilters,
 ) -> Result<Vec<SearchResult>> {
     let fts_query = build_fts_query(query);
-    let fts_results = db.fts_search_filtered(&fts_query, limit, workspace_id, label_ids)?;
+    let fts_results = db.fts_search_filtered(&fts_query, limit, workspace_id, label_ids, dates)?;
 
     Ok(fts_results
         .into_iter()
@@ -176,6 +192,7 @@ fn fts_search(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn vector_search(
     db: &Database,
     query: &str,
@@ -184,6 +201,7 @@ async fn vector_search(
     embedder: &Embedder,
     workspace_id: &str,
     label_ids: Option<&[String]>,
+    dates: &DateFilters,
 ) -> Result<Vec<SearchResult>> {
     let query_embedding = embedder.embed_single(query).await?;
 
@@ -191,6 +209,7 @@ async fn vector_search(
     let team_key = team_key.map(ToString::to_string);
     let workspace_id = workspace_id.to_string();
     let label_ids = label_ids.map(<[String]>::to_vec);
+    let dates = dates.clone();
     tokio::task::spawn_blocking(move || {
         vector_search_from_embedding(
             &db,
@@ -199,6 +218,7 @@ async fn vector_search(
             limit,
             &workspace_id,
             label_ids.as_deref(),
+            &dates,
         )
     })
     .await
@@ -212,12 +232,9 @@ fn vector_search_from_embedding(
     limit: usize,
     workspace_id: &str,
     label_ids: Option<&[String]>,
+    dates: &DateFilters,
 ) -> Result<Vec<SearchResult>> {
-    let chunks = if let Some(team) = team_key {
-        db.get_chunks_for_team(team, workspace_id)?
-    } else {
-        db.get_all_chunks(workspace_id)?
-    };
+    let chunks = db.get_chunks_filtered(workspace_id, team_key, dates)?;
 
     // Compute similarity for each chunk, take max per issue
     let mut issue_max_sim: HashMap<String, (f32, String)> = HashMap::new(); // issue_id -> (max_sim, identifier)
@@ -337,6 +354,7 @@ pub async fn find_duplicates(
             team_key,
             state_filter: None,
             label_ids: None,
+            dates: DateFilters::default(),
             limit,
             embedder: Some(embedder),
             rrf_k,
@@ -410,7 +428,7 @@ mod tests {
         let blocked = runtime.block_on(async {
             tokio::time::timeout(
                 Duration::from_millis(50),
-                fts_search_async(&db, "queue", 5, "default", None),
+                fts_search_async(&db, "queue", 5, "default", None, &DateFilters::default()),
             )
             .await
         });
@@ -422,11 +440,51 @@ mod tests {
             .block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(1),
-                    fts_search_async(&db, "queue", 5, "default", None),
+                    fts_search_async(&db, "queue", 5, "default", None, &DateFilters::default()),
                 )
                 .await
             })
             .expect("FTS worker did not recover after the database lock was released")
             .unwrap();
+    }
+
+    #[test]
+    fn search_applies_date_filters_in_fts_mode() {
+        let (db, _directory) = crate::db::test_helpers::test_db();
+        let mut stale = crate::db::test_helpers::make_issue("CUT-1", "CUT");
+        stale.title = "payment retry queue".to_string();
+        stale.updated_at = "2026-01-01T00:00:00Z".to_string();
+        db.upsert_issue(&stale).unwrap();
+        let mut fresh = crate::db::test_helpers::make_issue("CUT-2", "CUT");
+        fresh.title = "payment retry backoff".to_string();
+        fresh.updated_at = "2026-08-18T00:00:00Z".to_string();
+        db.upsert_issue(&fresh).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let results = runtime
+            .block_on(search(
+                &db,
+                SearchParams {
+                    query: "payment retry",
+                    mode: SearchMode::Fts,
+                    team_key: None,
+                    state_filter: None,
+                    label_ids: None,
+                    dates: crate::db::DateFilters {
+                        updated_after: Some("2026-08-01T00:00:00Z".to_string()),
+                        ..Default::default()
+                    },
+                    limit: 10,
+                    embedder: None,
+                    rrf_k: 60,
+                    workspace_id: "default",
+                },
+            ))
+            .unwrap();
+        let identifiers: Vec<_> = results.iter().map(|r| r.identifier.as_str()).collect();
+        assert_eq!(identifiers, vec!["CUT-2"]);
     }
 }

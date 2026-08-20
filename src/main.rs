@@ -5,6 +5,7 @@ mod triage_policy;
 
 // Core modules re-exported from the library crate
 pub use rectilinear_core::config;
+pub use rectilinear_core::dates;
 pub use rectilinear_core::db;
 pub use rectilinear_core::embedding;
 pub use rectilinear_core::linear;
@@ -95,9 +96,57 @@ enum Commands {
         /// Search mode: fts, vector, or hybrid
         #[arg(short, long, default_value = "hybrid")]
         mode: String,
+        /// Only issues updated at/after this time (YYYY-MM-DD, RFC 3339, or relative like 7d/24h)
+        #[arg(long)]
+        updated_after: Option<String>,
+        /// Only issues updated before this time (same formats)
+        #[arg(long)]
+        updated_before: Option<String>,
+        /// Only issues created at/after this time (same formats)
+        #[arg(long)]
+        created_after: Option<String>,
+        /// Only issues created before this time (same formats)
+        #[arg(long)]
+        created_before: Option<String>,
         /// Max results
         #[arg(short, long)]
         limit: Option<usize>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List issues from the local store without a search query — filter by team, state, and date windows, ordered by recency
+    List {
+        /// Filter by team
+        #[arg(short, long)]
+        team: Option<String>,
+        /// Filter by state
+        #[arg(short, long)]
+        state: Option<String>,
+        /// Only issues updated at/after this time (YYYY-MM-DD, RFC 3339, or relative like 7d/24h)
+        #[arg(long)]
+        updated_after: Option<String>,
+        /// Only issues updated before this time (same formats)
+        #[arg(long)]
+        updated_before: Option<String>,
+        /// Only issues created at/after this time (same formats)
+        #[arg(long)]
+        created_after: Option<String>,
+        /// Only issues created before this time (same formats)
+        #[arg(long)]
+        created_before: Option<String>,
+        /// Sort order: updated (default), created, or priority
+        #[arg(long, default_value = "updated")]
+        order: String,
+        /// Max results
+        #[arg(short, long, default_value = "25")]
+        limit: usize,
+        /// Results to skip (pagination)
+        #[arg(long, default_value = "0")]
+        offset: usize,
+        /// Include archived issues
+        #[arg(long)]
+        include_archived: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -398,11 +447,21 @@ async fn main() -> Result<()> {
                     team,
                     state,
                     mode,
+                    updated_after,
+                    updated_before,
+                    created_after,
+                    created_before,
                     limit,
                     json,
                 } => {
                     let mode = mode.parse()?;
                     let limit = limit.unwrap_or(config.search.default_limit);
+                    let dates = cli::date_args::parse_date_filters(
+                        updated_after.as_deref(),
+                        updated_before.as_deref(),
+                        created_after.as_deref(),
+                        created_before.as_deref(),
+                    )?;
                     cli::search_cmd::handle_search(
                         &db,
                         &config,
@@ -411,12 +470,48 @@ async fn main() -> Result<()> {
                             team: team.as_deref(),
                             state: state.as_deref(),
                             mode,
+                            dates,
                             limit,
                             json,
                             workspace: &workspace,
                         },
                     )
                     .await?;
+                }
+                Commands::List {
+                    team,
+                    state,
+                    updated_after,
+                    updated_before,
+                    created_after,
+                    created_before,
+                    order,
+                    limit,
+                    offset,
+                    include_archived,
+                    json,
+                } => {
+                    let dates = cli::date_args::parse_date_filters(
+                        updated_after.as_deref(),
+                        updated_before.as_deref(),
+                        created_after.as_deref(),
+                        created_before.as_deref(),
+                    )?;
+                    let default_team = config.workspace_default_team(&workspace).ok().flatten();
+                    cli::list_cmd::handle_list(
+                        &db,
+                        cli::list_cmd::HandleListParams {
+                            team: team.as_deref().or(default_team.as_deref()),
+                            state: state.as_deref(),
+                            dates,
+                            order: order.parse()?,
+                            limit,
+                            offset,
+                            include_archived,
+                            json,
+                            workspace: &workspace,
+                        },
+                    )?;
                 }
                 Commands::Find {
                     similar,
