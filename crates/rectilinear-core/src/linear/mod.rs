@@ -523,8 +523,8 @@ impl LinearClient {
         self
     }
 
-    #[cfg(test)]
-    fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+    /// Override the GraphQL endpoint (tests and self-hosted proxies).
+    pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = api_url.into();
         self
     }

@@ -248,6 +248,8 @@ pub struct RectilinearMcp {
     db: Database,
     config: Config,
     sync_locks: WorkspaceSyncLocks,
+    #[cfg(test)]
+    api_url_override: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -701,7 +703,15 @@ impl RectilinearMcp {
             db,
             config,
             sync_locks: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            api_url_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_api_url_override(mut self, api_url: &str) -> Self {
+        self.api_url_override = Some(api_url.to_string());
+        self
     }
 
     fn workspace_sync_lock(&self, workspace: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
@@ -2486,16 +2496,22 @@ IMPORTANT — Before calling this tool, you MUST:
             .get_issue(&args.issue)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Issue '{}' not found", args.issue))?;
+        // The counterpart may not be synced locally (e.g. a cross-team
+        // blocker known only through an inverse-derived row). Removal can
+        // still resolve the relation from local rows; adding cannot, since
+        // Linear's create mutation needs the counterpart's UUID.
         let target = self
             .db
             .get_issue(&args.related_issue)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Issue '{}' not found", args.related_issue))?;
+            .map_err(|e| e.to_string())?;
 
         let client = self.client_for_workspace(&workspace)?;
 
         match args.action.as_str() {
             "add" => {
+                let target = target
+                    .as_ref()
+                    .ok_or_else(|| format!("Issue '{}' not found", args.related_issue))?;
                 let relation_id = client
                     .create_relation(&source.id, &target.id, &args.relation_type)
                     .await
@@ -2524,23 +2540,37 @@ IMPORTANT — Before calling this tool, you MUST:
                 .to_string())
             }
             "remove" => {
-                // For blocked_by, the stored relation is reversed
-                let (db_source, db_target, db_type) = if args.relation_type == "blocked_by" {
-                    (&target.id, &source.id, "blocks")
-                } else {
-                    (&source.id, &target.id, args.relation_type.as_str())
-                };
-
-                let relation_id = self
-                    .db
-                    .find_relation_id(db_source, db_target, db_type)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| {
-                        format!(
-                            "No '{}' relation found between {} and {}",
-                            args.relation_type, args.issue, args.related_issue
+                let relation_id = match &target {
+                    Some(target) => {
+                        // For blocked_by, the stored relation is reversed
+                        let (db_source, db_target, db_type) = if args.relation_type == "blocked_by"
+                        {
+                            (&target.id, &source.id, "blocks")
+                        } else {
+                            (&source.id, &target.id, args.relation_type.as_str())
+                        };
+                        self.db
+                            .find_relation_id(db_source, db_target, db_type)
+                            .map_err(|e| e.to_string())?
+                    }
+                    // Counterpart not synced: resolve from the source's own
+                    // rows by identifier (recovers the real id from an
+                    // inverse-derived ":inv" row).
+                    None => self
+                        .db
+                        .find_relation_id_by_identifier(
+                            &source.id,
+                            &args.related_issue,
+                            &args.relation_type,
                         )
-                    })?;
+                        .map_err(|e| e.to_string())?,
+                };
+                let relation_id = relation_id.ok_or_else(|| {
+                    format!(
+                        "No '{}' relation found between {} and {}",
+                        args.relation_type, args.issue, args.related_issue
+                    )
+                })?;
 
                 client
                     .delete_relation(&relation_id)
@@ -2563,7 +2593,10 @@ IMPORTANT — Before calling this tool, you MUST:
                 Ok(serde_json::json!({
                     "status": "removed",
                     "issue": source.identifier,
-                    "related_issue": target.identifier,
+                    "related_issue": target
+                        .as_ref()
+                        .map(|t| t.identifier.clone())
+                        .unwrap_or_else(|| args.related_issue.clone()),
                     "relation_type": args.relation_type,
                 })
                 .to_string())
@@ -2671,7 +2704,22 @@ impl RectilinearMcp {
             .config
             .workspace_api_key(workspace)
             .map_err(|e| e.to_string())?;
-        Ok(LinearClient::with_api_key(&api_key))
+        let client = LinearClient::with_api_key(&api_key);
+        #[cfg(test)]
+        let client = match &self.api_url_override {
+            // no_proxy: a system proxy configured on the machine must not
+            // swallow requests to the loopback mock server.
+            Some(url) => LinearClient::with_http_client(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| e.to_string())?,
+                &api_key,
+            )
+            .with_api_url(url.clone()),
+            None => client,
+        };
+        Ok(client)
     }
 
     async fn resolve_team_ids(
@@ -3521,5 +3569,136 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["queue"][0]["identifier"], "CUT-1");
         assert_eq!(response["queue"][0]["is_blocked"], true);
+    }
+
+    /// Minimal one-shot HTTP mock for the Linear GraphQL endpoint: records
+    /// request bodies and answers by query-substring matching.
+    fn mock_linear_server() -> (
+        String,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/graphql", listener.local_addr().unwrap());
+        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let server_bodies = Arc::clone(&bodies);
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body = loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_string();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        while buf.len() < pos + 4 + len {
+                            let n = stream.read(&mut chunk).unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..n]);
+                        }
+                        break Some(buf[pos + 4..pos + 4 + len].to_vec());
+                    }
+                };
+                let Some(body) = body else { break };
+                let request: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                let query = request["query"].as_str().unwrap_or("").to_string();
+                server_bodies.lock().unwrap().push(request);
+                let response = if query.contains("issueRelationDelete") {
+                    serde_json::json!({ "data": { "issueRelationDelete": { "success": true } } })
+                } else if query.contains("inverseRelations(first:") {
+                    serde_json::json!({ "data": { "issue": { "inverseRelations": {
+                        "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } } })
+                } else if query.contains("relations(first:") {
+                    serde_json::json!({ "data": { "issue": { "relations": {
+                        "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } } })
+                } else if query.contains("labels(first:") {
+                    serde_json::json!({ "data": { "issue": { "labels": {
+                        "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } } } } })
+                } else if query.contains("issue(id: $id)") {
+                    serde_json::json!({ "data": { "issue": {
+                        "id": "cut-1-uuid", "identifier": "CUT-1",
+                        "url": "https://linear.app/cut/issue/CUT-1",
+                        "title": "Blocked work", "description": "desc",
+                        "priority": 0, "dueDate": null, "branchName": null,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-02T00:00:00Z",
+                        "state": { "name": "Backlog", "type": "backlog" },
+                        "team": { "key": "CUT" },
+                        "assignee": null, "project": null,
+                        "projectMilestone": null, "cycle": null
+                    } } })
+                } else {
+                    serde_json::json!({ "errors": [{ "message": format!("unexpected query: {query}") }] })
+                };
+                let payload = response.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+            }
+        });
+        (url, bodies, handle)
+    }
+
+    #[tokio::test]
+    async fn remove_blocked_by_with_unsynced_blocker_deletes_the_real_relation() {
+        let (handler, blocked_id) = blocked_test_handler();
+        add_unknown_state_blocker(&handler, &blocked_id);
+        let (url, bodies, _server) = mock_linear_server();
+        let handler = handler.with_api_url_override(&url);
+
+        let response = handler
+            .manage_relation(ManageRelationArgs {
+                workspace: Some("default".into()),
+                issue: "CUT-1".into(),
+                related_issue: "ENG-9".into(),
+                relation_type: "blocked_by".into(),
+                action: "remove".into(),
+            })
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["status"], "removed");
+        assert_eq!(response["related_issue"], "ENG-9");
+
+        let bodies = bodies.lock().unwrap();
+        let delete = bodies
+            .iter()
+            .find(|b| {
+                b["query"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("issueRelationDelete")
+            })
+            .expect("issueRelationDelete was never called");
+        assert_eq!(
+            delete["variables"]["id"], "rel-2",
+            "the real Linear relation id must be deleted, never the synthetic one"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.to_string().contains("rel-2:inv")),
+            "the synthetic :inv id must never reach the Linear API"
+        );
     }
 }

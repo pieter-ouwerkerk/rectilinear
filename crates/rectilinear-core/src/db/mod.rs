@@ -869,6 +869,37 @@ impl Database {
         })
     }
 
+    /// Resolve a relation's Linear id from the local rows alone, keyed by the
+    /// counterpart's identifier. Works when the counterpart issue is not
+    /// synced locally (e.g. a cross-team blocker known only through an
+    /// inverse-derived row), where id-based lookup has no issue row to start
+    /// from. Strips the synthetic ":inv" suffix so callers always get the id
+    /// Linear's API accepts.
+    pub fn find_relation_id_by_identifier(
+        &self,
+        issue_id: &str,
+        related_identifier: &str,
+        relation_type: &str,
+    ) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM issue_relations
+                 WHERE issue_id = ?1 AND related_issue_identifier = ?2 COLLATE NOCASE
+                   AND relation_type = ?3",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![
+                issue_id,
+                related_identifier,
+                relation_type
+            ])?;
+            if let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                return Ok(Some(id.strip_suffix(":inv").unwrap_or(&id).to_string()));
+            }
+            Ok(None)
+        })
+    }
+
     // --- Chunks (embeddings) ---
 
     pub fn upsert_chunks(&self, issue_id: &str, chunks: &[(usize, String, Vec<u8>)]) -> Result<()> {
@@ -2902,5 +2933,32 @@ mod tests {
 
         let found = db.find_relation_id("eng-9-uuid", &x.id, "blocks").unwrap();
         assert_eq!(found.as_deref(), Some("rel-9"));
+    }
+
+    #[test]
+    fn find_relation_id_by_identifier_resolves_without_a_local_target_issue() {
+        let (db, _dir) = test_db();
+        let x = make_issue("CUT-1", "CUT");
+        db.upsert_issue(&x).unwrap();
+        seed_relation(&db, "rel-9:inv", &x.id, "eng-9-uuid", "ENG-9", "blocked_by");
+        seed_relation(&db, "rel-3", &x.id, "eng-3-uuid", "ENG-3", "blocks");
+
+        // blocked_by resolves through the inverse row, case-insensitively,
+        // and recovers the real Linear id.
+        let found = db
+            .find_relation_id_by_identifier(&x.id, "eng-9", "blocked_by")
+            .unwrap();
+        assert_eq!(found.as_deref(), Some("rel-9"));
+
+        // Forward types resolve their own rows untouched.
+        let found = db
+            .find_relation_id_by_identifier(&x.id, "ENG-3", "blocks")
+            .unwrap();
+        assert_eq!(found.as_deref(), Some("rel-3"));
+
+        assert!(db
+            .find_relation_id_by_identifier(&x.id, "ENG-404", "blocked_by")
+            .unwrap()
+            .is_none());
     }
 }
