@@ -1615,6 +1615,7 @@ impl RectilinearEngine {
                 team_key: team.as_deref(),
                 state_filter: None,
                 label_ids: None,
+                dates: crate::db::DateFilters::default(),
                 limit: limit as usize,
                 embedder: embedder.as_ref(),
                 rrf_k: config.search.rrf_k,

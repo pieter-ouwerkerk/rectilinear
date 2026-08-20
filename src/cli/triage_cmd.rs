@@ -681,6 +681,7 @@ fn spawn_similar(
                 team_key: Some(&team_key),
                 state_filter: None,
                 label_ids: None,
+                dates: Default::default(),
                 limit: 5,
                 embedder: Some(&embedder),
                 rrf_k,
