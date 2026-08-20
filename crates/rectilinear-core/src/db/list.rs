@@ -373,10 +373,23 @@ mod tests {
     #[test]
     fn pagination_is_stable_when_timestamps_tie() {
         let (db, _dir) = test_db();
-        for n in 1..=6 {
+        // Insert in REVERSE id order so insertion order (rowid) disagrees with
+        // the id tie-breaker: SQLite's accidental rowid ordering would return
+        // id-6..id-1 and fail the sorted assertion below.
+        for n in (1..=6).rev() {
             // identical created_at AND updated_at across all six issues
-            seed(&db, &format!("HPN-{n}"), "HPN", "2026-08-01T00:00:00Z", "2026-08-10T00:00:00Z");
+            let mut issue = make_issue(&format!("HPN-{n}"), "HPN");
+            issue.id = format!("id-{n}");
+            issue.created_at = "2026-08-01T00:00:00Z".to_string();
+            issue.updated_at = "2026-08-10T00:00:00Z".to_string();
+            db.upsert_issue(&issue).unwrap();
         }
+
+        // Contract: ties break ascending by id, not by insertion order.
+        let mut params = base_params("default");
+        params.limit = 100;
+        let ids: Vec<String> = db.list_issues(&params).unwrap().iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids, vec!["id-1", "id-2", "id-3", "id-4", "id-5", "id-6"]);
 
         let mut params = base_params("default");
         params.limit = 100;
