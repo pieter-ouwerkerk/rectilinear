@@ -150,7 +150,14 @@ async fn fts_search_async(
     let label_ids = label_ids.map(<[String]>::to_vec);
     let dates = dates.clone();
     tokio::task::spawn_blocking(move || {
-        fts_search(&db, &query, limit, &workspace_id, label_ids.as_deref(), &dates)
+        fts_search(
+            &db,
+            &query,
+            limit,
+            &workspace_id,
+            label_ids.as_deref(),
+            &dates,
+        )
     })
     .await
     .context("FTS search worker stopped")?

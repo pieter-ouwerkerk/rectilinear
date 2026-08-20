@@ -2410,13 +2410,25 @@ mod tests {
 
         // Without filter, both match "audit"
         let r = db
-            .fts_search_filtered("\"audit\"", 10, "default", None, &super::DateFilters::default())
+            .fts_search_filtered(
+                "\"audit\"",
+                10,
+                "default",
+                None,
+                &super::DateFilters::default(),
+            )
             .unwrap();
         assert_eq!(r.len(), 2);
 
         // With Vanta filter, only `a`
         let r = db
-            .fts_search_filtered("\"audit\"", 10, "default", Some(&["vanta".to_string()]), &super::DateFilters::default())
+            .fts_search_filtered(
+                "\"audit\"",
+                10,
+                "default",
+                Some(&["vanta".to_string()]),
+                &super::DateFilters::default(),
+            )
             .unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].identifier, "ENG-20");
@@ -2735,14 +2747,19 @@ mod tests {
         let mut other_team = make_issue("ENG-1", "ENG");
         other_team.updated_at = "2026-08-18T00:00:00Z".to_string();
         db.upsert_issue(&other_team).unwrap();
-        db.upsert_chunks(&other_team.id, &[(0, "chunk".to_string(), fake_embedding(4))])
-            .unwrap();
+        db.upsert_chunks(
+            &other_team.id,
+            &[(0, "chunk".to_string(), fake_embedding(4))],
+        )
+        .unwrap();
 
         let dates = super::DateFilters {
             updated_after: Some("2026-08-01T00:00:00Z".to_string()),
             ..Default::default()
         };
-        let chunks = db.get_chunks_filtered("default", Some("CUT"), &dates).unwrap();
+        let chunks = db
+            .get_chunks_filtered("default", Some("CUT"), &dates)
+            .unwrap();
         let identifiers: Vec<_> = chunks.iter().map(|c| c.identifier.as_str()).collect();
         assert_eq!(identifiers, vec!["CUT-2"]);
 

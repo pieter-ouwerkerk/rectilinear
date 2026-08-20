@@ -124,7 +124,10 @@ mod tests {
     fn rejects_garbage_with_error_naming_accepted_forms() {
         let err = resolve_date_input("next tuesday", now()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("next tuesday"), "error should echo input: {msg}");
+        assert!(
+            msg.contains("next tuesday"),
+            "error should echo input: {msg}"
+        );
         assert!(
             msg.contains("2026-08-01") || msg.contains("YYYY-MM-DD"),
             "error should name accepted forms: {msg}"
@@ -144,7 +147,11 @@ mod tests {
 
     #[test]
     fn huge_relative_durations_error_instead_of_panicking() {
-        for input in ["999999999999999d", "9223372036854775807h", "999999999999999999m"] {
+        for input in [
+            "999999999999999d",
+            "9223372036854775807h",
+            "999999999999999999m",
+        ] {
             let result = std::panic::catch_unwind(|| resolve_date_input(input, now()));
             let value = result.expect("must not panic on user input");
             assert!(value.is_err(), "{input} should be a validation error");
@@ -160,7 +167,10 @@ mod tests {
         let cutoff = resolve_date_input("2026-08-20T18:04:01Z", now()).unwrap();
         assert_eq!(cutoff, "2026-08-20T18:04:01.000Z");
         let stored = "2026-08-20T18:04:01.261Z";
-        assert!(stored > cutoff.as_str(), "boundary-second record must sort at/after the cutoff");
+        assert!(
+            stored > cutoff.as_str(),
+            "boundary-second record must sort at/after the cutoff"
+        );
         let plain = resolve_date_input("2026-08-01", now()).unwrap();
         assert_eq!(plain, "2026-08-01T00:00:00.000Z");
     }

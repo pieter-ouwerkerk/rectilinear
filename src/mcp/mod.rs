@@ -733,10 +733,7 @@ impl RectilinearMcp {
                 .workspace_config(name)
                 .map_err(|e| e.to_string())?;
             let db_info = self.db.get_workspace(name).map_err(|e| e.to_string())?;
-            let teams = self
-                .db
-                .list_synced_teams(name)
-                .map_err(|e| e.to_string())?;
+            let teams = self.db.list_synced_teams(name).map_err(|e| e.to_string())?;
             let teams: Vec<_> = teams
                 .iter()
                 .map(|t| {
@@ -2595,7 +2592,11 @@ impl RectilinearMcp {
 
     /// Per-team sync freshness for a workspace, so recency answers can state
     /// what the local snapshot is current as of.
-    fn freshness_json(&self, workspace: &str, team: Option<&str>) -> Result<serde_json::Value, String> {
+    fn freshness_json(
+        &self,
+        workspace: &str,
+        team: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
         let teams = self
             .db
             .list_synced_teams(workspace)
@@ -3148,7 +3149,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let db = Database::open(&directory.path().join("recency.db")).unwrap();
         std::mem::forget(directory); // keep the tempdir alive for the test process
-        db.upsert_workspace("default", None, Some("Default")).unwrap();
+        db.upsert_workspace("default", None, Some("Default"))
+            .unwrap();
 
         let mut stale = crate::db::Issue {
             id: "issue-stale".into(),
@@ -3184,7 +3186,8 @@ mod tests {
         stale.created_at = "2050-01-01T00:00:00Z".into();
         stale.updated_at = "2050-01-02T00:00:00Z".into();
         db.upsert_issue(&stale).unwrap();
-        db.set_sync_cursor("default", "CUT", "2026-08-20T17:54:00Z").unwrap();
+        db.set_sync_cursor("default", "CUT", "2026-08-20T17:54:00Z")
+            .unwrap();
 
         let config = Config {
             linear: crate::config::LinearConfig {
@@ -3278,7 +3281,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("next tuesday"), "should echo input: {error}");
-        assert!(error.contains("YYYY-MM-DD") || error.contains("7d"), "should name accepted forms: {error}");
+        assert!(
+            error.contains("YYYY-MM-DD") || error.contains("7d"),
+            "should name accepted forms: {error}"
+        );
     }
 
     #[tokio::test]

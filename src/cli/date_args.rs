@@ -32,9 +32,17 @@ mod tests {
 
     #[test]
     fn passes_through_normalized_absolute_dates() {
-        let filters = parse_date_filters(Some("2026-08-01"), None, Some("2026-07-01T06:00:00Z"), None).unwrap();
-        assert_eq!(filters.updated_after.as_deref(), Some("2026-08-01T00:00:00.000Z"));
-        assert_eq!(filters.created_after.as_deref(), Some("2026-07-01T06:00:00.000Z"));
+        let filters =
+            parse_date_filters(Some("2026-08-01"), None, Some("2026-07-01T06:00:00Z"), None)
+                .unwrap();
+        assert_eq!(
+            filters.updated_after.as_deref(),
+            Some("2026-08-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            filters.created_after.as_deref(),
+            Some("2026-07-01T06:00:00.000Z")
+        );
         assert!(filters.updated_before.is_none());
         assert!(filters.created_before.is_none());
     }
@@ -47,6 +55,8 @@ mod tests {
 
     #[test]
     fn all_none_yields_empty_filters() {
-        assert!(parse_date_filters(None, None, None, None).unwrap().is_empty());
+        assert!(parse_date_filters(None, None, None, None)
+            .unwrap()
+            .is_empty());
     }
 }

@@ -55,7 +55,10 @@ pub fn handle_list(db: &Database, params: HandleListParams<'_>) -> Result<()> {
 
     // State freshness so the reader knows what "recent" is relative to.
     for team in db.list_synced_teams(params.workspace)? {
-        if params.team.is_none_or(|key| team.key.eq_ignore_ascii_case(key)) {
+        if params
+            .team
+            .is_none_or(|key| team.key.eq_ignore_ascii_case(key))
+        {
             println!(
                 "{}",
                 format!(
