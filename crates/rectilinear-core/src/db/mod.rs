@@ -2876,7 +2876,9 @@ mod tests {
         // Cross-team blocker ENG-9 has no row in `issues` at all.
         seed_relation(&db, "rel-9:inv", &x.id, "eng-9-uuid", "ENG-9", "blocked_by");
 
-        let blockers = db.get_blockers_for_issues(&[x.id.clone()]).unwrap();
+        let blockers = db
+            .get_blockers_for_issues(std::slice::from_ref(&x.id))
+            .unwrap();
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].identifier, "ENG-9");
         assert_eq!(
@@ -2896,7 +2898,9 @@ mod tests {
         seed_relation(&db, "rel-9", &y.id, &x.id, "CUT-1", "blocks");
         seed_relation(&db, "rel-9:inv", &x.id, &y.id, "CUT-2", "blocked_by");
 
-        let blockers = db.get_blockers_for_issues(&[x.id.clone()]).unwrap();
+        let blockers = db
+            .get_blockers_for_issues(std::slice::from_ref(&x.id))
+            .unwrap();
         assert_eq!(blockers.len(), 1, "one edge must yield one blocker");
         assert_eq!(blockers[0].identifier, "CUT-2");
     }
