@@ -2262,6 +2262,15 @@ mod tests {
 
     static SYNC_HTTP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialize mock-HTTP tests without letting one test's panic poison the
+    /// lock and cascade into every later test: each test owns its server and
+    /// database, so a previous failure is irrelevant to the next one.
+    fn serial_http_test() -> std::sync::MutexGuard<'static, ()> {
+        SYNC_HTTP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     struct MockResponse {
         status: u16,
         body: String,
@@ -2618,7 +2627,15 @@ mod tests {
         let mut config = SyncQueryConfig::default();
         config.max_retry_attempts = 2;
         config.retry_base_delay = Duration::ZERO;
-        LinearClient::with_api_key("test-api-key")
+        // no_proxy: workspace builds unify reqwest features with the binary
+        // crate, which enables macOS system-proxy support. A proxy configured
+        // on the machine (e.g. a debugging proxy on 127.0.0.1:8080) would
+        // swallow every request to the mock server. Tests always dial direct.
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client configuration should be valid");
+        LinearClient::with_http_client(http, "test-api-key")
             .with_api_url(api_url)
             .with_sync_query_config(config)
     }
@@ -2734,7 +2751,7 @@ mod tests {
 
     #[test]
     fn team_sync_retries_http_500_comments_then_completes() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2767,7 +2784,7 @@ mod tests {
 
     #[test]
     fn exhausted_comment_retries_are_partial_and_do_not_block_later_issues_or_cursor() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2815,7 +2832,7 @@ mod tests {
 
     #[test]
     fn permission_comment_failure_is_not_retried_and_other_issues_continue() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
         let server_attempts = Arc::clone(&attempts);
         let server = MockLinearServer::start(move |request| {
@@ -2855,7 +2872,7 @@ mod tests {
 
     #[test]
     fn later_incremental_sync_recovers_failed_comment_state_and_clears_error() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let should_fail = Arc::new(AtomicBool::new(true));
         let server_should_fail = Arc::clone(&should_fail);
         let attempts = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
@@ -2899,7 +2916,7 @@ mod tests {
 
     #[test]
     fn index_only_traverses_bounded_pages_without_supplemental_requests() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -2963,7 +2980,7 @@ mod tests {
 
     #[test]
     fn team_project_sync_is_scoped_and_returns_project_and_milestone_counts() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let project_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let server_requests = Arc::clone(&project_requests);
         let server = MockLinearServer::start(move |request| {
@@ -2994,7 +3011,7 @@ mod tests {
 
     #[test]
     fn interrupted_team_project_sync_does_not_reconcile_missing_projects() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let fail_members = Arc::new(AtomicBool::new(false));
         let server_fail_members = Arc::clone(&fail_members);
         let server = MockLinearServer::start(move |request| {
@@ -3028,7 +3045,7 @@ mod tests {
 
     #[test]
     fn workspace_project_sync_compatibility_api_still_traverses_all_projects() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             project_sync_response(&request, 1).expect("unexpected GraphQL operation")
         });
@@ -3046,7 +3063,7 @@ mod tests {
 
     #[test]
     fn failed_index_page_leaves_checkpoint_unchanged() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             if request["variables"]["after"].is_null() {
                 MockResponse::json(serde_json::json!({
@@ -3085,7 +3102,7 @@ mod tests {
 
     #[test]
     fn empty_index_window_advances_checkpoint_and_uses_overlap() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let lower = Arc::new(Mutex::new(None::<String>));
         let query = Arc::new(Mutex::new(None::<String>));
         let server_lower = Arc::clone(&lower);
@@ -3132,7 +3149,7 @@ mod tests {
 
     #[test]
     fn subsequent_overlap_finds_an_issue_at_the_previous_upper_boundary() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3192,7 +3209,7 @@ mod tests {
 
     #[test]
     fn cancelled_hydration_requeues_the_inflight_resource() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let details_started = Arc::new(AtomicBool::new(false));
         let server_details_started = Arc::clone(&details_started);
         let server = MockLinearServer::start(move |request| {
@@ -3230,7 +3247,7 @@ mod tests {
                     .await
             });
 
-            tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::timeout(Duration::from_secs(10), async {
                 while !details_started.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -3275,7 +3292,7 @@ mod tests {
 
     #[test]
     fn cancelled_index_sync_marks_the_owned_family_partial() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let index_started = Arc::new(AtomicBool::new(false));
         let server_index_started = Arc::clone(&index_started);
         let server = MockLinearServer::start(move |request| {
@@ -3321,7 +3338,7 @@ mod tests {
 
     #[test]
     fn issue_hydration_families_complete_independently() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             let query = request["query"].as_str().unwrap_or_default();
             if query.contains("labels(first:") {
@@ -3413,7 +3430,7 @@ mod tests {
 
     #[test]
     fn http_400_ratelimited_is_persisted_and_stops_background_batch() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3467,7 +3484,7 @@ mod tests {
 
     #[test]
     fn permanent_permission_failure_is_not_background_retried() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3535,7 +3552,7 @@ mod tests {
 
     #[test]
     fn if_needed_selected_hydration_skips_fresh_and_deferred_resources() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = Arc::clone(&calls);
         let server = MockLinearServer::start(move |_request| {
@@ -3599,7 +3616,7 @@ mod tests {
 
     #[test]
     fn if_needed_hydrates_pending_resources_without_refreshing_fresh_ones() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(Mutex::new(Vec::<String>::new()));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -3640,7 +3657,7 @@ mod tests {
 
     #[test]
     fn force_refresh_requeues_all_resources_and_recovers_permanent_failures() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let requests = Arc::new(AtomicUsize::new(0));
         let server_requests = Arc::clone(&requests);
         let server = MockLinearServer::start(move |request| {
@@ -3712,7 +3729,7 @@ mod tests {
 
     #[test]
     fn sync_issue_relations_captures_inverse_blocks_as_blocked_by() {
-        let _serial = SYNC_HTTP_TEST_LOCK.lock().unwrap();
+        let _serial = serial_http_test();
         let server = MockLinearServer::start(move |request| {
             let query = request["query"].as_str().unwrap_or("");
             if query.contains("inverseRelations(first:") {
