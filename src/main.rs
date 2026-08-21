@@ -403,6 +403,14 @@ async fn main() -> Result<()> {
             let db = db::Database::open(&config::Config::db_path()?)?;
             mcp::serve(db, config).await?;
         }
+        Commands::Status { team, json } => {
+            // Read-only open: status must be safe to run while a sync holds
+            // the database in another process, so it must not migrate or
+            // touch hydration state.
+            let db = db::Database::open_read_only(&config::Config::db_path()?)?;
+            let workspace = resolve_workspace(cli.workspace.as_deref(), &config)?;
+            cli::status_cmd::handle_status(&db, team.as_deref(), json, &workspace)?;
+        }
         _ => {
             // All other commands need the database and workspace
             let db = db::Database::open(&config::Config::db_path()?)?;
@@ -429,9 +437,6 @@ async fn main() -> Result<()> {
                         &workspace,
                     )
                     .await?;
-                }
-                Commands::Status { team, json } => {
-                    cli::status_cmd::handle_status(&db, team.as_deref(), json, &workspace)?;
                 }
                 Commands::Hydrate {
                     team,
@@ -663,7 +668,10 @@ async fn main() -> Result<()> {
                     cli::projects_cmd::handle_milestone_action(action, &db, &config, &workspace)
                         .await?;
                 }
-                Commands::Config { .. } | Commands::Workspace { .. } | Commands::Serve => {
+                Commands::Config { .. }
+                | Commands::Workspace { .. }
+                | Commands::Serve
+                | Commands::Status { .. } => {
                     unreachable!()
                 }
             }

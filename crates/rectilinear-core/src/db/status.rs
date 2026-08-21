@@ -153,7 +153,90 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::db::test_helpers::{make_issue, test_db};
-    use crate::db::{HydrationResource, HydrationStatus};
+    use crate::db::{Database, HydrationResource, HydrationStatus};
+
+    /// Regression: `rectilinear status` runs while a sync holds the same
+    /// database file. The read-only open must not mutate hydration state —
+    /// the old open path reset every `running` row to `retryable`, making
+    /// in-flight work eligible for duplicate hydration.
+    #[test]
+    fn read_only_open_does_not_disturb_a_concurrent_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let writer = Database::open(&path).unwrap();
+
+        let issue = make_issue("ENG-1", "ENG");
+        writer.upsert_issue(&issue).unwrap();
+        writer
+            .ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        writer
+            .mark_hydration_running(
+                "default",
+                &issue.id,
+                HydrationResource::Relations,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+
+        let reader = Database::open_read_only(&path).unwrap();
+        let teams = reader.sync_status("default", None).unwrap();
+        let relations = teams[0]
+            .resources
+            .iter()
+            .find(|r| r.resource == "relations")
+            .unwrap();
+        assert_eq!(relations.running, 1, "status must report the live row");
+
+        // The writer's in-flight row is untouched.
+        let state = writer
+            .get_issue_hydration_state("default", &issue.id)
+            .unwrap();
+        let relations_state = state
+            .resources
+            .iter()
+            .find(|r| r.resource == HydrationResource::Relations)
+            .unwrap();
+        assert_eq!(relations_state.status, HydrationStatus::Running);
+
+        // And the read-only handle refuses writes outright.
+        assert!(reader.upsert_workspace("other", None, None).is_err());
+    }
+
+    #[test]
+    fn reopening_the_database_does_not_reset_running_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let writer = Database::open(&path).unwrap();
+        let issue = make_issue("ENG-1", "ENG");
+        writer.upsert_issue(&issue).unwrap();
+        writer
+            .ensure_hydration_state_for_issue("default", &issue, "initial")
+            .unwrap();
+        writer
+            .mark_hydration_running(
+                "default",
+                &issue.id,
+                HydrationResource::Details,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap();
+
+        let second = Database::open(&path).unwrap();
+        let state = second
+            .get_issue_hydration_state("default", &issue.id)
+            .unwrap();
+        let details = state
+            .resources
+            .iter()
+            .find(|r| r.resource == HydrationResource::Details)
+            .unwrap();
+        assert_eq!(
+            details.status,
+            HydrationStatus::Running,
+            "a fresh running row belongs to a live sync and must survive reopen"
+        );
+    }
 
     #[test]
     fn sync_status_reports_queue_depths_per_team_and_resource() {

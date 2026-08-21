@@ -19,6 +19,9 @@ use super::{
 };
 
 const INDEX_OVERLAP_SECONDS: i64 = 300;
+/// A `running` hydration row older than this is treated as orphaned by a
+/// dead process; younger rows are presumed owned by a live sync.
+const HYDRATION_LEASE_SECONDS: i64 = 600;
 const INDEX_SAFETY_LAG_SECONDS: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,6 +448,8 @@ impl LinearClient {
         let now_text = now.to_rfc3339();
         let recent_after = recent_cutoff(now);
         let stale_comments = comment_refresh_cutoff(now);
+        let lease_cutoff = (now - chrono::Duration::seconds(HYDRATION_LEASE_SECONDS)).to_rfc3339();
+        db.recover_orphaned_hydration(workspace_id, team_key, &lease_cutoff)?;
         db.queue_stale_comment_hydration(
             workspace_id,
             team_key,

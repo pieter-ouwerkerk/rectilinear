@@ -644,6 +644,32 @@ impl Database {
         })
     }
 
+    /// Reset `running` hydration rows whose last attempt started at or
+    /// before `stale_before` back to `retryable`. A recent `running` row
+    /// belongs to a live sync in another process and is left alone; recovery
+    /// happens here, at the start of hydration, rather than on database open,
+    /// so read paths never mutate another process's in-flight work.
+    pub fn recover_orphaned_hydration(
+        &self,
+        workspace_id: &str,
+        team_key: &str,
+        stale_before: &str,
+    ) -> Result<usize> {
+        self.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE issue_hydration_state
+                 SET status='retryable', next_retry_at=NULL, queue_reason='retry'
+                 WHERE workspace_id=?1 AND status='running'
+                   AND (last_attempted_at IS NULL OR last_attempted_at <= ?3)
+                   AND issue_id IN (
+                       SELECT id FROM issues WHERE workspace_id=?1 AND team_key=?2
+                   )",
+                rusqlite::params![workspace_id, team_key, stale_before],
+            )?;
+            Ok(changed)
+        })
+    }
+
     pub fn ensure_hydration_state_for_issue(
         &self,
         workspace_id: &str,
@@ -744,6 +770,54 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
 mod tests {
     use super::*;
     use crate::db::test_helpers::make_issue;
+
+    #[test]
+    fn recover_orphaned_hydration_resets_only_stale_running_rows() {
+        let (db, _dir) = crate::db::test_helpers::test_db();
+        let stale = make_issue("CUT-1", "CUT");
+        let fresh = make_issue("CUT-2", "CUT");
+        for issue in [&stale, &fresh] {
+            db.upsert_issue(issue).unwrap();
+            db.ensure_hydration_state_for_issue("default", issue, "initial")
+                .unwrap();
+        }
+        db.mark_hydration_running(
+            "default",
+            &stale.id,
+            HydrationResource::Relations,
+            "2026-08-21T00:00:00Z",
+        )
+        .unwrap();
+        db.mark_hydration_running(
+            "default",
+            &fresh.id,
+            HydrationResource::Relations,
+            "2026-08-21T11:58:00Z",
+        )
+        .unwrap();
+
+        let recovered = db
+            .recover_orphaned_hydration("default", "CUT", "2026-08-21T11:50:00Z")
+            .unwrap();
+        assert_eq!(recovered, 1);
+
+        let stale_state = db.get_issue_hydration_state("default", &stale.id).unwrap();
+        let stale_relations = stale_state
+            .resources
+            .iter()
+            .find(|r| r.resource == HydrationResource::Relations)
+            .unwrap();
+        assert_eq!(stale_relations.status, HydrationStatus::Retryable);
+        assert!(stale_relations.next_retry_at.is_none());
+
+        let fresh_state = db.get_issue_hydration_state("default", &fresh.id).unwrap();
+        let fresh_relations = fresh_state
+            .resources
+            .iter()
+            .find(|r| r.resource == HydrationResource::Relations)
+            .unwrap();
+        assert_eq!(fresh_relations.status, HydrationStatus::Running);
+    }
 
     #[test]
     fn index_upsert_preserves_hydrated_fields_and_requeues_on_change() {
@@ -849,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_state_survives_reopening_database() {
+    fn stale_running_row_survives_reopen_and_is_reclaimed_at_hydration_time() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retry.db");
         {
@@ -868,6 +942,22 @@ mod tests {
             .unwrap();
         }
         let reopened = Database::open(&path).unwrap();
+        // Reopen alone must not touch the row: another process may own it.
+        let state = reopened
+            .get_issue_hydration_state("default", "issue-1")
+            .unwrap();
+        let relations = state
+            .resources
+            .iter()
+            .find(|resource| resource.resource == HydrationResource::Relations)
+            .unwrap();
+        assert_eq!(relations.status, HydrationStatus::Running);
+
+        // The stale attempt (well past the lease) is reclaimed when
+        // hydration next runs recovery.
+        reopened
+            .recover_orphaned_hydration("default", "CUT", "2026-01-01T00:10:00Z")
+            .unwrap();
         let state = reopened
             .get_issue_hydration_state("default", "issue-1")
             .unwrap();
