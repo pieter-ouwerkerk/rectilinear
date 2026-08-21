@@ -2,10 +2,12 @@ mod hydration;
 mod list;
 mod projects;
 pub mod schema;
+mod status;
 mod sync;
 pub use hydration::*;
 pub use list::*;
 pub use projects::*;
+pub use status::*;
 pub use sync::*;
 #[cfg(test)]
 pub(crate) mod test_helpers;

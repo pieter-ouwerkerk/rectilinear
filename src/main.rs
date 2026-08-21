@@ -62,6 +62,15 @@ enum Commands {
         #[arg(long)]
         index_only: bool,
     },
+    /// Show sync and hydration queue status from the local database (offline)
+    Status {
+        /// Team key (e.g., ENG); defaults to all teams
+        #[arg(short, long)]
+        team: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Hydrate rich issue details, labels, relations, and comments
     Hydrate {
         /// Team key for a background batch (e.g., ENG)
@@ -420,6 +429,9 @@ async fn main() -> Result<()> {
                         &workspace,
                     )
                     .await?;
+                }
+                Commands::Status { team, json } => {
+                    cli::status_cmd::handle_status(&db, team.as_deref(), json, &workspace)?;
                 }
                 Commands::Hydrate {
                     team,
