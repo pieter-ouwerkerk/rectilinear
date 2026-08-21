@@ -91,9 +91,6 @@ pub async fn handle_sync(
 
     let do_full = full || is_first;
     let do_include_archived = include_archived || do_full;
-    let progress_cb = |total: usize| {
-        pb.set_message(format!("{} issues synced", total));
-    };
     let count = if index_only {
         let progress = |update: crate::linear::SyncProgressUpdate| {
             pb.set_message(format!("{} issues indexed", update.completed));
@@ -111,16 +108,60 @@ pub async fn handle_sync(
         );
         result.indexed
     } else {
-        client
+        let bar_started = std::sync::atomic::AtomicBool::new(false);
+        let progress = |update: crate::linear::SyncProgressUpdate| {
+            use crate::linear::SyncProgressPhase as Phase;
+            match update.phase {
+                Phase::IndexingIssues | Phase::IndexComplete => {
+                    pb.set_message(format!("{} issues indexed", update.completed));
+                }
+                Phase::HydratingIssues => {
+                    if let Some(total) = update.total {
+                        if !bar_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            pb.set_style(
+                                ProgressStyle::default_bar()
+                                    .template(
+                                        "{spinner:.green} hydrating {bar:30} {pos}/{len} ({percent}%) eta {eta} {msg}",
+                                    )
+                                    .unwrap(),
+                            );
+                            pb.set_length(total as u64);
+                        }
+                        pb.set_position(update.completed as u64);
+                        if update.completed.is_multiple_of(250) && pb.is_hidden() {
+                            eprintln!("hydrated {}/{} issues", update.completed, total);
+                        }
+                    }
+                }
+                Phase::WaitingForRateLimitRetry => {
+                    pb.set_message("(rate limited — deferring remaining work)".to_string());
+                }
+                _ => {}
+            }
+        };
+        let result = client
             .sync_team(
                 db,
                 &team_key,
                 workspace,
                 do_full,
                 do_include_archived,
-                Some(&progress_cb),
+                Some(&progress),
             )
-            .await?
+            .await;
+        match result {
+            Ok(count) => count,
+            Err(error) => {
+                pb.abandon();
+                eprintln!("{} Sync stopped early: {error}", "Warning:".yellow().bold());
+                eprintln!(
+                    "Progress is saved. Run {} to inspect the queue and {} to continue.",
+                    "rectilinear status".bold(),
+                    "rectilinear sync".bold()
+                );
+                return Err(error);
+            }
+        }
     };
 
     pb.finish_with_message(format!(

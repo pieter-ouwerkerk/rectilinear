@@ -870,7 +870,7 @@ impl LinearClient {
         workspace_id: &str,
         full: bool,
         include_archived: bool,
-        progress: Option<&(dyn Fn(usize) + Send + Sync)>,
+        progress: Option<&SyncProgressCallback<'_>>,
     ) -> Result<usize> {
         self.sync_projects_for_team(db, workspace_id, team_key, include_archived)
             .await
@@ -886,18 +886,8 @@ impl LinearClient {
             .await
             .with_context(|| format!("cycle synchronization failed for team '{team_key}'"))?;
 
-        let progress_adapter = |update: SyncProgressUpdate| {
-            if matches!(
-                update.phase,
-                SyncProgressPhase::IndexingIssues | SyncProgressPhase::IndexComplete
-            ) {
-                if let Some(callback) = progress {
-                    callback(update.completed);
-                }
-            }
-        };
         let index = self
-            .sync_team_index(db, team_key, workspace_id, full, Some(&progress_adapter))
+            .sync_team_index(db, team_key, workspace_id, full, progress)
             .await?;
 
         if full {
@@ -913,7 +903,7 @@ impl LinearClient {
                 workspace_id,
                 issue_count.max(1),
                 db::HydrationPolicy::All,
-                None,
+                progress,
             )
             .await?;
 
@@ -2657,6 +2647,43 @@ mod tests {
         db.get_sync_family_state("default", "CUT", family)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn sync_team_reports_batch_hydration_progress() {
+        let _serial = serial_http_test();
+        let server = MockLinearServer::start(|request| {
+            let query = request["query"].as_str().unwrap_or_default();
+            if query.contains("comments(") {
+                return successful_comments();
+            }
+            standard_sync_response(&request).expect("unexpected GraphQL operation")
+        });
+        let client = test_client(&server.url);
+        let (db, _dir) = test_db();
+
+        let updates = Mutex::new(Vec::<SyncProgressUpdate>::new());
+        let progress = |update: SyncProgressUpdate| {
+            updates.lock().unwrap().push(update);
+        };
+        let count = runtime()
+            .block_on(client.sync_team(&db, "CUT", "default", true, true, Some(&progress)))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let updates = updates.into_inner().unwrap();
+        let batch: Vec<(usize, Option<usize>)> = updates
+            .iter()
+            .filter(|u| u.phase == SyncProgressPhase::HydratingIssues)
+            .map(|u| (u.completed, u.total))
+            .collect();
+        assert_eq!(batch, vec![(1, Some(2)), (2, Some(2))]);
+        assert!(updates
+            .iter()
+            .any(|u| u.phase == SyncProgressPhase::HydratingRelations));
+        assert!(updates
+            .iter()
+            .any(|u| u.phase == SyncProgressPhase::IndexingIssues));
     }
 
     #[test]

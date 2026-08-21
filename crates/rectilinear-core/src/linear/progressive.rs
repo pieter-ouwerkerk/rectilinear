@@ -29,6 +29,8 @@ pub enum SyncProgressPhase {
     HydratingLabels,
     HydratingRelations,
     HydratingComments,
+    /// Batch-level progress: one issue finished hydrating out of the batch.
+    HydratingIssues,
     WaitingForRateLimitRetry,
 }
 
@@ -466,6 +468,14 @@ impl LinearClient {
             let result = self
                 .hydrate_one(db, &candidate.id, workspace_id, progress)
                 .await?;
+            if let Some(callback) = progress {
+                callback(SyncProgressUpdate {
+                    phase: SyncProgressPhase::HydratingIssues,
+                    completed: index + 1,
+                    total: Some(candidates.len()),
+                    issue_id: Some(candidate.id.clone()),
+                });
+            }
             batch.retryable_failures += result.retryable_failures;
             batch.permanent_failures += result.permanent_failures;
             for resource in &result.resources {
