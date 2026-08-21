@@ -2,10 +2,12 @@ mod hydration;
 mod list;
 mod projects;
 pub mod schema;
+mod status;
 mod sync;
 pub use hydration::*;
 pub use list::*;
 pub use projects::*;
+pub use status::*;
 pub use sync::*;
 #[cfg(test)]
 pub(crate) mod test_helpers;
@@ -44,19 +46,23 @@ impl Database {
         Ok(db)
     }
 
+    /// Open without migrations or any other write. Safe to use while another
+    /// process is actively syncing the same database file (e.g. `status`).
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Failed to open database at {}", path.display()))?;
+        conn.execute_batch("PRAGMA query_only=ON;")?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
     fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         schema::run_migrations(&conn)?;
-        // A process may have exited while a resource was marked running. Make
-        // that durable work retryable on the next open instead of leaving it
-        // permanently wedged.
-        conn.execute(
-            "UPDATE issue_hydration_state
-             SET status='retryable', next_retry_at=NULL,
-                 queue_reason='retry'
-             WHERE status='running'",
-            [],
-        )?;
         Ok(())
     }
 

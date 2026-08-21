@@ -507,6 +507,7 @@ pub enum RtSyncPhase {
     HydratingLabels,
     HydratingRelations,
     HydratingComments,
+    HydratingIssues,
     WaitingForRateLimitRetry,
 }
 
@@ -708,6 +709,7 @@ fn rt_progress_phase(value: crate::linear::SyncProgressPhase) -> RtSyncPhase {
         crate::linear::SyncProgressPhase::HydratingLabels => RtSyncPhase::HydratingLabels,
         crate::linear::SyncProgressPhase::HydratingRelations => RtSyncPhase::HydratingRelations,
         crate::linear::SyncProgressPhase::HydratingComments => RtSyncPhase::HydratingComments,
+        crate::linear::SyncProgressPhase::HydratingIssues => RtSyncPhase::HydratingIssues,
         crate::linear::SyncProgressPhase::WaitingForRateLimitRetry => {
             RtSyncPhase::WaitingForRateLimitRetry
         }
@@ -1399,12 +1401,12 @@ impl RectilinearEngine {
         let api_key = self.linear_api_key_for_workspace(&workspace_id)?;
         let client = LinearClient::with_http_client(self.client().await.clone(), &api_key);
         let progress_state = &self.sync_progress;
-        let progress = move |count: usize| {
+        let progress = move |update: crate::linear::SyncProgressUpdate| {
             *progress_state.lock().unwrap() = Some(RtSyncProgress {
-                phase: RtSyncPhase::FetchingIssues,
-                completed: count as u64,
-                total: None,
-                issue_id: None,
+                phase: rt_progress_phase(update.phase),
+                completed: update.completed as u64,
+                total: update.total.map(|t| t as u64),
+                issue_id: update.issue_id,
             });
         };
         let result = client
