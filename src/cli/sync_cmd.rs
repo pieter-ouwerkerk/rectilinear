@@ -126,6 +126,7 @@ pub async fn handle_sync(
                                     .unwrap(),
                             );
                             pb.set_length(total as u64);
+                            pb.set_message("");
                         }
                         pb.set_position(update.completed as u64);
                         if update.completed.is_multiple_of(250) && pb.is_hidden() {
