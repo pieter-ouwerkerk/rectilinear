@@ -10,9 +10,11 @@ use crate::config::Config;
 use crate::db::{self, Database};
 
 mod cycles;
+mod pacing;
 mod pagination;
 mod progressive;
 mod projects;
+pub use pacing::*;
 pub use pagination::{
     LinearErrorKind, LinearOperation, LinearOperationError, SyncEvent, SyncQueryConfig,
 };
@@ -40,6 +42,7 @@ pub struct LinearClient {
     api_url: String,
     viewer_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     sync_query_config: SyncQueryConfig,
+    pacer: std::sync::Arc<RatePacer>,
 }
 
 /// A token-leased cleanup guard for sync-family state. Dropping an in-flight
@@ -490,6 +493,7 @@ impl LinearClient {
             api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
+            pacer: std::sync::Arc::new(RatePacer::default()),
         })
     }
 
@@ -501,6 +505,7 @@ impl LinearClient {
             api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
+            pacer: std::sync::Arc::new(RatePacer::default()),
         }
     }
 
@@ -515,6 +520,7 @@ impl LinearClient {
             api_url: LINEAR_API_URL.to_string(),
             viewer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
             sync_query_config: SyncQueryConfig::from_environment(),
+            pacer: std::sync::Arc::new(RatePacer::default()),
         }
     }
 
@@ -527,6 +533,11 @@ impl LinearClient {
     pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = api_url.into();
         self
+    }
+
+    /// Read-only view of the rate-limit pacing state observed from response headers.
+    pub fn rate_pacer(&self) -> &RatePacer {
+        &self.pacer
     }
 
     pub fn sync_query_config(&self) -> &SyncQueryConfig {
@@ -604,6 +615,17 @@ impl LinearClient {
             "variables": variables,
         });
 
+        let pace = self.pacer.delay(chrono::Utc::now());
+        if !pace.is_zero() {
+            if self.sync_query_config.verbose {
+                eprintln!(
+                    "sync operation={} status=pacing delay_seconds={:.1} (rate budget low)",
+                    operation,
+                    pace.as_secs_f64()
+                );
+            }
+            tokio::time::sleep(pace).await;
+        }
         let resp = self
             .client
             .post(&self.api_url)
@@ -623,6 +645,10 @@ impl LinearClient {
 
         let status = resp.status();
         let retry_after = retry_after_from_headers(resp.headers());
+        self.pacer.observe(
+            requests_remaining_from_headers(resp.headers()),
+            rate_reset_from_headers(resp.headers()).map(|until| chrono::Utc::now() + until),
+        );
         let body = resp.bytes().await.map_err(|error| {
             LinearOperationError::new(
                 LinearErrorKind::Transport,
@@ -2216,6 +2242,13 @@ fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Dura
     {
         return Some(Duration::from_secs(seconds).min(Duration::from_secs(6 * 60 * 60)));
     }
+    rate_reset_from_headers(headers)
+        .and_then(|until| until.to_std().ok())
+        .map(|until| until.min(Duration::from_secs(6 * 60 * 60)))
+}
+
+/// Time until the request budget resets, from Linear's rate-limit headers.
+fn rate_reset_from_headers(headers: &reqwest::header::HeaderMap) -> Option<chrono::Duration> {
     for name in ["x-ratelimit-requests-reset", "x-ratelimit-reset"] {
         let Some(value) = headers
             .get(name)
@@ -2231,9 +2264,16 @@ fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Dura
         };
         let now = chrono::Utc::now().timestamp().max(0) as u64;
         let seconds = if value > now { value - now } else { value };
-        return Some(Duration::from_secs(seconds).min(Duration::from_secs(6 * 60 * 60)));
+        return Some(chrono::Duration::seconds(seconds as i64));
     }
     None
+}
+
+fn requests_remaining_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("x-ratelimit-requests-remaining")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 #[cfg(test)]
@@ -2264,6 +2304,7 @@ mod tests {
     struct MockResponse {
         status: u16,
         body: String,
+        headers: Vec<(String, String)>,
     }
 
     impl MockResponse {
@@ -2271,6 +2312,7 @@ mod tests {
             Self {
                 status: 200,
                 body: body.to_string(),
+                headers: Vec::new(),
             }
         }
 
@@ -2278,7 +2320,13 @@ mod tests {
             Self {
                 status,
                 body: "{}".to_string(),
+                headers: Vec::new(),
             }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.to_string(), value.to_string()));
+            self
         }
     }
 
@@ -2373,8 +2421,13 @@ mod tests {
             500 => "Internal Server Error",
             _ => "Mock",
         };
+        let extra: String = response
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         let headers = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
             response.status,
             reason,
             response.body.len()
@@ -2684,6 +2737,36 @@ mod tests {
         assert!(updates
             .iter()
             .any(|u| u.phase == SyncProgressPhase::IndexingIssues));
+    }
+
+    #[test]
+    fn client_observes_rate_limit_headers_for_pacing() {
+        let _serial = serial_http_test();
+        let server = MockLinearServer::start(|_request| {
+            MockResponse::json(serde_json::json!({
+                "data": { "teams": {
+                    "nodes": [{ "id": "team-1", "key": "CUT", "name": "Cuttlefish" }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null }
+                }}
+            }))
+            .with_header("x-ratelimit-requests-remaining", "10")
+            .with_header(
+                "x-ratelimit-requests-reset",
+                &((chrono::Utc::now().timestamp() + 500) * 1000).to_string(),
+            )
+        });
+        let client = test_client(&server.url);
+
+        assert_eq!(
+            client.rate_pacer().delay(chrono::Utc::now()),
+            std::time::Duration::ZERO
+        );
+        runtime().block_on(client.list_teams()).unwrap();
+        let delay = client.rate_pacer().delay(chrono::Utc::now());
+        assert!(
+            delay > std::time::Duration::from_secs(30) / 2 && delay <= MAX_PACE_DELAY,
+            "expected ~50s/10 pacing delay capped at MAX_PACE_DELAY, got {delay:?}"
+        );
     }
 
     #[test]
@@ -3471,6 +3554,7 @@ mod tests {
                     }]
                 })
                 .to_string(),
+                headers: Vec::new(),
             }
         });
         let client = test_client(&server.url);
